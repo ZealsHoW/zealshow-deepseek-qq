@@ -36,6 +36,7 @@ import { createRefiner } from './qqb/memory/refine.mjs';
 import { createBackoff } from './qqb/net/backoff.mjs';
 import { createOutbox } from './qqb/net/outbox.mjs';
 import { createOneBotClient } from './qqb/net/onebot.mjs';
+import { checkSensitive, isSensitiveTool, proactiveFlavor, proactiveScaleFor, sessionTierOf, tierLabel, tierOf, tierPromptText, tiersEnabled, wakeTierBonus } from './qqb/tiers.mjs';
 import { createInboundDedup } from './qqb/net/inbound.mjs';
 import { createMood } from './qqb/persona/mood.mjs';
 import { readWatch, shouldNotifyWatch, markWatchNotified, buildWatchNotice } from './qqb/read-login-watch.mjs';
@@ -1560,7 +1561,20 @@ function loadConfig() {
         checkIntervalMinMs: 30 * 60 * 1000,
         checkIntervalMaxMs: 90 * 60 * 1000,
         idleThresholdMs: 15 * 60 * 1000,
-        probability: 0.3
+        probability: 0.3,
+        // 群里安静到这个时长（默认 6 小时）就把这次主动机会换成「打个招呼」的口味。
+        greetAfterMs: 6 * 60 * 60 * 1000
+      },
+      // 人员梯队：第一梯队 = 家里人（主人 + nightRitual.parents + first 里列的号）。
+      //   · 优先与频次：家里人的私聊/家庭群按原样，其他人间隔 ×others.intervalScale、概率 ×others.probabilityScale；
+      //   · 敏感动作权限：sensitiveTools 里那些"发出去就收不回"的动作只对第一梯队开放，别人提要求一律拒绝。
+      // 判定与拒绝文案都在 src/qqb/tiers.mjs（纯函数），这里只是默认值。
+      tiers: {
+        enabled: true,
+        first: [],
+        firstGroups: [],
+        sensitiveTools: ['qq_send_image', 'qq_send_voice', 'qq_post_qzone', 'qq_web_screenshot', 'qq_save_image'],
+        others: { intervalScale: 1.6, probabilityScale: 0.6 }
       },
       feedback: {
         maxLength: 500,
@@ -5505,7 +5519,7 @@ async function main() {
           const current = fileV2 ?? ((cfg.socialV2 && typeof cfg.socialV2 === 'object') ? cfg.socialV2 : {});
           const merged = { ...current, ...body };
           // 子对象必须是非 null 对象；null/数组/基本类型会覆盖默认值导致工具开关被绕过，这里直接保留当前值。
-          for (const sub of ['tools', 'wake', 'send', 'wait', 'proactive', 'sticker', 'feedback', 'context']) {
+          for (const sub of ['tools', 'wake', 'send', 'wait', 'proactive', 'sticker', 'feedback', 'context', 'tiers']) {
             if (body[sub] !== undefined && (body[sub] === null || typeof body[sub] !== 'object' || Array.isArray(body[sub]))) {
               merged[sub] = current[sub] ?? {};
             }
@@ -5571,7 +5585,7 @@ async function main() {
           // proactive：主动机会参数
           if (body.proactive && typeof body.proactive === 'object') {
             merged.proactive = { ...(current.proactive ?? {}), ...body.proactive };
-            for (const k of ['checkIntervalMinMs', 'checkIntervalMaxMs', 'idleThresholdMs', 'probability']) {
+            for (const k of ['checkIntervalMinMs', 'checkIntervalMaxMs', 'idleThresholdMs', 'probability', 'greetAfterMs']) {
               if (merged.proactive[k] !== undefined) {
                 const n = Number(merged.proactive[k]);
                 merged.proactive[k] = Number.isFinite(n) ? n : current.proactive?.[k] ?? 0;
@@ -5581,6 +5595,30 @@ async function main() {
             }
             if (merged.proactive.enabled !== undefined) merged.proactive.enabled = merged.proactive.enabled === true;
             if (merged.proactive.probability !== undefined) merged.proactive.probability = Math.min(1, Math.max(0, Number(merged.proactive.probability) || 0));
+          }
+          // tiers：人员梯队（第一梯队 = 家里人）。号码/群号一律转成字符串，只滤掉空值与非数字，
+          // **不判断位数**（`/^\d+$/`）：早先按 5 位起筛，配置里真写了家里人的号也会被静默丢掉 ——
+          // 判层级是全等比较，"以为设了其实没设"的失败最难查。位数由 QQ 自己保证，这里不管。
+          if (body.tiers && typeof body.tiers === 'object') {
+            const norm = (v) => (Array.isArray(v) ? v.map((x) => String(x ?? '').trim()).filter((x) => /^\d+$/.test(x)) : null);
+            const cur = current.tiers ?? {};
+            merged.tiers = { ...cur, ...body.tiers };
+            if (merged.tiers.enabled !== undefined) merged.tiers.enabled = merged.tiers.enabled === true;
+            if (merged.tiers.first !== undefined) merged.tiers.first = norm(merged.tiers.first) ?? cur.first ?? [];
+            if (merged.tiers.firstGroups !== undefined) merged.tiers.firstGroups = norm(merged.tiers.firstGroups) ?? cur.firstGroups ?? [];
+            if (merged.tiers.sensitiveTools !== undefined) {
+              merged.tiers.sensitiveTools = Array.isArray(merged.tiers.sensitiveTools)
+                ? merged.tiers.sensitiveTools.map((s) => String(s ?? '').trim()).filter(Boolean)
+                : cur.sensitiveTools;
+            }
+            if (body.tiers.others && typeof body.tiers.others === 'object') {
+              const o = { ...(cur.others ?? {}), ...body.tiers.others };
+              const num = (v, fallback) => (Number.isFinite(Number(v)) ? Number(v) : fallback);
+              merged.tiers.others = {
+                intervalScale: Math.max(1, num(o.intervalScale, 1.6)),
+                probabilityScale: Math.min(1, Math.max(0, num(o.probabilityScale, 0.6)))
+              };
+            }
           }
           // sticker：表情包体系参数归一化
           if (body.sticker && typeof body.sticker === 'object') {
@@ -7125,6 +7163,9 @@ async function main() {
           if (!v2ToolEnabled('sendVoice')) { sendJson({ ok: false, error: '工具未启用：qq_send_voice' }, 403); return; }
           if (!v2SessionAllowed(key)) { sendJson({ ok: false, error: '目标不在当前模式允许范围内' }, 403); return; }
           if (shouldBlockSilentReply(key)) { sendJson({ ok: false, error: '静默模式已开启，当前不允许发送' }, 403); return; }
+          // 梯队门禁：发语音只对第一梯队（家里人）。别人让她发 → 403，且一条都不发。
+          const tierGate = tierGuardV2(key, 'qq_send_voice');
+          if (!tierGate.ok) { sendJson({ ok: false, error: tierGate.error, tier: tierGate.tier, requester: tierGate.requester }, 403); return; }
           const keyMatch = /^(group|private):(\d+)$/.exec(key);
           if (!keyMatch) { sendJson({ ok: false, error: 'key 格式应为 group:群号 或 private:QQ号' }, 400); return; }
           const kind = keyMatch[1];
@@ -7296,6 +7337,9 @@ async function main() {
           if (req.headers['x-agent-token'] && !v2ToolEnabled('sendImage')) { sendJson({ ok: false, error: '工具未启用：qq_send_image' }, 403); return; }
           if (currentMode !== 'reserved2') { sendJson({ ok: false, error: '该接口仅 reserved2 模式可用' }, 403); return; }
           if (!req.headers['x-agent-token']) { sendJson({ ok: false, error: 'reserved2 模式发送必须携带 agent token' }, 403); return; }
+          // 梯队门禁：发图只对第一梯队（家里人）。别人让她发 → 403，且一条都不发。
+          const tierGate = tierGuardV2(key, 'qq_send_image');
+          if (!tierGate.ok) { sendJson({ ok: false, error: tierGate.error, tier: tierGate.tier, requester: tierGate.requester }, 403); return; }
           const keyMatch = /^(group|private):(\d+)$/.exec(key);
           if (!keyMatch) { sendJson({ ok: false, error: 'key 格式应为 group:群号 或 private:QQ号' }, 400); return; }
           const kind = keyMatch[1];
@@ -7783,6 +7827,32 @@ async function main() {
             return;
           }
           sendJson({ ok: true, key, tool });
+          return;
+        }
+        // ── 梯队查询（给不走桥接发信链路的工具用，例如 qq_post_qzone 直接调网关） ──
+        // 门禁逻辑只留一份：判定要看"这个会话里上一条是谁说的"，那份会话状态只活在桥接里。
+        // MCP 侧动手之前先问一句，别为 qzone 再写一套判定（两套判定必然漂移）。
+        if (req.method === 'POST' && url.pathname === '/api/socialV2/tier-check') {
+          const body = await readBody();
+          const key = String(body.key ?? '').trim();
+          const tool = String(body.tool ?? '').trim();
+          const token = String(body.token ?? req.headers['x-agent-token'] ?? '').trim();
+          if (!key || !tool) { sendJson({ ok: false, error: 'key/tool 不能为空' }, 400); return; }
+          if (!token) { sendJson({ ok: false, error: '必须携带 agent token' }, 403); return; }
+          if (!agentTokenOk(key, token)) { sendJson({ ok: false, error: 'agent token 无效' }, 403); return; }
+          if (!v2SessionAllowed(key)) { sendJson({ ok: false, error: '目标不在当前模式允许范围内' }, 403); return; }
+          const gate = tierGuardV2(key, tool);
+          sendJson({
+            ok: true,
+            allow: gate.ok,
+            key,
+            tool,
+            sensitive: isSensitiveTool(tool, cfg),
+            tier: gate.tier ?? sessionTierOf(key, cfg),
+            requester: gate.requester ?? '',
+            reason: gate.reason ?? '',
+            error: gate.ok ? null : gate.error
+          });
           return;
         }
         // ── Token 用量 / 花费（控制台专用） ──────────────────────────────────
@@ -9886,6 +9956,19 @@ async function main() {
       if (key) setupSleepTimerV2(key);
       log(`[reserved2] 唤醒配置无任何触发条件，已重置为默认配置，避免永眠`);
     }
+  }
+
+  // ── 人员梯队门禁（第一梯队 = 家里人） ─────────────────────────────────────
+  // 谁能让她做"发出去就收不回"的事（发图/发语音/发说说/截图存图）：只有第一梯队。
+  // 规则本身在 src/qqb/tiers.mjs（纯函数），这里只负责取会话状态、记日志、给出拒绝文案。
+  // 拒绝时调用方一律 403 且**什么都不发** —— 拒绝路径必须零副作用。
+  function tierGuardV2(key, tool) {
+    if (!tiersEnabled(cfg) || !isSensitiveTool(tool, cfg)) return { ok: true, allow: true };
+    const st = getSocialV2State(key);
+    const v = checkSensitive({ key, tool, cfg, st });
+    if (v.allow) return { ok: true, ...v };
+    log(`[reserved2] 梯队门禁拒绝：${key} 的 ${tool}（请求人 ${v.requester}，${tierLabel(v.tier)}）`);
+    return { ok: false, ...v, error: `这个我不做哦：${v.reason}` };
   }
 
   function getSocialV2State(key) {
@@ -12593,6 +12676,7 @@ async function main() {
       currentRoleHintV2(),
       selfIdentityTextV2(),
       familyIdentityTextV2(),
+      tierPromptText(cfg),
       capabilityHintV2(),
       LINE_ANTI_AI,
       LINE_PROACTIVE,
@@ -13018,7 +13102,7 @@ async function main() {
   function buildWakePromptV2(key, reason) {
     const roleState = readRoleState();
     const roleLine = roleState.role ? `【当前角色】${roleState.role}（完整角色卡请调用 qq_get_prompt 查看）\n\n` : '';
-    const identityLine = selfIdentityTextV2() + familyIdentityTextV2();
+    const identityLine = selfIdentityTextV2() + familyIdentityTextV2() + tierPromptText(cfg);
     const st = getSocialV2State(key);
     const tokenLine = `【会话令牌】${st.agentToken}（调用二代状态工具时请在参数中带上此令牌）\n\n`;
     const memoryText = formatMemoryV2(st);
@@ -13112,7 +13196,17 @@ async function main() {
       const imgHint = Math.random() < 0.5
         ? '这次优先考虑配一张图：用 qq_image_search 搜「晚霞 / 小猫 / 壁纸 / 风景 / 搞笑」挑一张，qq_send_image(image=<图片地址>, caption="一句话") 发出来，图下配一句短话；一天里发图不用太多，两三次刚好。'
         : '如果有合适的图也可以顺手发一张（qq_image_search + qq_send_image）；没有就纯文字，不必勉强。';
-      return `${base}【主动机会】${key}\n原因：群里已经安静了一段时间，这是一次你可以主动冒泡的机会。\n优先主动开个话题、追问上次没聊完的事、分享一个刚想到的想法；如果一时想不到，可以用 mcp__web-search-safe__web_search 搜一下当前热点/时事/网络热梗，再结合记忆里的群友兴趣挑一个自然角度。${imgHint}\n只要内容自然，就大胆开口；如果实在没话想说，再安静收尾（qq_mark_read 或 qq_set_wake_config）。`;
+      // 群聊安静够久 → 这次换"打招呼"口味（主人在群里特意要的那件事）；私聊则说清是私聊，
+      // 别再说"群里安静了"（原来那句对私聊是错的）。
+      const stForFlavor = socialV2.conversations.get(canonicalV2Key(key)) ?? null;
+      const idleMs = Date.now() - Number(stForFlavor?.lastIncomingAt || 0);
+      const flavor = proactiveFlavor({ key, idleMs, cfg });
+      const where = flavor.isGroup ? '群里' : '这个私聊里';
+      if (flavor.flavor === 'greet') {
+        const hours = Math.max(1, Math.round(idleMs / 3600000));
+        return `${base}【主动机会 · 打个招呼】${key}\n原因：${where}已经安静了差不多 ${hours} 小时，这次优先**主动打个招呼**：问一句近况、道个早晚安、说说你刚想到的事或刚看到的东西都行，不用等别人先开口。\n打招呼要自然、短一点，别写成客服通知；一句就够，不用连着刷好几条。有特别合适的图也可以配一张（qq_image_search + qq_send_image），没有就纯文字。\n如果确实没什么想说的，再安静收尾（qq_mark_read 或 qq_set_wake_config）。`;
+      }
+      return `${base}【主动机会】${key}\n原因：${where}已经安静了一段时间，这是一次你可以主动冒泡的机会。\n优先主动开个话题、追问上次没聊完的事、分享一个刚想到的想法；如果一时想不到，可以用 mcp__web-search-safe__web_search 搜一下当前热点/时事/网络热梗，再结合记忆里的群友兴趣挑一个自然角度。${imgHint}\n只要内容自然，就大胆开口；如果实在没话想说，再安静收尾（qq_mark_read 或 qq_set_wake_config）。`;
     }
     if (reason === 'browse') {
       return `${base}【自己刷一会儿】${key}\n原因：桥接给了你一段自由时间（人格卡第六节说你会一天刷三五次视频/看点东西）。这次可以用 qq_read_page 读公开页面正文（热榜、热搜），想看画面再用 qq_web_screenshot 截图（抖音热榜 https://www.douyin.com/hot 、微博热搜 https://s.weibo.com/top/summary 之类），或用 mcp__web-search-safe__web_search 搜点热点/梗。\n注意：**浏览器里是主人自己的账号（已经登录好了，直接用）**；只读不互动——不点赞/评论/私信/关注、不绕验证码，也**别去登录别人的账号**。要是 qq_read_page 提示登录态过期，别硬刷，桥接会提醒主人去重新扫码。图片/视频截图可以用 qq_describe_image 看懂再说。看到真的有意思、值得说的就开口聊一句（可以说说刚看到的，也可以纯吐槽）；没有值得说的就什么都别发，安静收尾。每次最多看一两个页面，别刷太久。`;
@@ -13129,7 +13223,7 @@ async function main() {
   function buildWakeReminderPromptV2(key) {
     const roleState = readRoleState();
     const roleLine = roleState.role ? `【当前角色】${roleState.role}（完整角色卡请调用 qq_get_prompt 查看）\n\n` : '';
-    const identityLine = selfIdentityTextV2() + familyIdentityTextV2();
+    const identityLine = selfIdentityTextV2() + familyIdentityTextV2() + tierPromptText(cfg);
     const st = getSocialV2State(key);
     const tokenLine = `【会话令牌】${st.agentToken}（调用二代状态工具时请在参数中带上此令牌）\n\n`;
     const preSleepMs = Math.max(0, Number(cfg.socialV2?.wake?.preSleepWaitMs) || 300000);
@@ -13347,9 +13441,16 @@ async function main() {
   };
 
   // 唤醒原因可能带子类型（如 keyword:小鲸鱼、speaker:昵称），取冒号前的基名计算优先级。
-  function wakePriorityV2(reason) {
+  // 传了 key 就叠加上「梯队加成」：家里人的频道、或这次说话的**人**是家里人，优先级更高 ——
+  // 这一条就是"先理爸爸妈妈"在合并窗口里的落点（陌生人的 @ 不该压过家里人的私聊）。
+  function wakePriorityV2(reason, key = null) {
     const base = String(reason ?? '').split(':')[0];
-    return WAKE_PRIORITY[base] ?? 0;
+    const p = WAKE_PRIORITY[base] ?? 0;
+    if (!key) return p;
+    try {
+      const st = socialV2.conversations.get(canonicalV2Key(key)) ?? null;
+      return p + wakeTierBonus(key, cfg, st ?? {});
+    } catch { return p; }
   }
 
   // 与「未读消息」无关的唤醒原因（定时器/引导）。这些原因在会话繁忙时被暂存后，
@@ -13374,8 +13475,9 @@ async function main() {
     const st = getSocialV2State(key);
     if (st.pendingWakeTimer) {
       // 合并窗口内已有待发送唤醒：按优先级升级最终原因，避免先概率后 @ 却仍按概率唤醒。
+      // 带上 key：家里人发来的消息会带梯队加成，能压过同窗口里陌生人的 @。
       const cur = st.pendingWakeReason || reason;
-      if (wakePriorityV2(reason) > wakePriorityV2(cur)) {
+      if (wakePriorityV2(reason, key) > wakePriorityV2(cur, key)) {
         st.pendingWakeReason = reason;
         log(`[reserved2] 合并窗口内升级唤醒原因 ${key}: ${cur} -> ${reason}`);
       }
@@ -13507,7 +13609,11 @@ async function main() {
     const p = cfg.socialV2?.proactive ?? {};
     const min = Math.max(60 * 1000, Number(p.checkIntervalMinMs) || 30 * 60 * 1000);
     const max = Math.max(min, Number(p.checkIntervalMaxMs) || 90 * 60 * 1000);
-    const delay = Math.floor(min + Math.random() * (max - min));
+    // 梯队（"爸爸妈妈第一梯队，其他人往后排"）：家里人的频道按原样，其他人间隔拉长、概率打折。
+    const scale = proactiveScaleFor(key, cfg, st);
+    const minScaled = Math.round(min * scale.intervalScale);
+    const maxScaled = Math.max(minScaled, Math.round(max * scale.intervalScale));
+    const delay = Math.floor(minScaled + Math.random() * (maxScaled - minScaled));
     st.proactiveTimer = setTimeout(() => {
       st.proactiveTimer = null;
       ensureWakeableV2(st, { key });
@@ -13515,6 +13621,7 @@ async function main() {
       const idle = Date.now() - (st.lastIncomingAt || 0);
       const probBase = Number(p.probability);
       let prob = Math.min(1, Math.max(0, Number.isFinite(probBase) ? probBase : 0.4));
+      prob *= scale.probabilityScale;
       const pendingThoughts = Array.isArray(st.pendingThoughts) ? st.pendingThoughts.filter((t) => t && (!t.expiresAt || Date.now() < Number(t.expiresAt))).length : 0;
       if (pendingThoughts > 0) prob = Math.min(1, prob * 1.4);
       if (st.lastAiReplyAt && Date.now() - Number(st.lastAiReplyAt) < 30 * 60 * 1000) prob *= 0.5;
@@ -13533,7 +13640,7 @@ async function main() {
       scheduleProactiveCheckV2(key);
     }, delay);
     st.proactiveTimer.unref?.();
-    log(`[reserved2] 已安排主动机会检查 ${key}，约 ${Math.round(delay / 60000)}min 后`);
+    log(`[reserved2] 已安排主动机会检查 ${key}，约 ${Math.round(delay / 60000)}min 后（${tierLabel(scale.tier)}）`);
   }
 
   // R2 行为模块「自己刷一会儿」（人格卡第六节：一天三五次，只看公开页面，不登录）。

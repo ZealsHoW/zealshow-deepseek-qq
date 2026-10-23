@@ -123,7 +123,9 @@ await test('引用：replyToMessageId 命中会话内消息 → 段顺序 reply 
   const { h, st, token } = await fixture();
   try {
     st.recentMessages.push({
-      seq: 7001, messageId: '9001', sender: '朋友', text: '看这个',
+      // userId 是真话：群消息里"最后说话的人"决定这次请求算谁的（梯队门禁按人算）。
+      // 这里是主人（夹具 ownerQQ=123）在群里让她发图 → 第一梯队，放行。
+      seq: 7001, messageId: '9001', sender: '朋友', userId: '123', text: '看这个',
       plain: '看这个', time: Date.now(), media: [], hasMedia: false,
       forwardIds: [], hasForward: false, isSelf: false, isOwner: false
     });

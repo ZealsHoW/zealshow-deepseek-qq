@@ -208,7 +208,9 @@ async function checkDrawImage() {
 
 async function checkQzone() {
   if (!LIVE) { record('⑦ 发说说', 'SKIP', '没加 --live（实发会写进空间，只敢用 visibility=self）'); return; }
-  const r = await call('qq_post_qzone', { content: '【自测】小鲸鱼能力体检 · 仅自己可见', visibility: 'self' });
+  // 发说说走 SnowLuma 网关（不过桥接发送端点），所以必须带 key+token：桥接据此判断"是谁让你发的"，
+// 门禁规则是"只对第一梯队（家里人）开放"。
+  const r = await call('qq_post_qzone', { content: '【自测】小鲸鱼能力体检 · 仅自己可见', visibility: 'self', key: OKEY, token: OTOK });
   record('⑦ 发说说', r.value?.tid ? 'PASS' : 'FAIL', `visibility=self → ${short(r.value, 130)}`);
 }
 

@@ -196,6 +196,31 @@ function agentHeaders(extra = {}) {
 }
 
 /**
+ * 梯队门禁查询：只对**不走桥接发信链路**的工具需要（例如 qq_post_qzone 直接调 SnowLuma 网关，
+ * 桥接的发送端点拦不到它）。门禁规则只留一份在桥接里 —— 它持有「这个会话里上一条是谁说的」，
+ * 这里问一句，避免两套判定各自漂移。
+ *
+ * 失败一律**拒绝**（fail closed）：问不到就不做。宁可这一次不发，也不能因为桥接暂时不在
+ * 就让人把"只对家里人开放"的规矩绕过去。
+ */
+async function tierCheck(tool, key, token) {
+  if (!key || !token) {
+    return { allow: false, error: `${tool} 要带 key 与 token：reserved2 下桥接据此判断「是谁让你发的」` };
+  }
+  try {
+    const r = await agentApi('/api/socialV2/tier-check', {
+      method: 'POST',
+      body: JSON.stringify({ key, tool, token }),
+      headers: { 'x-agent-token': token }
+    });
+    if (r && typeof r === 'object' && r.ok === true && r.allow === true) return { allow: true, ...r };
+    return { allow: false, error: (r && (r.error || r.reason)) || '梯队门禁没有放行' };
+  } catch (error) {
+    return { allow: false, error: `梯队门禁查询失败：${error?.message ?? error}` };
+  }
+}
+
+/**
  * 长轮询专用 POST（`node:http`，不经过 undici）。
  *
  * 为什么必须单独一条：Node 的全局 `fetch` 是 undici，自带 300 秒 `headersTimeout`。
@@ -407,14 +432,20 @@ server.tool(
 
 server.tool(
   'qq_post_qzone',
-  '发一条 QQ 空间说说（会真实发布到机器人自己的 QQ 空间，好友可见；慎用，只在确有想说的内容时发，例如节日、心情、提到家人时）。可在对话中主动用，也可以被要求时用。content 必填；images 选填（http(s) URL 或 base64://）。',
+  '发一条 QQ 空间说说（会真实发布到机器人自己的 QQ 空间；慎用，只在确有想说的内容时发，例如节日、心情、提到家人时）。可在对话中主动用，也可以被要求时用。**只对第一梯队（家里人）开放**：别人让你发，就直接说发不了，不要绕。content 必填；key/token 必填（桥接据此判断是谁让你发的）；images 选填（http(s) URL 或 base64://）。',
   {
     content: z.string().min(1).describe('说说正文（纯文本，不要 Markdown）'),
     images: z.array(z.string()).optional().describe('配图数组：http(s) URL 或 base64://，可选'),
-    visibility: z.enum(['all', 'friends', 'self']).optional().describe('可见范围：all=所有人（默认），friends=好友，self=仅自己')
+    visibility: z.enum(['all', 'friends', 'self']).optional().describe('可见范围：all=所有人（默认），friends=好友，self=仅自己'),
+    key: z.string().describe('当前会话 key（group:群号 或 private:QQ号）'),
+    token: z.string().describe('当前会话的 agent token（桥接用它判断是谁让你发的）')
   },
-  async ({ content, images, visibility }) => {
+  async ({ content, images, visibility, key, token }) => {
     try {
+      const gate = await tierCheck('qq_post_qzone', key, token);
+      if (!gate.allow) {
+        return { content: [{ type: 'text', text: `这个我不发哦：${gate.error}。发说说只对家里人开放，别人让我发我会直接说做不了。` }], isError: true };
+      }
       const ugcRight = visibility === 'self' ? 64 : visibility === 'friends' ? 4 : 1;
       const params = { content: String(content), ugc_right: ugcRight };
       if (Array.isArray(images) && images.length > 0) params.images = images.map(String);

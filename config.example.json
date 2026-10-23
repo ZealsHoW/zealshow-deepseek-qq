@@ -251,7 +251,24 @@
       "checkIntervalMinMs": 1800000,
       "checkIntervalMaxMs": 5400000,
       "idleThresholdMs": 900000,
-      "probability": 0.4
+      "probability": 0.4,
+      "greetAfterMs": 21600000
+    },
+    "tiers": {
+      "enabled": true,
+      "first": [],
+      "firstGroups": [],
+      "sensitiveTools": [
+        "qq_send_image",
+        "qq_send_voice",
+        "qq_post_qzone",
+        "qq_web_screenshot",
+        "qq_save_image"
+      ],
+      "others": {
+        "intervalScale": 1.6,
+        "probabilityScale": 0.6
+      }
     },
     "feedback": {
       "maxLength": 500,
