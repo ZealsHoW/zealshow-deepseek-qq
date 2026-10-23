@@ -1,0 +1,127 @@
+// scripts/test-qqb-memory-live.mjs —— 长期记忆接线层（qqb/memory/live.mjs）的回归测试。
+// 覆盖：分层映射与隔离、去重合并、群友印象删除、清空会话、坏库降级不抛错、注入块长度上限。
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import test from 'node:test';
+
+import { VERSION, canonicalScope, createLiveMemory, layerForKey, layersForSession } from '../src/qqb/memory/live.mjs';
+
+const OWNER = '1000000001';
+
+function tempRoot() {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'qqb-live-'));
+  fs.mkdirSync(path.join(root, 'state'), { recursive: true });
+  return root;
+}
+
+function live(root, extra = {}) {
+  return createLiveMemory({ root, ownerQQOf: () => OWNER, ...extra });
+}
+
+test('分层映射：群聊 group / 主人私聊 private / 其它私聊 normal，key 去前导零', () => {
+  assert.equal(VERSION, '0.1.0');
+  assert.equal(canonicalScope('group:0900000001'), 'group:900000001');
+  assert.equal(canonicalScope('private:01000000001'), 'private:1000000001');
+  assert.equal(layerForKey('group:900000001', OWNER), 'group');
+  assert.equal(layerForKey('private:1000000001', OWNER), 'private');
+  assert.equal(layerForKey('private:1000000003', OWNER), 'normal');
+  assert.equal(layerForKey('奇怪的key', OWNER), 'normal');
+  assert.deepEqual(layersForSession('private:1000000001', OWNER), ['private', 'normal']);
+  assert.deepEqual(layersForSession('private:1000000003', OWNER), ['normal']);
+  assert.deepEqual(layersForSession('group:900000001', OWNER), ['group']);
+});
+
+test('写入后可召回；合并同一条事实；群聊记忆不会漏进私聊', () => {
+  const root = tempRoot();
+  const mem = live(root);
+  const first = mem.rememberSocialEvent({ key: 'group:900000001', category: 'activeTopic', content: '爸爸说明天带我去吃火锅' });
+  assert.equal(first.action, 'inserted');
+  const again = mem.rememberSocialEvent({ key: 'group:900000001', category: 'activeTopic', content: '  爸爸说明天带我去吃火锅  ' });
+  assert.equal(again.action, 'merged');
+  assert.equal(again.id, first.id);
+
+  const groupBlock = mem.block({ key: 'group:900000001' });
+  assert.match(groupBlock, /记得的事/);
+  assert.match(groupBlock, /火锅/);
+
+  // 别的私聊（normal 层）看不到群聊记忆
+  assert.equal(mem.block({ key: 'private:1000000003' }), '');
+  // 主人私聊也看不到 group 层
+  assert.equal(mem.block({ key: 'private:1000000001' }), '');
+  mem.close();
+});
+
+test('主人私聊记忆只在自己的会话里可见（private 层不外泄）', () => {
+  const root = tempRoot();
+  const mem = live(root);
+  mem.rememberSocialEvent({ key: 'private:1000000001', category: 'memberImpression', content: '爱吃辣', extra: { target: '妈妈' } });
+  const ownerBlock = mem.block({ key: 'private:1000000001' });
+  assert.match(ownerBlock, /印象/);
+  assert.match(ownerBlock, /爱吃辣/);
+  assert.equal(mem.block({ key: 'group:900000001' }), '');
+  assert.equal(mem.block({ key: 'private:1000000003' }), '');
+  mem.close();
+});
+
+test('群友印象可以按 target 删除；清空会话只影响该会话', () => {
+  const root = tempRoot();
+  const mem = live(root);
+  mem.rememberSocialEvent({ key: 'group:900000001', category: 'memberImpression', content: '声音很大', extra: { target: '小天才' } });
+  mem.rememberSocialEvent({ key: 'group:900000001', category: 'activeTopic', content: '在聊期末考试' });
+  mem.rememberSocialEvent({ key: 'group:900000002', category: 'activeTopic', content: '另一个群的话题' });
+
+  const removed = mem.forgetSocialEvent({ key: 'group:900000001', category: 'memberImpression', extra: { target: '小天才' } });
+  assert.equal(removed, 1);
+  const block = mem.block({ key: 'group:900000001' });
+  assert.doesNotMatch(block, /声音很大/);
+  assert.match(block, /期末考试/);
+
+  const cleared = mem.clearScope('group:900000001');
+  assert.ok(cleared >= 1);
+  assert.equal(mem.block({ key: 'group:900000001' }), '');
+  // 另一个群没被牵连
+  assert.match(mem.block({ key: 'group:900000002' }), /另一个群的话题/);
+  mem.close();
+});
+
+test('注入块有长度上限，内容被截断而不是无限膨胀', () => {
+  const root = tempRoot();
+  const mem = live(root);
+  for (let i = 0; i < 20; i += 1) {
+    mem.rememberSocialEvent({
+      key: 'group:900000001',
+      category: 'activeTopic',
+      content: `第${i}条很长的记忆内容`.padEnd(60, '，补充说明'),
+    });
+  }
+  const block = mem.block({ key: 'group:900000001', limit: 10, maxChars: 300 });
+  assert.ok(block.length <= 300, `块长度 ${block.length} 超过上限`);
+  mem.close();
+});
+
+test('记忆库打不开时全部降级：不抛错、返回空、可查询错误原因', () => {
+  const root = tempRoot();
+  // 用一个同名目录占住 memory.db 的位置，逼 openStore 失败
+  fs.mkdirSync(path.join(root, 'state', 'memory.db'), { recursive: true });
+  const mem = live(root);
+  assert.equal(mem.available(), false);
+  assert.ok(mem.error(), '应能读到失败原因');
+  assert.equal(mem.rememberSocialEvent({ key: 'group:900000001', category: 'activeTopic', content: '写不进去' }), null);
+  assert.equal(mem.block({ key: 'group:900000001' }), '');
+  assert.equal(mem.forgetSocialEvent({ key: 'group:900000001', category: 'activeTopic', content: '写不进去' }), 0);
+  assert.equal(mem.clearScope('group:900000001'), 0);
+  assert.equal(mem.stats(), null);
+  mem.close();
+});
+
+test('并发/连续调用同一个库时不会重复打开（缓存生效）', () => {
+  const root = tempRoot();
+  const mem = live(root);
+  const a = mem.stats();
+  const b = mem.stats();
+  assert.equal(a.path, b.path);
+  assert.equal(mem.stats().total, 0);
+  mem.close();
+});
