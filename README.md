@@ -770,11 +770,29 @@ curl -s -X POST http://127.0.0.1:3100/api/socialV2/night-greet \
 - 手动跑/查归档：`npm run extras:collect`（采一轮）/ `npm run extras:status`（看归档现状）/ `npm run extras:recent`（最近 20 条，`-- --recent 50 --peer private:123456789` 可调）/ `npm run extras:search -- 关键词`（全文检索，可配 `--limit` / `--role`）；`--dry-run` 只统计、`--no-summary` 不烧 token、`--watch` 常驻。
 - 计划任务：`qq-bridge-memory-collector` 每 5 分钟跑 `scripts\qq-extras-collector-task.bat`，自己的日志在 `state/qq-extras-collector.log`（node 侧保留最后 5000 行）。
 - 想关掉：`memoryLog.enabled = false`（桥接不再写流水，采集器自然没东西可采）。
-- 插件自带的 MCP server（`mcp-qq-extras`，让 AI 自己查归档）由插件自己的 bundle patch 挂上（`command: npx`，DSH 的 MCP SDK 用 cross-spawn，Windows 下 `npx.cmd` 能被解析），**装完要重启 DSH 才生效**；它找桥接目录靠 `QQ_BRIDGE_DIR`（默认 `~/qq-bridge`，本机已设成桥接目录）、找归档目录靠 `QQ_EXTRAS_DATA`（默认 `~/.dsh/qq-memory`；DSH 会把 `DSH_*` 这类变量从子进程环境里过滤掉，`QQ_*` 能透传）。
-- 回归：`npm run test:qq-extras` —— 行格式、插件正则兼容、解析正反例、写入上限、源码接线，以及**夹具内端到端**（真跑 `handleIncoming` + `recordSentMessagesV2`，断言 `state/qq-memory.log` 里正好那三行）。
+- 插件自带的 MCP server（`mcp-qq-extras`，让 AI 自己查归档、发语音/表情包、画图）**由本仓库的启动壳挂上**：`npm run extras:patch` 会把插件 `cordis.patch.yml` 里的 `command: npx -y dsh-qq-extras@0.1.0` 换成 `node scripts/qq-extras-mcp.mjs`——这个壳会在加载插件 `mcp.mjs` **之前**补齐上游漏发的 `lib/comfy.mjs`（源文件在 `dsh/qq-extras-patch/lib/comfy.mjs`，逐字节比对，缺了/被换过都会补），并把 `QQ_BRIDGE_DIR` 默认指到本仓库。**打完补丁要重启 DSH 才生效**（bundle 在启动时读）；`dsh plugin` 重装插件会覆盖插件目录里这两处改动，重跑一次 `npm run extras:patch` 即可，`npm run extras:patch:check` 用来探测漂移（需要打补丁时 exit 1，适合挂进日常自检）。找归档目录靠 `QQ_EXTRAS_DATA`（默认 `~/.dsh/qq-memory`；DSH 会把 `DSH_*` 这类变量从子进程环境里过滤掉，`QQ_*` 能透传）。
+- 画图（`image_generate` / `image_models`，需要本机有 ComfyUI）：`dsh/qq-extras-patch/lib/comfy.mjs` 就是上游漏发模块的规范副本，四个风格（`anime` Animagine XL 4.0 / `anime-sd15` Counterfeit V2.5 / `realistic` Realistic Vision V5.1 / `general` SDXL Base）按 ComfyUI `/object_info` 里的**真实清单**解析 checkpoint（也认 `COMFYUI_CHECKPOINT_<STYLE>` 与 `COMFYUI_MODELS_DIR`），尺寸/步数按底模给（SD1.5 不给 1024），产物落 `<DATA_DIR>/images/`。ComfyUI 没起来、或清单里没有这个模型时给中文错误说明该怎么办，**不会**退回"随便找一张图"。
+- 回归：`npm run test:qq-extras`（归档链路：行格式、插件正则兼容、解析正反例、写入上限、源码接线，以及**夹具内端到端**——真跑 `handleIncoming` + `recordSentMessagesV2`，断言 `state/qq-memory.log` 里正好那三行）+ `npm run test:qq-extras-mcp`（comfy 纯模块、假 ComfyUI 端到端、启动壳/补丁状态、以及**真 stdio MCP 握手**：initialize + tools/list + 真调 `memory_stats` / `image_models`）；本机没装插件时后两层自动 SKIP，别的机器上也能跑。
+- 挂到**正在运行的那个 profile**：插件包装进 profile（`dsh plugin --profile <名字> add dsh-qq-extras`）之后，要么把 `dsh-qq-extras` 加进该 profile `package.json` 的 `dsh.profile.bundles`（走插件自带的 bundle patch），要么——本机 DSH Desktop 用的 `desktop` profile 就是这样，插件装在 `web` profile、桌面 profile 只借它——直接在该 profile 的 `cordis.patch.yml`（"profile patch 层"，在 bundle 层之后应用）末尾插一条，**不会**和别的层重复注册：
+  ```yaml
+  - insert:
+      - id: mcp-qq-extras
+        name: '@deepseek-ai/dsh-mcp-client'
+        config:
+          serverName: qq-extras
+          transport: stdio
+          command: 'C:\Program Files\nodejs\node.exe'
+          args:
+            - 'D:\34825\zhuomian\youqq\qq-bridge\scripts\qq-extras-mcp.mjs'
+            - '--plugin-dir'   # 插件就装在这个 profile 里时，这两行可以省掉（壳会自己找）
+            - 'C:\Users\34825\.dsh\profiles\web\node_modules\dsh-qq-extras'
+          toolCallTimeoutMs: 300000
+  ```
+  本机已按上面这段挂到 `~/.dsh/profiles/desktop/cordis.patch.yml`（原文备份 `cordis.patch.yml.orig-qqextras`），**重启 DSH 后 `mcp-qq-extras` 的 12 个工具才会出现**；那条命令行本身由 `npm run test:qq-extras-mcp` 的第四层真握手覆盖（`--plugin-dir` 就是这里写的值）。
 - 已知限制：
   - 流水只在 **reserved2 模式**下写（当前运行模式）。老式 chat / closed-agent 走的是另一条入站分支，不写这份流水。
-  - **`dsh-qq-extras@0.1.0` 的 MCP server 起不来**（实测 2026-10-24）：发布的 tarball 里 `mcp.mjs:11` 要 `import { generate, listModels, serverUp } from './lib/comfy.mjs'`，但包里没有 `lib/comfy.mjs`（`lib/` 只有 archive/common/images/onebot/tts），直接跑必 `ERR_MODULE_NOT_FOUND: …/lib/comfy.mjs`；npm 上目前也只有 `0.0.0-stage` 与 `0.1.0` 两个版本，没有可升级的修好的版本。**影响面**：重启 DSH 后 `mcp-qq-extras` 起不来，`memory_*` / 表情包 / 语音 / ComfyUI 绘图这些 MCP 工具用不上；**归档链路不受影响**（我们的采集器只 import `lib/archive.mjs` 与 `summarize.mjs`，都不碰 `comfy.mjs`），查归档用上面的 `extras:recent` / `extras:search`。
+  - ~~**`dsh-qq-extras@0.1.0` 的 MCP server 起不来**~~（**本仓库已修**，实测 2026-10-24）：上游 tarball 里 `mcp.mjs:11` 无条件 `import { generate, listModels, serverUp } from './lib/comfy.mjs'`，而包里没有 `lib/comfy.mjs`（`lib/` 只有 archive/common/images/onebot/tts）⇒ 直接跑必 `ERR_MODULE_NOT_FOUND: …/lib/comfy.mjs`，**后果不是少了画图工具，而是一个工具都没有**（stdio MCP 起不来 ⇒ `memory_*` 上下文增强、表情包、语音、绘图全部连坐）；npm 上只有 `0.0.0-stage` 与 `0.1.0`，没有修好的版本可升。修法 = 规范副本 + 自愈启动壳 + `npm run extras:patch`（见上），`npm run test:qq-extras-mcp` 里有一层**真 stdio 握手**盯着它不再复发；上游发修好的版本后 `npm run extras:patch -- --revert` 可以还原。**归档链路本来就不受影响**（采集器只 import `lib/archive.mjs` 与 `summarize.mjs`，都不碰 `comfy.mjs`）。
+  - 画图要本机 ComfyUI 在 `127.0.0.1:8188`（`COMFYUI_URL` 可改）且装了对应 checkpoint；ComfyUI 没装不影响归档、语音、表情包这些工具（`image_models` 会如实报 `online: false`）。
 
 ## 人员梯队与敏感动作权限（第一梯队 = 家里人）
 

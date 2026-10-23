@@ -191,8 +191,10 @@ async function main() {
     return 0;
   }
 
-  // 归档查询：插件的 memory_* 工具要等它的 MCP server 起来才可用（0.1.0 的 mcp.mjs 缺
-  // lib/comfy.mjs，起不来），所以这里直接读插件自己的归档库，给出等价的命令行入口。
+  // 归档查询：直接读插件自己的归档库，给出与 MCP 的 memory_* 等价的命令行入口（不依赖 stdio MCP
+  // 起没起来）。0.1.0 的 mcp.mjs 缺 lib/comfy.mjs 那个上游缺陷现在由 scripts/patch-qq-extras.mjs
+  // + scripts/qq-extras-mcp.mjs 启动壳修掉了，但这里仍然走库函数——命令行查归档不该被 DSH 的
+  // MCP 进程状态牵连。
   const queryPeer = typeof args.peer === 'string' ? args.peer : '';
   if (args.recent) {
     const limit = Math.max(1, Number(typeof args.recent === 'string' ? args.recent : args.limit) || 20);
