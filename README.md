@@ -365,20 +365,21 @@ WARN [Hook] process enumeration timed out after 4000ms (worker abandoned)
 桥接现在对此做两件事：
 
 1. **主信号**：每 30 秒一次的 `meta_event/heartbeat` 载荷里的 `status.good`（SnowLuma 对「QQ → 原生 hook → 我」这条**接收链路**的自评，静默约 105 秒后翻 `false`）。心跳是 SnowLuma 自己的定时器无条件发的，所以这条信号免费且及时，且不需要较新的运行时。
-   兜底：每 60 秒问一次 `get_status`（`{online, good}`）。加分项：`bot_status`（账号会话上下线，**SnowLuma 1.14.20 才真的有**）+「距最近一个事件包的时长」（只能证明进程/WS 还活着，**不能**证明收得到 QQ 数据 —— 心跳会一直来）。
+   兜底：每 60 秒问一次 `get_status`（`{online, good}`）。加分项：`bot_status`（账号会话上下线，**SnowLuma 1.14.20 起有，2.x 线同样有**：本机 2.0.3 / 2.1.1 的 `index.mjs` 里都是 3 处）+「距最近一个事件包的时长」（只能证明进程/WS 还活着，**不能**证明收得到 QQ 数据 —— 心跳会一直来）。
    > ⚠️ **不要用 `get_login_info` 取 `good`**：它只返回 `{user_id, nickname}`，而 SDK 不校验 data 载荷 ⇒ 不会报错、`good` 永远是 `null`、这条判断变成永不触发的死代码。（本功能的第一版实现正是这么写错的，回归里已加反面断言钉住。）
 2. 判定退化时：日志打**明确指向 SnowLuma `[Hook]`** 的警告、控制台「运行总览」出现 `SnowLuma 上游` 卡片、
    「访问与安全」页出现告警条，`GET /api/status` 的 `snowluma` 字段给出 `degraded` / `good` / `hint`。
 
-排查顺序：控制台看 `SnowLuma 上游` 卡片 → 看 SnowLuma 的 `logs/snowluma-*.log` 里的 `[Hook]` 行 → 再考虑升级 SnowLuma（**升级不换原生组件，见下**）。
+排查顺序：控制台看 `SnowLuma 上游` 卡片 → 看 SnowLuma 的 `logs/snowluma-*.log` 里的 `[Hook]` 行 → 再考虑升级 SnowLuma（**升级换不换原生组件要看版本线，见下**）。
 
 ### 版本要求
 
 | 组件 | 要求 | 说明 |
 | --- | --- | --- |
-| SnowLuma **运行时**（QQ 网关本体） | **1.14.20 已实测**（1.14.9 亦兼容） | **实测记录（2026-10-03，SnowLuma 1.14.20 + QQ 在线）**：包 SHA256 与官方发布摘要一致；心跳 `status.good=true`／`interval=30000`；桥接走完「首次 1006 → 自愈 WS token → 已连接」；收到群消息（`lastPacketKind: message/group`）；完整往返成功（唤醒 → DSH 建会话挂 `qq-chat-v2` → 工具发送 1/1 条 → 实际发出两条回复）。 ⚠️ **升级运行时不会更换注入用的原生组件**：实测 `native/snowluma-win32-x64.{dll,node}` 与 `websocket-win32-x64.node` 在 **1.14.9 与 1.14.20 之间逐字节完全相同**（三方对比：官方 1.14.9 包 == 本机安装 == 官方 1.14.20 包），变的只有 `index.mjs`（+414 KB）等 JS 层。所以**升级能带来 OneBot 事件流水线、收发与新区块链路上的修复（`bot_status`、markdown 带 text、事件种类订阅更全），但不会修「原生 hook 挂不上 QQ」这类问题** —— 那种要走 SnowLuma 自己的排查。**升级 SnowLuma 是使用者自己的事**：本桥接只探测、不部署（见 [LICENSE](LICENSE) 与 [RULES.md](RULES.md)） |
-| `@snowluma/sdk` / `@snowluma/mcp`（本仓库依赖） | 已钉 `^1.14.20` | 客户端库；OneBot v11 是稳定契约，新库可连旧运行时（本项目实测：库 1.14.20 + 运行时 1.14.9 可正常收发） |
-| `bot_status`（账号上下线） | **1.14.20 有；1.14.9 没有** | 逐一核对的只有这两个版本：`bot_status` 在 1.14.9 的 `index.mjs` 里出现 **0** 次、1.14.20 里 **3** 次（带 `sub_type`/`user_id`）。**具体从哪个版本引入未逐版核对**。桥接对老运行时**优雅降级**：订阅不到就只靠心跳 `good` 与 `get_status` |
+| SnowLuma **运行时**（QQ 网关本体） | **2.1.1 已实测**（2026-10-24）；2.0.3 是此前的长期运行版本；1.14.9 / 1.14.20 是历史记录 | **实测记录（2026-10-24，SnowLuma 2.0.3 → 2.1.1 + QQ 在线）**：`get_version_info` = `2.1.1-node`、`protocol_version` 仍 **v11**（桥接依赖的 OneBot 契约没变）；升级只替换官方清单里的 9 个运行时条目，`config/`、`data/`（消息库/记忆库）、QQ 登录态**一律保留**（重启后立刻 `[Hook] login detected` + `pipe connected`，**无需重新扫码**）；桥接用到的 **29 个 OneBot action 名在两版里出现次数完全一致，没有丢失**；心跳仍是 `meta_event/heartbeat` + `status:{online,good}` + `interval:30000`；两个适配器的 `reportSelfMessage:false` 仍被尊重 —— **自发消息不会推给桥接**（隔离实测：直接调网关 `send_private_msg`，25 秒内桥接活动日志与 bridge.log 零新增。这条很重要：私聊 `message_sent` 的 `user_id` 是对方、`self_id` 是自己，桥接现有守卫拦不住）。 ⚠️ **旧的「升级不换原生组件」只对 1.14.x 那条线成立**：1.14.9 与 1.14.20 逐字节相同，但 **2.0.3 → 2.1.1 的 `native/snowluma-win32-x64.dll` 变了**（387584 → 414208 B，正是注入 QQ 的 hook DLL；其余原生件 `snowluma-win32-x64.node`、`websocket-win32-x64.node`、`ffmpegAddon.win32.x64.node`、`sqlite/prebuilds/win32-x64/@appthreat+sqlite3.node` 与 `sqlite/*` 均逐字节相同）。已注入 QQ 内存的旧 hook DLL 与新 addon 通信正常；想让新 hook 生效要等 QQ 下次登录/重启。v2.1.0 的功能面（客户端私聊消息上报、自消息去重、WebUI 可选 MaiBot 外观等）见官方 release notes。**升级 SnowLuma 是使用者自己的事**：本桥接只探测、不部署（见 [LICENSE](LICENSE) 与 [RULES.md](RULES.md)）；本机这次的完整步骤、校验与回滚办法记在仓库外的 `../SnowLuma升级记录.md` |
+| SnowLuma 自带的 `node.exe` | **v2.1.1 起要求 `^24.22.1 \|\| >=26.12.1`** | 官方**在线更新永远不会替换 `node.exe`**（它不是运行时条目：`isRuntimeEntry` 只放行那 9 项固定条目与 `^[\w-]+\.mjs(\.map)?$`），所以运行时一抬 Node 下限就得手动换。本机自带的 v24.21.0 与系统 node v24.15.0 都跑不动 2.1.1（新版 `check-node-version.cjs` 直接 `error: SnowLuma requires Node.js ^24.22.1 || >=26.12.1; found …` + exit 1），已换成官方 **v24.22.1**（sha256 `d702daa8…e240e5`）。升级前先看新版 `package.json` 的 `engines.node` |
+| `@snowluma/sdk` / `@snowluma/mcp`（本仓库依赖） | 已钉 `^1.14.20` | 客户端库；OneBot v11 是稳定契约，新库可连旧运行时（本项目实测：库 1.14.20 + 运行时 1.14.9 可正常收发），**库 1.14.20 + 运行时 2.1.1 亦实测正常** |
+| `bot_status`（账号上下线） | **1.14.20 起有；1.14.9 没有**（2.x 线同样有） | 逐一核对的只有这两个 1.x 版本：`bot_status` 在 1.14.9 的 `index.mjs` 里出现 **0** 次、1.14.20 里 **3** 次（带 `sub_type`/`user_id`）；本机 2.0.3 与 2.1.1 也都是 3 次。桥接对老运行时**优雅降级**：订阅不到就只靠心跳 `good` 与 `get_status` |
 
 ### 已知行为：HTTP token 与 WS token 是**两个不同的值**
 
@@ -391,6 +392,11 @@ SnowLuma 同一个账号的 **HTTP token（默认 3000 端口）与 WebSocket to
 - 真正会一直连不上的情况：**自愈无从下手** —— `snowluma.homeDir` 没配 / 被移动 / 读不到
   SnowLuma 的 `config/onebot_<QQ号>.json`，或权限不足。这时日志里会有 `token 自愈失败`，
   而 QQ 侧表现为**完全收不到消息**。先确认 `homeDir` 指向真正的 SnowLuma 安装目录。
+- **写脚本时别再踩这个坑**：任何要连 WS 的脚本都应该走 `src/snowluma-conn.js` 的
+  `discoverSnowLumaConnection()` —— HTTP token 探活成功后，它会把**同一账号**的 `wsToken` / `wsUrl`
+  一并返回。`scripts/check-onebot-status.mjs` 原先直接拿 `config.json` 里的（HTTP）token 去连 3001，
+  于是**必然**打印 `SnowLuma WebSocket closed before opening`，失败路径里的 `process.exit` 还会在
+  Windows 上踩出 libuv 断言（`Assertion failed: !(handle->flags & UV_HANDLE_CLOSING)`）；2026-10-24 已改成自发现 + 收尾等待。
 
 ### 已知行为：端点自愈会覆盖你写的 `wsUrl`
 

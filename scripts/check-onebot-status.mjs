@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { SnowLumaWebSocketClient } from '@snowluma/sdk';
+import { discoverSnowLumaConnection } from '../src/snowluma-conn.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const cfg = JSON.parse(fs.readFileSync(path.resolve(__dirname, '..', 'config.json'), 'utf8'));
@@ -46,8 +47,23 @@ try {
 }
 
 // 2) WebSocket 连接检查
+//
+// ⚠️ SnowLuma 的 **HTTP token 与 WS token 是两个不同的值**（README「已知行为」有专门一节）。
+// 这个脚本以前直接拿 config.json 里的 accessToken（那是 HTTP 的）去连 3001，于是**必然**报
+// `SnowLuma WebSocket closed before opening`；失败路径里 process.exit 又发生在 socket 收尾中间，
+// 会踩出 libuv 断言（`Assertion failed: !(handle->flags & UV_HANDLE_CLOSING)`）。
+// 现在改用自发现：HTTP token 探活成功后，同一账号的 wsToken/wsUrl 一并带回来。
 console.log('\n--- WebSocket ---');
-const bot = new SnowLumaWebSocketClient({ url: wsUrl, accessToken: accessToken || undefined, reconnect: false });
+let wsOk = true;
+const discovered = await discoverSnowLumaConnection({ cfg }).catch((error) => ({ ok: false, error: error?.message ?? String(error) }));
+const wsToken = discovered?.wsToken || accessToken;
+const wsTarget = discovered?.wsUrl || wsUrl;
+if (discovered?.wsToken) {
+  console.log(`   用自发现的 WS token（来源 onebot_*.json）连 ${wsTarget}`);
+} else {
+  console.log(`⚠️  没读到自己账号的 WS token（${discovered?.error ?? '未知原因'}），退回 config 里的 token —— 它多半是 HTTP 的，连不上属正常`);
+}
+const bot = new SnowLumaWebSocketClient({ url: wsTarget, accessToken: wsToken || undefined, reconnect: false });
 const timeout = new Promise((_, rej) => setTimeout(() => rej(new Error('超时')), 10_000));
 try {
   await Promise.race([bot.connect(), timeout]);
@@ -61,8 +77,12 @@ try {
     console.log('⚠️  get_status 失败:', error?.message ?? error);
   }
 } catch (error) {
+  wsOk = false;
   console.error('❌ WebSocket 连接失败:', error?.message ?? error);
-  process.exit(1);
 } finally {
   try { bot.close(); } catch {}
+  // 给 socket 收尾留点时间：紧接着 process.exit 会在 Windows 上踩 libuv 断言。
+  await new Promise((resolve) => setTimeout(resolve, 300));
 }
+
+if (!wsOk) process.exit(1);
