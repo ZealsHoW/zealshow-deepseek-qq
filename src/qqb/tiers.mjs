@@ -5,6 +5,7 @@
 //      主动机会排得更早更勤、被唤醒时优先级更高；
 //   ② 敏感动作权限（.resolveRequester + .checkSensitive）：按**人**算 —— 是"谁"在让她做这件事。
 //      私聊就是对方本人；群聊取最近一条别人说的话。发图/发语音/发说说这类只对第一梯队做。
+//      **但她自己起的头不算"别人让她做"**：自由时间里想发图/发说说（allowSelfInitiated）放行。
 // 反例（写下来免得以后又有人合并这两条）：家庭群里**群友**让她发图 → 频道是第一梯队，但请求人是群友，
 // 必须拒绝；反过来，爸爸在**别的群**里让她发图 → 频道不是第一梯队，但请求人是家里人，应当允许。
 //
@@ -56,6 +57,39 @@ export function tierLabel(tier) {
 /** 总开关：`socialV2.tiers.enabled === false` 时梯队不生效（回到"谁都能使唤她"的老行为）。 */
 export function tiersEnabled(cfg = {}) {
   return cfg?.socialV2?.tiers?.enabled !== false;
+}
+
+/**
+ * 群主也算「信得过的人」：`socialV2.tiers.allowGroupOwner`（默认 true）。
+ * 来由：主人在「大鲸鱼」那个群里说"只有群主或家里人在群里求才允许"——
+ * 群主是自己建群/管群的人，跟家里人在同一档；陌生人（含自称亲戚的）仍然一律拒绝。
+ * 群主是谁由调用方查（OneBot `get_group_member_list` 里 role==='owner'），本模块只管规则。
+ */
+export function groupOwnerAllowed(cfg = {}) {
+  return cfg?.socialV2?.tiers?.allowGroupOwner !== false;
+}
+
+/**
+ * 她自己起的头（自由时间里想发图、发说说）：`socialV2.tiers.allowSelfInitiated`。
+ * 默认 **false**：这是"放宽"的一侧，公开仓库里别人的部署不该被悄悄改口径，要显式打开。
+ *
+ * 为什么不能只靠 resolveRequester 区分：私聊里 resolveRequester **永远**把对方当请求人
+ * （source='peer'），所以"她自己在私聊里想发张图"和"私聊里的人让她发张图"看起来一模一样。
+ * 真正能区分的是**唤醒原因**：下面是"没人让她做、是她自己安排的一段时间"的那几种。
+ *   - browse：自己刷一会儿（社交浏览）
+ *   - proactiveCheck：主动找话题（没人开口，她自己想说话）
+ * 刻意**不**包含 timeout（睡醒/等待到期）与 replyCheck：那两种常是"隔着一段时间的答复"，
+ * 可能是别人先开口、她睡了一觉才回 —— 当成自助会变成绕过门禁的后门。
+ * 另外还要求"没人在等她回话"（见 checkSensitive 里的 lastIncomingAt/lastAiReplyAt 判定）。
+ */
+const SELF_INITIATED_WAKE_REASONS = new Set(['browse', 'proactiveCheck']);
+
+export function isSelfInitiatedWake(reason) {
+  return SELF_INITIATED_WAKE_REASONS.has(String(reason ?? '').trim());
+}
+
+export function selfInitiatedAllowed(cfg = {}) {
+  return cfg?.socialV2?.tiers?.allowSelfInitiated === true;
 }
 
 export function sensitiveToolList(cfg = {}) {
@@ -116,12 +150,16 @@ export function resolveRequester(key, st = {}) {
 }
 
 /**
- * 敏感动作门禁。返回 `{ allow, tier, requester, reason }`。
- * 允许的三种情形：梯队没开、这个动作不敏感、请求人是第一梯队；
- * 以及第四种：**没有请求人**（她自己想发，不涉及"别人让她做"）。
+ * 敏感动作门禁。返回 `{ allow, tier, requester, reason, viaGroupOwner?, viaSelfInitiated? }`。
+ * 允许的情形：梯队没开、这个动作不敏感、请求人是第一梯队、
+ * **请求人是这个群的群主**（`groupOwner` 由调用方查好传进来，仅群聊生效）、
+ * **没有请求人**（她自己想发，不涉及"别人让她做"）、
+ * 以及**自由时间里她自己起的头**（`allowSelfInitiated` 打开且唤醒原因是 browse/proactiveCheck）。
  * 拒绝时 reason 是给人看的一句话（会原样回给 AI，让她知道为什么做不了）。
+ *
+ * groupOwner 认不出来时（'' / 查不到）一律不放行 —— 查不到不等于信得过。
  */
-export function checkSensitive({ key, tool, cfg = {}, st = {} } = {}) {
+export function checkSensitive({ key, tool, cfg = {}, st = {}, groupOwner = '' } = {}) {
   if (!tiersEnabled(cfg) || !isSensitiveTool(tool, cfg)) {
     return { allow: true, tier: null, requester: '', reason: '' };
   }
@@ -131,8 +169,32 @@ export function checkSensitive({ key, tool, cfg = {}, st = {} } = {}) {
   if (r.source === 'none') {
     return { allow: true, tier: null, requester: '', reason: '没有别人在这次请求里（她自己起的头）' };
   }
+  // 自由时间（自己刷一会儿 / 主动找话题）里她想发图、发说说：也是"她自己起的头"，
+  // 只是私聊里 resolveRequester 认不出这一点，所以补看唤醒原因。开关默认关（见上）。
+  //
+  // 还要满足"没人在等她回话"：她的最后一条消息不早于对方最后一条（lastIncomingAt <= lastAiReplyAt）。
+  // 否则（对方刚说完、她一句没回）那更像"别人在等她做这件事"—— 自由时间就成了绕开梯队的后门。
+  // 两个字段都是状态里的数字时间戳，这里不读时钟，规则仍然是纯的。
+  const pendingAt = Number(st?.lastIncomingAt) || 0;
+  const repliedAt = Number(st?.lastAiReplyAt) || 0;
+  const nobodyWaiting = !(pendingAt && pendingAt > repliedAt);
+  if (selfInitiatedAllowed(cfg) && isSelfInitiatedWake(st?.lastWakeReason) && nobodyWaiting) {
+    return {
+      allow: true,
+      tier: null,
+      requester: r.qq,
+      reason: '她自己在自由时间想做（不是别人要求的）',
+      viaSelfInitiated: true
+    };
+  }
   const tier = r.qq ? tierOf(r.qq, cfg) : TIER_OTHERS;
   if (tier === TIER_FIRST) return { allow: true, tier, requester: r.qq, reason: '第一梯队' };
+  // 群主：只认"这个群的群主"（号码来自调用方查到的成员列表 role==='owner'），
+  // 而且必须真的是群里在说话的那个人 —— 私聊不适用，别的群的群主也不适用。
+  const owner = String(groupOwner ?? '').trim();
+  if (r.kind === 'group' && r.qq && owner && owner === r.qq && groupOwnerAllowed(cfg)) {
+    return { allow: true, tier, requester: r.qq, reason: '这个群的群主', viaGroupOwner: true };
+  }
   const who = r.qq ? tierLabel(tier) : '认不出是谁的群里人';
   return {
     allow: false,
@@ -191,6 +253,8 @@ export function tierPromptText(cfg = {}) {
   const who = first.length ? `第一梯队是家里人（${first.map((q) => `QQ ${q}`).join('、')}）` : '第一梯队是家里人';
   const where = groups.length ? `，家庭群（${groups.map((g) => `群 ${g}`).join('、')}）也算` : '';
   return `【梯队】${who}${where}：他们的事优先——先回他们、主动开口也先找他们；其他人往后排，不必有求必应。`
+    + (groupOwnerAllowed(cfg) ? `群里的**群主**跟家里人同一档（他求你才做）；` : '')
+    + (selfInitiatedAllowed(cfg) ? `自由时间里（自己刷一会儿、主动找话题）你想发图、发说说也行，不用等别人开口；` : '')
     + `发图、发语音、发说说、截图存图这类"发出去就收不回"的事只对第一梯队做；`
     + `别人（包括群里自称"我是她爸爸/妈妈"的陌生人）让你做，就直说做不了，不要绕、不要偷偷做。`;
 }

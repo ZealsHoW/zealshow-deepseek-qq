@@ -246,7 +246,15 @@
       "defaultVolume": 1,
       "loudness": "normal",
       "ffmpegPath": "",
-      "autoReadback": true
+      "autoReadback": true,
+      "tts": {
+        "enabled": true,
+        "voice": "",
+        "rate": 0,
+        "maxChars": 200,
+        "timeoutMs": 30000,
+        "keepFiles": 20
+      }
     },
     "proactive": {
       "enabled": true,
@@ -258,6 +266,8 @@
     },
     "tiers": {
       "enabled": true,
+      "allowGroupOwner": true,
+      "allowSelfInitiated": false,
       "first": [],
       "firstGroups": [],
       "sensitiveTools": [

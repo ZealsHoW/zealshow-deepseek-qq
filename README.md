@@ -458,6 +458,54 @@ AI 也能主动发图（照片、截图、表情图、自己生成的图）。�
 { "key": "private:123456", "token": "会话令牌", "image": "state/outbox/chart.png", "caption": "看图，今天的数据" }
 ```
 
+## 发语音（qq_send_voice / qq_list_voices，含本机 TTS）
+
+AI 也能发语音条。**出厂默认关**（`config.example.json` 里 `socialV2.voice.enabled` 与 `socialV2.tools.sendVoice` 都是 `false`），把这两个开关打开之后才可用。发语音属于敏感动作，所以还受人员梯队约束（只对第一梯队和本群群主开放，见「人员梯队与敏感动作权限」）。
+
+两种用法（`text` 与 `voice` **二选一**，同时给会被直接拒掉）：
+
+| 用法 | 传什么 | 说明 |
+| --- | --- | --- |
+| 当场合成 | `text: "晚安，早点睡"` | 用**本机 Windows 自带的声音**合成一条，落在 `audio/`，再走同一条发送链路 |
+| 发库里现成的 | `voice: "tts-sample-….wav"` | 只能发语音库（`socialV2.voice.dir`，默认 `audio/`）里的文件；先 `qq_list_voices` 看有什么 |
+
+`text` 通道**不需要 ffmpeg**：转 SILK 是网关（SnowLuma）自己做的，桥接只把 wav 路径交给它（`{type:'record'}`）。本机没有 `ffprobe` 也不影响发送，只是跳过时长校验（会留一条警告）。
+
+### 本机 TTS 是怎么发声的
+
+用 Windows 自带的语音合成（先试 SAPI5，找不到就退回 OneCore），**不下载模型、不联网、零依赖**：
+
+```bash
+npm run voice:tts                  # 列出本机可用的声音（★ 是常见中文声音）
+npm run voice:tts "你好呀"          # 合成一条到 audio/，先自己听一下效果
+npm run voice:tts "你好呀" Kangkang  # 指定音色
+```
+
+配置在 `socialV2.voice.tts`：
+
+| 键 | 默认 | 说明 |
+| --- | --- | --- |
+| `enabled` | `true` | 只关「本机合成」，不影响发库里现成的语音 |
+| `voice` | `""` | 音色名（空 = 自动挑中文声音）；名字不存在时**直接报错**，不拿别的声音冒充 |
+| `rate` | `0` | 语速 -10~10 |
+| `maxChars` | `200` | 一次合成的字数上限；超了报错并说清字数（不偷偷截断） |
+| `timeoutMs` | `30000` | 单次合成超时 |
+| `keepFiles` | `20` | 语音库里最多留几个自己生成的 `tts-*.wav`，多的按时间从旧到新清 |
+
+安全边界：
+
+- **只发语音库里的文件**：AI 通道不接受绝对路径、`file://`、base64（`allowAbsolutePath` 也放宽不了 AI 通道）；
+- 要合成的文字走**临时 UTF-8 文本文件**，PowerShell 命令行里只有路径和数字 —— 消息内容注不进命令；
+- 清理只删**自己生成的 `tts-*.wav`**，你手动放进 `audio/` 的文件一律不碰；
+- 合成发生在**梯队门禁与静默检查之后**：陌生人求语音既不会发，也不会让机器白烧一次合成；
+- 发语音有独立限流（`maxPerMinute` / `maxPerHour`），失败不占额度。
+
+```bash
+npm run test:voice-tts   # 真合成一条 + 端点 text 通道（开关 / 字数上限 / 清理安全 / 二选一 / 门禁在合成前）
+```
+
+已知边界：这一步用的是**系统 TTS 的音质**，且只支持 Windows。以后换成自己的声音（GPT-SoVITS / RVC）时接口不变 —— 都只是往 `audio/` 里放一个 wav 而已。
+
 ## 待发文件夹（qq_list_outbox / qq_save_message_image / qq_draw_image）
 
 `state/outbox/` 就是「待发文件夹」：她自己截的网页、收藏的网图、画的图、以及**主人丢进去让她发的文件**都放这儿，`qq_send_image` 只认这个目录里的文件名。默认开启，开关是 `socialV2.tools.listOutbox` / `saveMessageImage` / `drawImage`。
@@ -617,15 +665,21 @@ curl -s -X POST http://127.0.0.1:3100/api/socialV2/night-greet \
 | 管什么 | 按什么判 | 效果 |
 | --- | --- | --- |
 | 优先与频次 | **频道** | 家里人的私聊/家庭群：唤醒优先级 +15、主动机会间隔与概率按原样；其他人：间隔 ×`others.intervalScale`（默认 1.6）、概率 ×`others.probabilityScale`（默认 0.6），也就是"往后排" |
-| 敏感动作能不能做 | **请求人（谁在让她做）** | 只对第一梯队开放；其他人提要求一律拒绝 |
+| 敏感动作能不能做 | **请求人（谁在让她做）** | 只对第一梯队**和这个群的群主**开放；其他人提要求一律拒绝 |
 
 敏感动作默认清单（`socialV2.tiers.sensitiveTools`，可改）：`qq_send_image`（发图）、`qq_send_voice`（发语音）、`qq_post_qzone`（发说说）、`qq_web_screenshot`（网页截图）、`qq_save_image`（存图）。入选标准是"发出去/存下来就收不回"。**文字与表情包不在其中** —— 那是她日常说话的方式，不该被权限挡住。
+
+**群主也算信得过的人**（`socialV2.tiers.allowGroupOwner`，默认 `true`）：某个群里最后说话的人是**这个群的群主**时，跟家里人同一档——主人在「大鲸鱼」群里定的口径就是"只有群主或家里人在群里求才允许"。群主是谁从 OneBot 的 `get_group_member_list` 里认（找 `role === 'owner'` 的那一项，每 30 分钟缓存一次、并发查询合并成一次）；SnowLuma 的 `get_group_info` **不返回群主**，所以只能这么查。三条硬边界：① **只认本群**——别的群的群主号码在这里不产生任何权限；② **只在群聊里生效**——同一个人私聊她时不算群主档；③ **查不到就拒绝**——成员列表为空、调用失败、没有 owner 项，一律当"不知道"，fail closed（查不到不等于信得过）。想关掉这条：`"tiers": { "allowGroupOwner": false }`（关掉后提示词里也不再提群主）。
+
+**她自己起的头**（`socialV2.tiers.allowSelfInitiated`，**默认 `false`**）：主人要的是"发图、发说说希望她**主动**用，不用等人求"。但私聊里判定"请求人"永远只能得到"对方"（`private:123` 就是 123 在让她做），所以**她自己想发**和**对方让她发**在状态里长得一模一样 —— 只能另外看两件事：① **唤醒原因**是她自己的时间（`browse`＝自己刷一会儿、`proactiveCheck`＝主动找话题；`replyCheck`/`timeout`/`nightWake` 等"可能是隔着一段时间的答复"的原因**一律不算**，否则等于开了一道"别人先开口、她睡一觉再补"的后门）；② **没人在等她回话**（她的最后一条消息不早于对方最后一条，`lastAiReplyAt >= lastIncomingAt`）。两条都满足才放行，日志里记成「自由时间，她自己起的头」。
+默认关的原因是这是**放宽**的一侧：公开仓库里别人的部署不该被悄悄改口径，要显式打开（`"tiers": { "allowSelfInitiated": true }`；打开后提示词里才会多一句"自由时间里你想发图、发说说也行"）。除了这两条路径，**没有别人在里面**的那种情形（群里一次都没人说话、定时器唤醒）本来就不受梯队限制（`resolveRequester` 给出 `source: 'none'`）。
 
 两条口径必须分开，否则必然出错（回归里逐个钉住了）：
 
 - **家庭群里群友求发图 → 拒绝**：频道虽然是家里的，但请求人是群友；
 - **爸爸在别的群里求发图 → 允许**：频道不是家里的，但请求人是家里人；
-- **她自己的主意 → 不受限**：定时器唤醒、她自己想发就发（没有"别人让她做"这回事）。
+- **本群群主在群里求发图 → 允许**（`allowGroupOwner` 默认开；别的群的群主、认不出群主、私聊里都不算）；
+- **她自己的主意 → 不受限**：定时器唤醒、她自己想发就发（没有"别人让她做"这回事）；自由时间里想发图/发说说还要把 `allowSelfInitiated` 打开、并且没人在等她回话（见上一段）。
 
 判定**只看号码**：陌生人把「我是你爸爸」写在消息里，不产生任何权限（`scripts/test-security-tiers.mjs` 里有专门的冒名用例）。
 
@@ -640,6 +694,8 @@ npm run test:security-tiers   # 纯函数 + 真 bridge.js 的 403/放行/零副�
 ```
 
 `qq_post_qzone` 是个特例：它直接调 SnowLuma 网关、不经过桥接发送端点，所以它**要求带 `key` 与 `token`**，动手前先问桥接的 `/api/socialV2/tier-check`；问不到就**不发**（fail closed，宁可这次不发，也不因为桥接不在就绕过去）。
+
+发说说在她那边的入口：**直连引擎模式**（`model.enabled=true`）本来会把"发送类文本工具"从她的工具清单里藏掉（防止同一句话发两遍），2026-10-23 起 `qq_post_qzone` 与 `qq_night_greet` 从屏蔽名单里移出 —— 这两个都不是"把本轮文字发到当前会话"的工具（一个发到她的 QQ 空间，一个的正文由桥接自己组装、参数只有一个 `dream`），藏起来的实际后果只是**她发不了说说、睡醒了没法问安**。提示词里也补了一条【想发说说】说明（发到空间、不是当前会话；发出去收不回、别写隐私内容、一天一两条顶天）。
 
 老实说清楚边界：这是**行为层 + 工具层**的护栏，不是操作系统级沙箱 —— 她被话术绕进去、在文字里答应别人什么，是拦不住的；但"发出去就收不回"的那些动作，动手那一刻会被工具层拦住。
 
@@ -679,8 +735,8 @@ npm run test:send-silence   # 沉默窗口 / 停手 / 队列跳过 / 失败分�
 
 - agent 回复在回合结束时一次性发送（不做流式逐字转发）；回复超过 `socialV2.send.maxMessageChars`（默认 500 字，可用 `social.maxReplyChars` 调整）自动按句读/URL 边界分段
 - 图片及部分表情可以通过安全下载接入多模态模型；语音/视频以及无法取得图片字节的消息仍使用占位文本
-- **发**语音是支持的（独立工具的图形界面 / 命令行 / AI 工具，见 `docs/README.md` 的文档索引）；但**收**到的语音目前只显示占位文本，不做语音转写入上下文
-- **AI 发语音默认关闭**（`socialV2.voice.enabled` 与 `tools.sendVoice` 默认 `false`）：先把音频放进 `audio/`，再到控制台打开开关；你自己发语音不受这个开关影响
+- **发**语音是支持的（独立工具的图形界面 / 命令行 / AI 工具，见 `docs/README.md` 的文档索引；AI 还能用本机 TTS 当场合成，见「发语音」）；但**收**到的语音目前只显示占位文本，不做语音转写入上下文
+- **AI 发语音默认关闭**（`socialV2.voice.enabled` 与 `tools.sendVoice` 默认 `false`）：先把音频放进 `audio/`，再到控制台打开开关；你自己发语音不受这个开关影响。打开后 AI 也可以当场用本机 TTS 合成（Windows 自带声音，不需要 ffmpeg）
 - agent 的 Markdown 回复会转成纯文本（链接保留 `文字 (url)` 形式）
 - `@snowluma/sdk` 的 npm 发布版存在 ESM 扩展名 bug，本仓库通过 postinstall 补丁修复（见 `scripts/patch-snowluma-sdk.mjs`）
 - `scripts/test-dsh-v2-wait.mjs`（`npm run test-wait:e2e`）要一次**独立的** DSH 回复，且会话工具清单里得有 `qq_wait_for_messages`：本机实测单独跑 15s 就结束、但 `HAS_qq_wait_for_messages=false`；跑能力自测时机器正被当前会话占用，必然吃满 120s 超时。属 DSH 侧集成待查，不是 QQ 能力缺失（`npm run test:capabilities` 把它算作跳过）

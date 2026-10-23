@@ -20,6 +20,8 @@ import * as sticker from '../src/sticker-lib.js';
 import * as modelPrices from '../src/model-prices.js';
 import * as tokenLedger from '../src/token-ledger.js';
 import * as voiceLib from '../src/send-voice-lib.js';
+// 本机 TTS 模块：夹具里**注入真实现**（它只读写显式传入的路径），需要替身的用例用 globals 覆盖。
+import * as ttsLib from '../src/qqb/tts.mjs';
 import * as presetPrompt from '../src/preset-prompt.js';
 import * as roleCard from '../src/role-card.js';
 import { DEFAULT_ALIASES as DIRECTED_ALIASES, parseDirective } from '../src/qqb/directed/direct.mjs';
@@ -362,6 +364,8 @@ export async function bridgeHarness({ config = {}, savedState, files = {}, globa
     directed, directedAliases, directedBlock,
     voiceCfg, voiceLibrary, resolveVoicePathForV2, resolveVoicePathForOperator,
     voiceBudgetCheck, sendVoiceV2, sendVoiceForV2, assertOutboundAuditOk,
+    // 本机 TTS：文字→wav 的合成入口与语音库清理（对应「发语音开启」那条要求）。
+    synthesizeVoiceForV2, pruneTtsLibrary,
     setMode(value) { currentMode = value; },
     setReady(value) { dshReady = value; },
     setPresets(value) { dshPresetIds = value; dshDefaultPreset = 'standard'; },
@@ -463,7 +467,7 @@ export async function bridgeHarness({ config = {}, savedState, files = {}, globa
       };
     },
     ...markdown, ...sensitive, ...wait, ...safeFetch, ...forward, ...slang, ...sticker,
-    ...modelPrices, ...tokenLedger, ...voiceLib, ...stateAcl, ...presetPrompt, ...roleCard, ...tiers,
+    ...modelPrices, ...tokenLedger, ...voiceLib, ...ttsLib, ...stateAcl, ...presetPrompt, ...roleCard, ...tiers,
     // ACL 收紧会 spawn icacls 去改**真实**文件系统；测试不该做这件事（同理见下面的
     // cleanupTemp / processAudioVolume 桩）。桩成成功，让 hardenStateDirAcl 走正常分支。
     hardenDir: () => ({ ok: true, detail: 'stub' }),

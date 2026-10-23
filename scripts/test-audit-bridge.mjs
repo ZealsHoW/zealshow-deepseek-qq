@@ -445,12 +445,17 @@ await test('malformed HTTP request targets return 400 without hanging', async (h
 
 await test('直连引擎工具面：发送类文本工具隐藏，表情/图片留下当「意向」', async (h) => {
   for (const name of ['qq_send_message', 'qq_send_burst', 'qq_reply', 'qq_send_group_message',
-    'qq_send_private_message', 'qq_send_poke', 'qq_post_qzone', 'qq_night_greet']) {
+    'qq_send_private_message', 'qq_send_poke']) {
     assert.equal(h.engineHiddenSendTool(name), true, `${name} 必须对模型隐藏（否则同一句话发两遍）`);
   }
   assert.equal(h.engineHiddenSendTool('qq_send_sticker'), false);
   assert.equal(h.engineHiddenSendTool('qq_send_image'), false);
   assert.equal(h.engineHiddenSendTool('qq_get_unread_messages'), false);
+  // 2026-10-23：这两个不是"把本轮文本发到当前会话"的工具 ——
+  // qq_post_qzone 发到她的空间，qq_night_greet 的正文由桥接自己组装（参数只有 dream）。
+  // 藏起来只会让她发不了说说、睡醒了问不了安，所以必须可见。
+  assert.equal(h.engineHiddenSendTool('qq_post_qzone'), false, '发说说必须可见（她主动发说的入口）');
+  assert.equal(h.engineHiddenSendTool('qq_night_greet'), false, '睡醒问安必须可见（否则直连模式下早安永远不会发）');
   assert.equal(h.ENGINE_MEDIA_MAX_PER_TURN, 2);
 });
 

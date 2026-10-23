@@ -432,7 +432,7 @@ server.tool(
 
 server.tool(
   'qq_post_qzone',
-  '发一条 QQ 空间说说（会真实发布到机器人自己的 QQ 空间；慎用，只在确有想说的内容时发，例如节日、心情、提到家人时）。可在对话中主动用，也可以被要求时用。**只对第一梯队（家里人）开放**：别人让你发，就直接说发不了，不要绕。content 必填；key/token 必填（桥接据此判断是谁让你发的）；images 选填（http(s) URL 或 base64://）。',
+  '发一条 QQ 空间说说（会真实发布到机器人自己的 QQ 空间；慎用，只在确有想说的内容时发，例如节日、心情、提到家人时）。**自由时间里她自己想发就能发**（唤醒原因是 browse / proactiveCheck 时视为她自己的主意）；被要求发时只认第一梯队（家里人）和本群的群主，别人让你发就直接说发不了、不要绕。content 必填；visibility 选填（默认所有人可见）；images 选填（http(s) URL 或 base64://）。',
   {
     content: z.string().min(1).describe('说说正文（纯文本，不要 Markdown）'),
     images: z.array(z.string()).optional().describe('配图数组：http(s) URL 或 base64://，可选'),
@@ -2123,22 +2123,31 @@ if (cfg.socialV2?.sticker?.enabled !== false && cfg.socialV2?.tools?.collectStic
 if (cfg.socialV2?.voice?.enabled !== false && cfg.socialV2?.tools?.sendVoice !== false) {
   server.tool(
     'qq_send_voice',
-    '在指定会话发一条 QQ 语音（把语音库里准备好的音频当语音条发出去）。voice 传 qq_list_voices 返回的 name（文件名，可带子目录），也可以直接传语音库里的文件名（不带扩展名也能匹配）。注意：① 只能发语音库（qq-bridge/audio/）里的文件，不能发任意本地路径，也不能发 URL/base64；② 受时长与频率上限约束（见 qq_list_voices 的 limits），超限会被拒绝；③ 语音是「开口说话」的强表达，别滥用，闲聊里偶尔发一条即可；④ 返回的 verified=true 表示已经用 get_msg 回读到这条消息的 record 段（语音确实落地了）—— 只有 verified=true 才能对用户说你发了语音；⑤ readback 只对「收到的」语音有意义（QQ 会转写别人的语音），自己发的语音一般拿不到转写文本，默认关闭，别依赖它。',
+    '在指定会话发一条 QQ 语音。两种用法**二选一**：① text = 这句话当场用本机 TTS 合成成语音（想说「晚安」「我想你了」这类短句时用它，不用先准备音频文件，≤200 字）；② voice = 语音库里准备好的音频文件（qq_list_voices 返回的 name）。注意：① 语音只能是本机合成的短句或语音库（qq-bridge/audio/）里的文件，不能发任意本地路径，也不能发 URL/base64；② 受时长与频率上限约束（见 qq_list_voices 的 limits），超限会被拒绝；③ 语音是「开口说话」的强表达，别滥用，闲聊里偶尔发一条即可，别每条都用语音；④ 返回的 verified=true 表示已经用 get_msg 回读到这条消息的 record 段（语音确实落地了）—— 只有 verified=true 才能对用户说你发了语音；⑤ readback 只对「收到的」语音有意义（QQ 会转写别人的语音），自己发的语音一般拿不到转写文本，默认关闭，别依赖它。',
     {
       key: z.string().describe('会话 key，格式 group:群号 或 private:QQ号'),
       token: z.string().describe('会话令牌（见唤醒提示中的【会话令牌】）'),
-      voice: z.string().describe('语音库里的文件名（来自 qq_list_voices 的 name，可带子目录/可省略扩展名）'),
+      text: z.string().optional().describe('想当场说出来的话（本机 TTS 合成成语音发出去）；与 voice 二选一'),
+      voice: z.string().optional().describe('语音库里的文件名（来自 qq_list_voices 的 name，可带子目录/可省略扩展名）；与 text 二选一'),
       label: z.string().optional().describe('可选：写进会话记录里的说明，如「说了句晚安」'),
       verify: z.boolean().optional().describe('是否回读校验语音已落地（默认 true，建议保持开启）'),
       readback: z.boolean().optional().describe('是否额外索取 QQ 转写文本（自己发的语音通常没有，默认 false）')
     },
-    async ({ key, token, voice, label, verify, readback }) => {
+    async ({ key, token, text, voice, label, verify, readback }) => {
+      const speakText = String(text ?? '').trim();
+      const voiceRef = String(voice ?? '').trim();
+      if (!speakText && !voiceRef) {
+        return { content: [{ type: 'text', text: '要么给 text（让我当场说这句话），要么给 voice（发语音库里那个文件）—— 两个都没给。' }], isError: true };
+      }
+      if (speakText && voiceRef) {
+        return { content: [{ type: 'text', text: 'text 与 voice 只能给一个：要么当场合成，要么发语音库里的文件。' }], isError: true };
+      }
       try {
         const data = await agentApi('/api/socialV2/send-voice', {
           method: 'POST',
           body: JSON.stringify({
             key,
-            voice: String(voice),
+            ...(speakText ? { text: speakText } : { voice: voiceRef }),
             label: label || '',
             verify: verify !== false,
             readback: readback === true,

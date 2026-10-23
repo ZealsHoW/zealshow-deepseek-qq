@@ -36,10 +36,13 @@ import { createRefiner } from './qqb/memory/refine.mjs';
 import { createBackoff } from './qqb/net/backoff.mjs';
 import { createOutbox } from './qqb/net/outbox.mjs';
 import { createOneBotClient } from './qqb/net/onebot.mjs';
-import { checkSensitive, isSensitiveTool, proactiveFlavor, proactiveScaleFor, sessionTierOf, tierLabel, tierOf, tierPromptText, tiersEnabled, wakeTierBonus } from './qqb/tiers.mjs';
+import { checkSensitive, groupOwnerAllowed, isSensitiveTool, proactiveFlavor, proactiveScaleFor, sessionTierOf, tierLabel, tierOf, tierPromptText, tiersEnabled, wakeTierBonus } from './qqb/tiers.mjs';
 import { createInboundDedup } from './qqb/net/inbound.mjs';
 import { createMood } from './qqb/persona/mood.mjs';
 import { readWatch, shouldNotifyWatch, markWatchNotified, buildWatchNotice } from './qqb/read-login-watch.mjs';
+// 本机 TTS（Windows 自带 SAPI/OneCore）：qq_send_voice 传 text 就能当场合成一条语音。
+// 实现与安全边界（文字只走临时文件、绝不拼命令行）见 src/qqb/tts.mjs。
+import { synthesizeToFile, ttsAvailable } from './qqb/tts.mjs';
 import { createEvolve } from './qqb/persona/evolve.mjs';
 import { createIntervene } from './qqb/persona/intervene.mjs';
 import { createDirected } from './qqb/directed/direct.mjs';
@@ -412,11 +415,14 @@ async function directedReceipt(originKey, text) {
  * 因此**发送类文本工具对模型不可见**（ENGINE_SEND_TOOLS 减去 ENGINE_MEDIA_INTENT_TOOLS），
  * 避免同一句话发两遍。表情/图片另走一条「媒体意向」通道：工具仍在清单里，但调用被主机侧
  * 拦下、只入队，等本轮文本发完再作为独立气泡补发（见 createEngineMediaIntentQueue）。
+ * 例外（2026-10-23 放开）：`qq_post_qzone`（发到空间，不是发到当前会话）与
+ * `qq_night_greet`（桥接自己组装早安、参数只有一个 dream）都不存在"同一句话发两遍"的问题，
+ * 隐藏它们只会让她发不了说说、睡醒了问不了安，所以从屏蔽名单里移出。
  * 安全语义沿用 loop.mjs 的 fallbackSafe：只要这一轮真跑过工具，就绝不回退 DSH。
  * ========================================================================== */
 const ENGINE_SEND_TOOLS = new Set([
   'qq_send_message', 'qq_send_burst', 'qq_reply', 'qq_send_group_message', 'qq_send_private_message',
-  'qq_send_image', 'qq_send_sticker', 'qq_send_poke', 'qq_post_qzone', 'qq_night_greet',
+  'qq_send_image', 'qq_send_sticker', 'qq_send_poke',
 ]);
 /**
  * 唯一两种「可以调用、但不会立即发送」的发送类工具：模型给出的是**意向**，
@@ -430,6 +436,7 @@ const ENGINE_RULES = [
   '【你现在怎么说话】你的文本输出会被桥接原样发到当前会话，所以**不要调用任何"发文字"的工具**——想说的话直接写出来就行（工具清单里已经没有发文字的工具了）。',
   '【想发表情/图片】可以用 `qq_send_sticker`（先用 `qq_list_stickers` 挑）和 `qq_send_image`，但它们**不会立刻发出**：调用只是在告诉桥接"我想发这个"，等你这轮文字发完后，桥接会把它作为单独气泡补发。所以：想说的话照常写在文本里，别在文字里说"我发给你了"；一轮最多 2 个，别刷屏；这条通道不带引用和 @；图片可以传 caption 让图下配一句短话（别和你文本里的话重复说同一件事）。',
   '【图片从哪来】① 网上找：`qq_image_search` 搜「晚霞 / 小猫 / 壁纸 / 搞笑」，拿到直链直接发；② 自己弄：`qq_web_screenshot` 截网页、`qq_save_image` 收藏网图、`qq_draw_image` 自己画一张（给 SVG 或简单 HTML，能画字卡/简笔图/配色块，画不了照片）；③ 主人放进待发文件夹的图：用 `qq_list_outbox` 看有哪些，挑一个按文件名发。截图/收藏/画出来的图都存进待发文件夹，随时能再发。',
+  '【想发说说】`qq_post_qzone` 是发到**你自己的 QQ 空间**（不是当前会话，也不是发给某个人）：content 必填、可选配图，visibility 默认所有人可见。看到有意思的东西、心情好、想记一笔的时候可以发一条，自由时间里想发就发，不用等别人开口。发出去就收不回——别把私聊/群里的隐私内容写进去，也别把它当日常说话用，一天一两条顶天了。',
   '一条消息就是一条 QQ 消息：短、口语、像真人打字，不要写小作文、不要分点列表、不要客套开场。',
   '直接说人话：**不要写“思考过程/计划/我要调用什么工具”，也不要复述工具返回的原文**，不要用标题和分隔线排版。想让一句话分成几条消息，就用空行隔开（桥接会拆成多条发出）。',
   '【怎么了解情况】提示词里已经给了最近几条聊天记录，先接着它聊；需要更多上下文再用 qq_get_unread_messages / qq_get_recent_messages / qq_history_search / qq_history_read，需要你自己的资料/状态用 qq_get_prompt。',
@@ -1729,6 +1736,23 @@ function loadConfig() {
     ...(cfg.socialV2?.voice ?? {})
   };
 
+  // socialV2.voice.tts：本机语音合成（Windows 自带 SAPI5 / OneCore 声音，零下载）。
+  // 为什么要有它：语音库（audio/）里只能放现成的音频文件，而她真正想说的是「今天这句话」——
+  // 没有 TTS 就只能先手工录好再发。有了它，qq_send_voice 传 text 就能当场出声。
+  // 真人音色（GPT-SoVITS 等）是后续第二步，不该挡住第一步能用。
+  cfg.socialV2.voice.tts = {
+    enabled: true,
+    // 空 = 自动（优先中文声音）；也可以写 Huihui / Kangkang / Yaoyao 等（见 qq_list_tts_voices）
+    voice: '',
+    rate: 0, // SAPI 语速 -10..10
+    maxChars: 200, // 一条语音最多合成多少字：语音是"一条条说的话"，长了请拆
+    timeoutMs: 30000,
+    keepFiles: 20, // 语音库里最多保留多少个 tts- 产物（超出的按时间删最旧）
+    ...((cfg.socialV2?.voice?.tts && typeof cfg.socialV2.voice.tts === 'object' && !Array.isArray(cfg.socialV2.voice.tts))
+      ? cfg.socialV2.voice.tts
+      : {})
+  };
+
   // socialV2.sticker.collect 也需要深度合并，避免旧配置缺失 collect 子项时丢默认值。
   cfg.socialV2.sticker = {
     enabled: true,
@@ -2395,6 +2419,7 @@ async function main() {
 
   function voiceCfg() {
     const v = cfg.socialV2?.voice ?? {};
+    const t = v.tts ?? {};
     return {
       enabled: v.enabled !== false,
       dir: path.resolve(ROOT, String(v.dir ?? 'audio')),
@@ -2406,7 +2431,15 @@ async function main() {
       defaultVolume: Number(v.defaultVolume) > 0 ? Number(v.defaultVolume) : 1,
       loudness: v.loudness || 'normal',
       ffmpegPath: process.env.FFMPEG_PATH || v.ffmpegPath || null,
-      autoReadback: v.autoReadback !== false
+      autoReadback: v.autoReadback !== false,
+      tts: {
+        enabled: t.enabled !== false,
+        voice: String(t.voice ?? ''),
+        rate: Number.isFinite(Number(t.rate)) ? Math.trunc(Math.max(-10, Math.min(10, Number(t.rate)))) : 0,
+        maxChars: Number(t.maxChars) > 0 ? Math.trunc(Number(t.maxChars)) : 200,
+        timeoutMs: Number(t.timeoutMs) > 0 ? Math.trunc(Number(t.timeoutMs)) : 30000,
+        keepFiles: Number(t.keepFiles) >= 0 ? Math.trunc(Number(t.keepFiles)) : 20
+      }
     };
   }
 
@@ -2706,6 +2739,62 @@ async function main() {
       log(`[voice] 发送后回读校验失败（不影响已发送）：${error?.message ?? error}`);
       return null;
     }
+  }
+
+  /**
+   * 清掉语音库里旧的 TTS 产物。
+   *
+   * 只动**自己生成的** `tts-*.wav`，绝不碰主人/她自己放进去的音频文件 —— 收拾房间不等于扔东西。
+   * 需要它的原因：每说一句就多一个文件，不收拾 audio/ 会一直涨。
+   */
+  function pruneTtsLibrary(dir, keep) {
+    const limit = Number.isFinite(Number(keep)) ? Math.max(0, Math.trunc(Number(keep))) : 20;
+    let files = [];
+    try {
+      files = fs.readdirSync(dir).filter((f) => /^tts-.*\.wav$/i.test(f));
+    } catch {
+      return 0;
+    }
+    if (files.length <= limit) return 0;
+    const ranked = files
+      .map((f) => {
+        let mtimeMs = 0;
+        try { mtimeMs = fs.statSync(path.join(dir, f)).mtimeMs; } catch {}
+        return { f, mtimeMs };
+      })
+      .sort((a, b) => b.mtimeMs - a.mtimeMs);
+    let removed = 0;
+    for (const item of ranked.slice(limit)) {
+      try { fs.rmSync(path.join(dir, item.f), { force: true }); removed += 1; } catch {}
+    }
+    return removed;
+  }
+
+  /**
+   * 本机合成一条语音（qq_send_voice 的 text 通道）。
+   *
+   * 产物落在**语音库目录内**（tts-<时间戳>-<随机>.wav），这样后面走的仍然是同一条
+   * 「库内解析 → 限流 → 发送 → 回读校验」链路，不额外开一条绕过限制的旁路。
+   */
+  async function synthesizeVoiceForV2(text) {
+    const vc = voiceCfg();
+    const t = vc.tts;
+    // 两道开关都要看：voice.enabled 是「语音功能整体」，tts.enabled 只关本机合成。
+    if (!vc.enabled) throw new Error('语音功能已关闭（socialV2.voice.enabled=false）');
+    if (!t.enabled) throw new Error('本机语音合成已关闭（socialV2.voice.tts.enabled=false）');
+    const raw = String(text ?? '').replace(/\s+/g, ' ').trim();
+    if (!raw) throw new Error('text 不能为空');
+    if (raw.length > t.maxChars) {
+      throw new Error(`要合成的文字太长（${raw.length} 字，上限 ${t.maxChars} 字）：语音是一条条说的话，请拆短再发`);
+    }
+    if (!ttsAvailable()) throw new Error('本机没有可用的语音合成（需要 Windows 自带的 SAPI/OneCore 声音）');
+    try { fs.mkdirSync(vc.dir, { recursive: true }); } catch {}
+    const stamp = new Date().toISOString().replace(/[-:]/g, '').replace(/\..+$/, '').replace('T', '-');
+    const outPath = path.join(vc.dir, `tts-${stamp}-${Math.random().toString(36).slice(2, 6)}.wav`);
+    const made = await synthesizeToFile({ text: raw, outPath, voice: t.voice, rate: t.rate, timeoutMs: t.timeoutMs });
+    const pruned = pruneTtsLibrary(vc.dir, t.keepFiles);
+    log(`[voice] 本机合成语音 ${path.basename(made.path)}（${made.voice || '默认声音'} / ${made.engine}，${made.bytes} 字节${pruned ? `，清理旧产物 ${pruned} 个` : ''}）`);
+    return { path: made.path, name: path.basename(made.path), engine: made.engine, voice: made.voice, bytes: made.bytes, pruned };
   }
 
   /**
@@ -7223,7 +7312,7 @@ async function main() {
           if (!v2SessionAllowed(key)) { sendJson({ ok: false, error: '目标不在当前模式允许范围内' }, 403); return; }
           if (shouldBlockSilentReply(key)) { sendJson({ ok: false, error: '静默模式已开启，当前不允许发送' }, 403); return; }
           // 梯队门禁：发语音只对第一梯队（家里人）。别人让她发 → 403，且一条都不发。
-          const tierGate = tierGuardV2(key, 'qq_send_voice');
+          const tierGate = await tierGuardV2(key, 'qq_send_voice');
           if (!tierGate.ok) { sendJson({ ok: false, error: tierGate.error, tier: tierGate.tier, requester: tierGate.requester }, 403); return; }
           const keyMatch = /^(group|private):(\d+)$/.exec(key);
           if (!keyMatch) { sendJson({ ok: false, error: 'key 格式应为 group:群号 或 private:QQ号' }, 400); return; }
@@ -7233,10 +7322,28 @@ async function main() {
             sendJson({ ok: false, error: '目标不在当前模式允许范围内' }, 403);
             return;
           }
+          // text 通道：当场用本机 TTS 把这句话合成成语音库里的一个文件，再走同一条发送链路。
+          // 与 voice 二选一（同时给就是在猜我们要哪个，直接拒掉）。
+          const synthText = String(body.text ?? '').trim();
+          if (synthText && String(body.voice ?? body.file ?? '').trim()) {
+            sendJson({ ok: false, error: 'text 与 voice 只能给一个：要么让我当场说这句话，要么发语音库里那个文件' }, 400);
+            return;
+          }
+          let voiceRef = body.voice ?? body.file ?? '';
+          let synthesized = null;
+          if (synthText) {
+            try {
+              synthesized = await synthesizeVoiceForV2(synthText);
+              voiceRef = synthesized.name;
+            } catch (error) {
+              sendJson({ ok: false, error: error?.message ?? String(error) }, 400);
+              return;
+            }
+          }
           // 只要名字（解析）不要内容（预览）：dry-run 也必须经过与真发相同的解析与校验。
           let resolved;
           try {
-            resolved = resolveVoicePathForV2(body.voice ?? body.file ?? '');
+            resolved = resolveVoicePathForV2(voiceRef);
           } catch (error) {
             sendJson({ ok: false, error: error?.message ?? String(error) }, 400);
             return;
@@ -7249,7 +7356,7 @@ async function main() {
               sendJson({ ok: true, dryRun: true, key, file: resolved.path, detail: describeAudio(probe) });
               return;
             }
-            const sent = await sendVoiceForV2(key, body.voice ?? body.file, {
+            const sent = await sendVoiceForV2(key, voiceRef, {
               label: body.label ? String(body.label).slice(0, 100) : '',
               verify: body.verify,
               readback: body.readback === true,
@@ -7264,6 +7371,8 @@ async function main() {
               messageId: sent.messageId,
               file: path.basename(sent.file),
               detail: sent.detail,
+              // 本机合成的语音会带上合成回执（用了哪个引擎/声音），方便主人分辨"是不是她自己的声音"
+              synthesized: synthesized ? { engine: synthesized.engine, voice: synthesized.voice, bytes: synthesized.bytes } : null,
               audioProcessing: sent.audioProcessing,
               // verified=true 表示已用 get_msg 回读到这条消息的 record 段（"真的发出去了"的硬证据）
               verified: sent.verification?.confirmed === true,
@@ -7397,7 +7506,7 @@ async function main() {
           if (currentMode !== 'reserved2') { sendJson({ ok: false, error: '该接口仅 reserved2 模式可用' }, 403); return; }
           if (!req.headers['x-agent-token']) { sendJson({ ok: false, error: 'reserved2 模式发送必须携带 agent token' }, 403); return; }
           // 梯队门禁：发图只对第一梯队（家里人）。别人让她发 → 403，且一条都不发。
-          const tierGate = tierGuardV2(key, 'qq_send_image');
+          const tierGate = await tierGuardV2(key, 'qq_send_image');
           if (!tierGate.ok) { sendJson({ ok: false, error: tierGate.error, tier: tierGate.tier, requester: tierGate.requester }, 403); return; }
           const keyMatch = /^(group|private):(\d+)$/.exec(key);
           if (!keyMatch) { sendJson({ ok: false, error: 'key 格式应为 group:群号 或 private:QQ号' }, 400); return; }
@@ -7900,7 +8009,7 @@ async function main() {
           if (!token) { sendJson({ ok: false, error: '必须携带 agent token' }, 403); return; }
           if (!agentTokenOk(key, token)) { sendJson({ ok: false, error: 'agent token 无效' }, 403); return; }
           if (!v2SessionAllowed(key)) { sendJson({ ok: false, error: '目标不在当前模式允许范围内' }, 403); return; }
-          const gate = tierGuardV2(key, tool);
+          const gate = await tierGuardV2(key, tool);
           sendJson({
             ok: true,
             allow: gate.ok,
@@ -10110,15 +10219,77 @@ async function main() {
     }
   }
 
+  // ── 群主识别（敏感动作：群主或家里人求才允许） ──────────────────────────────
+  // 来由：主人在「大鲸鱼」群里定口径 —— "只有群主或家里人在群里求才允许"。
+  // 群主是谁只能从成员列表里认（SnowLuma 的 get_group_info 不返回 owner_id，
+  // 但 get_group_member_list 的每一项带 role: owner/admin/member）。
+  // 认不出来（查不到/超时/没有 owner 项）一律**当不知道**，门禁照旧拒绝 —— 查不到不等于信得过。
+  const groupOwnerCache = new Map(); // groupId(string) -> { owner: string, at: number, reason: string }
+  const GROUP_OWNER_TTL_MS = 30 * 60 * 1000;
+  let groupOwnerInflight = new Map(); // 同一群的并发查询合并成一次
+
+  function groupIdOfV2(key) {
+    const m = /^group:(\d+)$/.exec(String(key ?? '').trim());
+    return m ? m[1] : '';
+  }
+
+  /**
+   * 查某个群的群主（30 分钟缓存）。返回群主 QQ 字符串；查不到返回缓存的旧值或 ''。
+   * 只读调用：`queueOnFailure` 不带 ⇒ 不落补发队列（读操作不该进发送队列）。
+   */
+  async function fetchGroupOwnerV2(groupId) {
+    const gid = String(groupId ?? '').trim();
+    if (!/^\d+$/.test(gid)) return '';
+    if (!groupOwnerAllowed(cfg)) return '';
+    const now = Date.now();
+    const cached = groupOwnerCache.get(gid);
+    if (cached && now - cached.at < GROUP_OWNER_TTL_MS) return cached.owner;
+    if (groupOwnerInflight.has(gid)) return groupOwnerInflight.get(gid);
+    const task = (async () => {
+      try {
+        const r = await onebot.call('get_group_member_list', { group_id: Number(gid) }, {});
+        const list = r?.ok && Array.isArray(r.data) ? r.data : [];
+        const owner = list.find((m) => String(m?.role ?? '').toLowerCase() === 'owner');
+        const ownerQQ = owner ? String(owner.user_id ?? owner.uin ?? '').trim() : '';
+        if (/^\d+$/.test(ownerQQ)) {
+          groupOwnerCache.set(gid, { owner: ownerQQ, at: now, reason: 'ok' });
+          log(`[梯队] 群 ${gid} 群主 = ${ownerQQ}（成员 ${list.length} 人，30 分钟内复用）`);
+          return ownerQQ;
+        }
+        groupOwnerCache.set(gid, { owner: '', at: now, reason: list.length ? 'no-owner-role' : 'empty' });
+        log(`[梯队] 群 ${gid} 没认出群主（成员列表 ${list.length} 条${r?.ok ? '' : `，调用失败：${r?.error ?? ''}`}）`);
+        return '';
+      } catch (error) {
+        log(`[梯队] 取群 ${gid} 成员列表失败`, error?.message ?? error);
+        return cached?.owner ?? '';
+      } finally {
+        groupOwnerInflight.delete(gid);
+      }
+    })();
+    groupOwnerInflight.set(gid, task);
+    return task;
+  }
+
+  function groupOwnerOfV2(key) {
+    return groupOwnerCache.get(groupIdOfV2(key))?.owner ?? '';
+  }
+
   // ── 人员梯队门禁（第一梯队 = 家里人） ─────────────────────────────────────
-  // 谁能让她做"发出去就收不回"的事（发图/发语音/发说说/截图存图）：只有第一梯队。
-  // 规则本身在 src/qqb/tiers.mjs（纯函数），这里只负责取会话状态、记日志、给出拒绝文案。
+  // 谁能让她做"发出去就收不回"的事（发图/发语音/发说说/截图存图）：只有第一梯队
+  // 与**这个群的群主**（socialV2.tiers.allowGroupOwner，默认 true）。
+  // 规则本身在 src/qqb/tiers.mjs（纯函数），这里只负责取会话状态、查群主、记日志、给出拒绝文案。
   // 拒绝时调用方一律 403 且**什么都不发** —— 拒绝路径必须零副作用。
-  function tierGuardV2(key, tool) {
+  async function tierGuardV2(key, tool) {
     if (!tiersEnabled(cfg) || !isSensitiveTool(tool, cfg)) return { ok: true, allow: true };
     const st = getSocialV2State(key);
-    const v = checkSensitive({ key, tool, cfg, st });
-    if (v.allow) return { ok: true, ...v };
+    const gid = groupIdOfV2(key);
+    const groupOwner = gid ? await fetchGroupOwnerV2(gid) : '';
+    const v = checkSensitive({ key, tool, cfg, st, groupOwner });
+    if (v.allow) {
+      if (v.viaGroupOwner) log(`[reserved2] 梯队门禁放行：${key} 的 ${tool}（请求人是群主 ${v.requester}）`);
+      else if (v.viaSelfInitiated) log(`[reserved2] 梯队门禁放行：${key} 的 ${tool}（自由时间，她自己起的头，唤醒原因 ${st.lastWakeReason}）`);
+      return { ok: true, ...v };
+    }
     log(`[reserved2] 梯队门禁拒绝：${key} 的 ${tool}（请求人 ${v.requester}，${tierLabel(v.tier)}）`);
     return { ok: false, ...v, error: `这个我不做哦：${v.reason}` };
   }
@@ -13361,7 +13532,7 @@ async function main() {
       return `${base}【主动机会】${key}\n原因：${where}已经安静了一段时间，这是一次你可以主动冒泡的机会。\n优先主动开个话题、追问上次没聊完的事、分享一个刚想到的想法；如果一时想不到，可以用 mcp__web-search-safe__web_search 搜一下当前热点/时事/网络热梗，再结合记忆里的群友兴趣挑一个自然角度。${imgHint}\n只要内容自然，就大胆开口；如果实在没话想说，再安静收尾（qq_mark_read 或 qq_set_wake_config）。`;
     }
     if (reason === 'browse') {
-      return `${base}【自己刷一会儿】${key}\n原因：桥接给了你一段自由时间（人格卡第六节说你会一天刷三五次视频/看点东西）。这次可以用 qq_read_page 读公开页面正文（热榜、热搜），想看画面再用 qq_web_screenshot 截图（抖音热榜 https://www.douyin.com/hot 、微博热搜 https://s.weibo.com/top/summary 之类），或用 mcp__web-search-safe__web_search 搜点热点/梗。\n注意：**浏览器里是主人自己的账号（已经登录好了，直接用）**；只读不互动——不点赞/评论/私信/关注、不绕验证码，也**别去登录别人的账号**。要是 qq_read_page 提示登录态过期，别硬刷，桥接会提醒主人去重新扫码。图片/视频截图可以用 qq_describe_image 看懂再说。看到真的有意思、值得说的就开口聊一句（可以说说刚看到的，也可以纯吐槽）；没有值得说的就什么都别发，安静收尾。每次最多看一两个页面，别刷太久。`;
+      return `${base}【自己刷一会儿】${key}\n原因：桥接给了你一段自由时间（人格卡第六节说你会一天刷三五次视频/看点东西）。这次可以用 qq_read_page 读公开页面正文（热榜、热搜），想看画面再用 qq_web_screenshot 截图（抖音热榜 https://www.douyin.com/hot 、微博热搜 https://s.weibo.com/top/summary 之类），或用 mcp__web-search-safe__web_search 搜点热点/梗。\n注意：**浏览器里是主人自己的账号（已经登录好了，直接用）**；只读不互动——不点赞/评论/私信/关注、不绕验证码，也**别去登录别人的账号**。要是 qq_read_page 提示登录态过期，别硬刷，桥接会提醒主人去重新扫码。图片/视频截图可以用 qq_describe_image 看懂再说。看到真的有意思、值得说的就开口聊一句（可以说说刚看到的，也可以纯吐槽；想留存下来也可以顺手发成一条说说，qq_post_qzone）；没有值得说的就什么都别发，安静收尾。每次最多看一两个页面，别刷太久。`;
     }
     if (reason === 'poke') {
       return `${base}【唤醒】${key}\n原因：有人拍了一拍（可能拍了你，也可能拍了别人）。\n先看未读/最近消息里的 [拍一拍] 事件：如果是拍你，可以自然回应一句，也可以用 qq_send_poke 回一个拍一拍；如果是拍别人，觉得有趣也可以接梗。除了回应，偶尔也可以主动戳一下正在聊的人/熟人，像真人手贱/提醒/逗一下，但别频繁。不想接就安静收尾（qq_mark_read 或 qq_set_wake_config）。`;

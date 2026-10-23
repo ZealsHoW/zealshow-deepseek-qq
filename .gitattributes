@@ -1,0 +1,5 @@
+# Windows 批处理必须是 CRLF：cmd.exe 对裸 LF 的 .bat 会按行错位解析
+# （restart.bat 曾经是裸 LF，执行时把注释里的片段当命令跑，直接 255 退出、
+# 旧桥接进程根本没被杀掉）。这里固定住，避免再被编辑器/工具改回 LF。
+*.bat text eol=crlf
+*.cmd text eol=crlf
