@@ -133,13 +133,45 @@ npm install        # 安装依赖（postinstall 会自动修补 @snowluma/sdk �
 | `webSearch.baseURL` / `model` / `maxUses` / `maxResults` | 搜索端点（默认 `https://api.deepseek.com/anthropic/v1`，必须 https 且解析到公网）、模型（默认 `deepseek-v4-flash`）、单次搜索最多用几次工具、返回条数上限 |
 | `workspaceTitle` | QQ 会话在 DSH 界面中的归组名称，默认「QQ 聊天」 |
 | `allow.private` / `allow.groups` | 白名单（QQ 号/群号数组）；留空且 `allowAllWhenEmpty: true` 时放行全部 |
-| `deny.*` | 黑名单，优先于白名单 |
+| `deny.*` | 黑名单，优先于白名单（也优先于自动纳入） |
+| `allow.autoInclude` | 按用户名规则**自动**把来消息的人/群加进白名单（默认关）。每条规则支持 `qq`（最稳）/ `name`（昵称精确匹配）/ `namePattern`（正则）/ `kind`（`private`/`group`/`any`）/ `note`；`maxAddsPerHour`（默认 5）是一小时内最多自动纳入几个。详见下方「[按用户名规则自动纳入白名单](#按用户名规则自动纳入白名单)」 |
 | `ackMessage` | 消息投递后的立即回复，空字符串关闭 |
 | `sendDelayMs` | QQ 连续发送间隔，防止触发频率限制 |
 | `consolePort` | 本地控制台端口，默认 `3100` |
 | `consoleToken` | 控制台访问令牌；留空时启动自动生成并保存到 `state/console-token` |
 
 > ⚠️ `allowAllWhenEmpty: true` 表示「白名单没填就全部放行」——把 agent 接入 QQ 等于把账号控制权交给了模型，建议先填白名单。
+
+### 按用户名规则自动纳入白名单
+
+每加一个能跟小鲸鱼说话的人都要手工改 `config.json` 很烦，所以 `allow.autoInclude` 支持**写规则、命中的人自己进来**（默认**关着**，要显式 `enabled: true`）：
+
+```json
+"allow": {
+  "private": [376245695],
+  "groups": [851489980],
+  "autoInclude": {
+    "enabled": true,
+    "maxAddsPerHour": 5,
+    "rules": [
+      { "qq": 2998647358, "note": "小鲸鱼测试号" },
+      { "name": "小鲸", "note": "按昵称——能被冒充，慎用" },
+      { "namePattern": "^小鲸", "kind": "private" }
+    ]
+  }
+}
+```
+
+省事的写法也行：`"autoInclude": [2998647358, "小鲸"]`（纯数字当 QQ 号，其余当昵称，且视为开启）。
+
+- **什么时候触发**：收到一条**本地判定为"不在白名单里"**的私聊/群聊消息时。命中就把对方（私聊）或群号（群聊）写进 `config.json` 的 `allow.private` / `allow.groups` 并**热更新内存**——不需要重启，这条消息本身也会被正常处理；日志里会打一行 `✅ 白名单自动纳入 …`，`state/qq-activity.log` 里也有 `[allow] …` 留痕。
+- **匹配口径**：`qq` 精确比号码（私聊=对方 QQ，群聊=群号）；`name` 是昵称/群名片**精确**匹配（忽略大小写与首尾空白，不做子串）；`namePattern` 是昵称正则。群聊事件里的 `sender` 是**群成员**不是群名，所以群规则只能用 `qq`。
+- **三道闸，缺一不可**：
+  1. **默认关** + 启动时把生效的规则与体检结果（坏正则、空规则、按昵称放行）打进日志——"规则写了却没生效"是最难查的那种问题；
+  2. **`deny` 永远优先**：黑名单里的人命中规则也不会被纳入；
+  3. **一小时最多 `maxAddsPerHour` 个**（默认 5），防止有人把昵称改成规则里的名字，一串小号把白名单刷爆。
+- **安全提醒**：`name` / `namePattern` 放行的本质是"谁把昵称改成这个名字谁就进得来"。给别人用的号请写 `qq`——那是唯一不可冒充的字段。`closed-agent` 模式（只认主人私聊）下**不会**自动纳入，免得出现"看着授权了其实一条也进不来"。
+- **回归**：`npm run test:allow-rules` —— 纯规则匹配（含坏正则/限流/黑名单优先）、`src/bridge.js` 接线、以及夹具内端到端（真跑 `handleIncoming`，断言 `config.json` 真的被改了、未命中/被拉黑/超限流的**一个字节都不动**、控制台保存白名单不会把 `autoInclude` 段抹掉）。
 
 ### DSH 端安装（必做：装 preset + 挂 MCP）
 

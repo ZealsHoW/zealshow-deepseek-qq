@@ -31,7 +31,15 @@
   "workspaceTitle": "QQ 聊天",
   "allow": {
     "private": [],
-    "groups": []
+    "groups": [],
+    "autoInclude": {
+      "enabled": false,
+      "maxAddsPerHour": 5,
+      "rules": [
+        { "qq": 2998647358, "note": "按 QQ 号自动纳入（最稳；群号写在 allow.groups 口径上）" },
+        { "name": "小鲸", "note": "按昵称精确匹配——昵称谁都能改，慎用" }
+      ]
+    }
   },
   "deny": {
     "private": [],

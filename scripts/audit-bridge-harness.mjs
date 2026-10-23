@@ -21,6 +21,7 @@ import * as modelPrices from '../src/model-prices.js';
 import * as tokenLedger from '../src/token-ledger.js';
 import * as voiceLib from '../src/send-voice-lib.js';
 import * as memoryLog from '../src/qqb/memory-log.mjs';
+import { autoIncludeBudget, autoIncludeProblems, autoIncludeSettings, describeAutoIncludeRule, matchAutoInclude } from '../src/qqb/allow-rules.mjs';
 // 本机 TTS 模块：夹具里**注入真实现**（它只读写显式传入的路径），需要替身的用例用 globals 覆盖。
 import * as ttsLib from '../src/qqb/tts.mjs';
 import * as presetPrompt from '../src/preset-prompt.js';
@@ -425,6 +426,9 @@ export async function bridgeHarness({ config = {}, savedState, files = {}, globa
     // 这里若漏注入，appendMemoryLog 会把 ReferenceError 吞掉，归档链路在夹具里静默失效。
     createMemoryLogWriter: memoryLog.createMemoryLogWriter,
     memoryLogPath: memoryLog.memoryLogPath,
+    // 白名单「按用户名规则自动纳入」（第①条）：注入**真实现**——这一层不碰文件/网络，
+    // 写盘与热更新在 bridge.js 的 tryAutoInclude() 里（夹具里 config.json 指临时目录）。
+    autoIncludeSettings, autoIncludeProblems, matchAutoInclude, autoIncludeBudget, describeAutoIncludeRule,
     // R4：容错层的注入点。backoff/outbox/inbound 用桩（真实现会碰文件与定时器）。
     createBackoff, createOutbox, createInboundDedup,
     // R2：情绪状态机也用桩（夹具不做真磁盘读写）。

@@ -44,6 +44,7 @@ import { readWatch, shouldNotifyWatch, markWatchNotified, buildWatchNotice } fro
 // 实现与安全边界（文字只走临时文件、绝不拼命令行）见 src/qqb/tts.mjs。
 import { synthesizeVoice, ttsAvailable } from './qqb/tts.mjs';
 import { createMemoryLogWriter, memoryLogPath } from './qqb/memory-log.mjs';
+import { autoIncludeBudget, autoIncludeProblems, autoIncludeSettings, describeAutoIncludeRule, matchAutoInclude } from './qqb/allow-rules.mjs';
 import { createEvolve } from './qqb/persona/evolve.mjs';
 import { createIntervene } from './qqb/persona/intervene.mjs';
 import { createDirected } from './qqb/directed/direct.mjs';
@@ -1475,7 +1476,10 @@ function loadConfig() {
     ownerQQ: normalizeOwnerQQ(file.ownerQQ),
     allow: {
       private: normalizeIdList(file.allow?.private ?? file.allow?.privates ?? []),
-      groups: normalizeIdList(file.allow?.groups ?? file.allow?.group ?? [])
+      groups: normalizeIdList(file.allow?.groups ?? file.allow?.group ?? []),
+      // 按用户名规则自动纳入（主人 2026-10-23 第①条）：默认关着，详见 src/qqb/allow-rules.mjs。
+      // 归一化失败不抛错——一条写坏的正则不该让桥接起不来。
+      autoInclude: autoIncludeSettings(file.allow?.autoInclude)
     },
     deny: {
       private: normalizeIdList(file.deny?.private ?? file.deny?.privates ?? []),
@@ -2269,6 +2273,16 @@ function allowed(kind, id, cfg) {
   const allowList = cfg.allow[kind] ?? cfg.allow[kind + 's'] ?? [];
   if (allowList.length > 0) return allowList.map(String).includes(s);
   return cfg.allowAllWhenEmpty;
+}
+
+// 自动纳入的历史时间戳（内存态，进程重启即清零），限流用；规则本身见 src/qqb/allow-rules.mjs。
+const autoIncludeAdds = [];
+
+/** 黑名单（deny）永远优先：deny 里的人绝不会被 autoInclude 捞进白名单。 */
+function autoIncludeDenied(kind, id, cfg) {
+  const s = String(id);
+  const denyList = cfg.deny?.[kind] ?? cfg.deny?.[kind + 's'] ?? [];
+  return denyList.map(String).includes(s);
 }
 
 // 二代会话 key 规范化：只接受 group:正整数 / private:正整数，并去掉前导零，避免同一会话出现多个别名。
@@ -3501,6 +3515,14 @@ async function main() {
   if (!cfg.ownerQQ) {
     log('⚠️  未配置 ownerQQ：审批/管理命令/封闭 agent 模式将全部不可用。请在 config.json 或控制台「访问与安全」页填写管理员 QQ');
   }
+  // 白名单自动纳入（第①条）：开了就把规则打进日志——"规则写了但没生效"最难查，
+  // 而按昵称放行本身是可以被冒充的，启动时提醒一次不算啰嗦。
+  if (cfg.allow.autoInclude?.enabled) {
+    log(`白名单自动纳入：已开启，${cfg.allow.autoInclude.rules.length} 条规则，一小时最多 ${cfg.allow.autoInclude.maxAddsPerHour} 个`);
+    cfg.allow.autoInclude.rules.forEach((rule, i) => log(`   · ${describeAutoIncludeRule(rule, i)}`));
+    log('   （按昵称/正则放行 = 谁都能改成这个名字混进来；稳的做法是写 qq）');
+    for (const problem of autoIncludeProblems(cfg.allow.autoInclude)) log(`   ⚠️  ${problem}`);
+  }
   if (cfg.socialV2?.voice?.allowAbsolutePath === true) {
     // 该开关曾经允许 AI 发送语音库之外的任意本机音频文件（prompt injection 可用来外发文件）。
     // 现在无论开关如何，AI 通道都只接受语音库内的文件；这里提示它已经不再放宽边界。
@@ -3987,6 +4009,58 @@ async function main() {
     const m = /^(group|private):(\d+)$/.exec(key);
     if (!m) return false;
     return modeAllowed(key, m[1], Number(m[2]), cfg, currentMode);
+  }
+
+  /**
+   * 入站消息先看能不能「按用户名规则自动纳入白名单」（主人 2026-10-23 第①条）。
+   *
+   * 只由**真的收到消息**触发：规则是给"新来的人"用的，不该让出站重试或唤醒调度顺手改白名单。
+   * 命中后写 config.json + 热更新内存 + 记日志与活动流水，返回 true 表示调用方可以当"已授权"继续。
+   *
+   * 三道闸（口径详见 src/qqb/allow-rules.mjs 顶部注释）：默认关（enabled: true 才生效）/
+   * deny 优先 / 一小时最多自动纳入 maxAddsPerHour 个（防止有人把昵称改成规则里的名字刷爆白名单）。
+   */
+  function tryAutoInclude(kind, id, event, cfg) {
+    const settings = cfg.allow?.autoInclude;
+    if (!settings?.enabled || settings.rules.length === 0) return false;
+    if (autoIncludeDenied(kind, id, cfg)) return false;
+    const hit = matchAutoInclude({
+      kind,
+      id,
+      name: event?.sender?.nickname,
+      card: event?.sender?.card
+    }, settings);
+    if (!hit) return false;
+    const label = `${kind}:${id}`;
+    const ruleText = describeAutoIncludeRule(hit.rule, hit.index);
+    const budget = autoIncludeBudget(autoIncludeAdds, { maxPerHour: settings.maxAddsPerHour });
+    if (!budget.ok) {
+      log(`⚠️ 自动纳入被限流挡下：${label} 命中 ${ruleText}（${hit.why}），最近一小时已自动纳入 ${budget.count} 个、上限 ${budget.max}；这条按未授权处理`);
+      appendActivity(`[allow] ${label} 命中自动纳入规则但被限流（${hit.why}）`);
+      return false;
+    }
+    const listName = kind === 'group' ? 'groups' : 'private';
+    const configFile = path.join(ROOT, 'config.json');
+    try {
+      // fail-fast：config.json 损坏时 readConfigObject 会抛，宁可这条消息不授权，也不能回写坏配置。
+      const file = readConfigObject(configFile);
+      const onDisk = (file.allow?.[listName] ?? file.allow?.[listName === 'groups' ? 'group' : 'privates'] ?? []).map(String);
+      const nextIds = [...new Set([...(cfg.allow?.[listName] ?? []).map(String), String(id)])];
+      if (!onDisk.includes(String(id))) {
+        file.allow = { ...(file.allow ?? {}), [listName]: nextIds.map((x) => Number(x)) };
+        atomicWriteJson(configFile, file);
+      }
+      cfg.allow = { ...cfg.allow, [listName]: nextIds };
+    } catch (error) {
+      log(`⚠️ 自动纳入失败（${label}）：写 config.json 出错 —— ${error?.message ?? error}；这条消息按未授权处理`);
+      return false;
+    }
+    autoIncludeAdds.push(Date.now());
+    const note = hit.rule.note ? `，备注：${hit.rule.note}` : '';
+    log(`✅ 白名单自动纳入 ${label}：命中 ${ruleText}（${hit.why}${note}）；已写回 config.json 并热更新内存`);
+    appendActivity(`[allow] 白名单自动纳入 ${label}（${hit.why}${hit.rule.note ? `，${hit.rule.note}` : ''}）`);
+    reconcileSessionPolicies();
+    return true;
   }
 
   function sessionPolicy(key) {
@@ -5366,11 +5440,12 @@ async function main() {
               return;
             }
           }
-          file.allow = allow;
+          file.allow = { ...(file.allow ?? {}), private: allow.private, groups: allow.groups };
           file.deny = deny;
           file.ownerQQ = ownerQQ;
           atomicWriteJson(configFile, file);
-          cfg.allow = { private: allow.private, groups: allow.groups };
+          // 展开旧 cfg.allow：控制台只改白名单的两个列表，不能把 allow.autoInclude（第①条）顺手抹掉。
+          cfg.allow = { ...cfg.allow, private: allow.private, groups: allow.groups };
           cfg.deny = { private: deny.private, groups: deny.groups };
           cfg.ownerQQ = ownerQQ;
           reconcileSessionPolicies();
@@ -14150,8 +14225,14 @@ async function main() {
   async function handleIncoming(kind, id, event, cfg) {
     const key = convKey(kind, id);
     if (!modeAllowed(key, kind, id, cfg, currentMode)) {
-      log(`忽略未授权会话 ${key}（当前模式 ${currentMode}，来自 ${event.user_id}）`);
-      return;
+      // 未授权：先给「按用户名规则自动纳入」一次机会（closed-agent 模式除外——那个模式
+      // 只认 owner 私聊，自动加白名单也不会放行，改了配置反而让人以为授权过了）。
+      const admitted = currentMode !== 'closed-agent' && tryAutoInclude(kind, id, event, cfg)
+        && modeAllowed(key, kind, id, cfg, currentMode);
+      if (!admitted) {
+        log(`忽略未授权会话 ${key}（当前模式 ${currentMode}，来自 ${event.user_id}）`);
+        return;
+      }
     }
     const resolveAtName = async (qq) => {
       // 只有群聊才需要把 @QQ号 解析成群名片/昵称；私聊没有群成员概念
