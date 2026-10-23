@@ -680,12 +680,14 @@ curl -s -X POST http://127.0.0.1:3100/api/socialV2/night-greet \
 
 - 格式、解析、行数上限都在 `src/qqb/memory-log.mjs`：默认留 `memoryLog.maxLines = 5000` 行，单条正文截到 800 字、压平成一行并脱敏；**写失败只吞不抛**（归档绝不能拖垮收发）。入站那笔挂在「暂停 / 休眠 / 晚安」几个提前 return **之前**——暂停只表示现在不回，不代表这段对话不该被记住。
 - 归档器是我们自己的 `scripts/qq-extras-collector.mjs`（**不用**插件自带的 `collector.mjs`：它的日志路径、`BRIDGE_DIR` 与正则都写死了，插件一升级就丢）：读 `state/qq-memory.log` → 按整行 sha1 去重 → 调插件的 `lib/archive.mjs#appendMessage()` 落盘到 `~/.dsh/qq-memory/archive/`（`QQ_EXTRAS_DATA` 可改）；攒够 `summaryEvery`（默认 30）条才触发一次插件摘要，且 10 分钟冷却——摘要会真的开一轮模型，别让它被计划任务反复触发。
-- 手动跑：`npm run extras:collect`（采一轮）/ `npm run extras:status`（看归档现状）；`--dry-run` 只统计、`--no-summary` 不烧 token、`--watch` 常驻。
+- 手动跑/查归档：`npm run extras:collect`（采一轮）/ `npm run extras:status`（看归档现状）/ `npm run extras:recent`（最近 20 条，`-- --recent 50 --peer private:123456789` 可调）/ `npm run extras:search -- 关键词`（全文检索，可配 `--limit` / `--role`）；`--dry-run` 只统计、`--no-summary` 不烧 token、`--watch` 常驻。
 - 计划任务：`qq-bridge-memory-collector` 每 5 分钟跑 `scripts\qq-extras-collector-task.bat`，自己的日志在 `state/qq-extras-collector.log`（node 侧保留最后 5000 行）。
 - 想关掉：`memoryLog.enabled = false`（桥接不再写流水，采集器自然没东西可采）。
-- 插件自带的 MCP server（`mcp-qq-extras`，让 AI 自己查归档）由插件自己的 bundle patch 挂上，**装完要重启 DSH 才生效**；它找桥接目录靠 `QQ_BRIDGE_DIR`、找归档目录靠 `QQ_EXTRAS_DATA`（DSH 会把 `DSH_*` 这类变量从子进程环境里过滤掉，`QQ_*` 能透传）。
+- 插件自带的 MCP server（`mcp-qq-extras`，让 AI 自己查归档）由插件自己的 bundle patch 挂上（`command: npx`，DSH 的 MCP SDK 用 cross-spawn，Windows 下 `npx.cmd` 能被解析），**装完要重启 DSH 才生效**；它找桥接目录靠 `QQ_BRIDGE_DIR`（默认 `~/qq-bridge`，本机已设成桥接目录）、找归档目录靠 `QQ_EXTRAS_DATA`（默认 `~/.dsh/qq-memory`；DSH 会把 `DSH_*` 这类变量从子进程环境里过滤掉，`QQ_*` 能透传）。
 - 回归：`npm run test:qq-extras` —— 行格式、插件正则兼容、解析正反例、写入上限、源码接线，以及**夹具内端到端**（真跑 `handleIncoming` + `recordSentMessagesV2`，断言 `state/qq-memory.log` 里正好那三行）。
-- 已知限制：流水只在 **reserved2 模式**下写（当前运行模式）。老式 chat / closed-agent 走的是另一条入站分支，不写这份流水。
+- 已知限制：
+  - 流水只在 **reserved2 模式**下写（当前运行模式）。老式 chat / closed-agent 走的是另一条入站分支，不写这份流水。
+  - **`dsh-qq-extras@0.1.0` 的 MCP server 起不来**（实测 2026-10-24）：发布的 tarball 里 `mcp.mjs:11` 要 `import { generate, listModels, serverUp } from './lib/comfy.mjs'`，但包里没有 `lib/comfy.mjs`（`lib/` 只有 archive/common/images/onebot/tts），直接跑必 `ERR_MODULE_NOT_FOUND: …/lib/comfy.mjs`；npm 上目前也只有 `0.0.0-stage` 与 `0.1.0` 两个版本，没有可升级的修好的版本。**影响面**：重启 DSH 后 `mcp-qq-extras` 起不来，`memory_*` / 表情包 / 语音 / ComfyUI 绘图这些 MCP 工具用不上；**归档链路不受影响**（我们的采集器只 import `lib/archive.mjs` 与 `summarize.mjs`，都不碰 `comfy.mjs`），查归档用上面的 `extras:recent` / `extras:search`。
 
 ## 人员梯队与敏感动作权限（第一梯队 = 家里人）
 

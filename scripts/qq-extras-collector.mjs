@@ -12,8 +12,11 @@
 //   node scripts/qq-extras-collector.mjs --watch        # 常驻轮询
 //   node scripts/qq-extras-collector.mjs --dry-run      # 只统计不落盘
 //   node scripts/qq-extras-collector.mjs --status       # 只看归档现状
+//   node scripts/qq-extras-collector.mjs --recent 10    # 看最近 10 条归档（--peer <key> 可只看一个会话）
+//   node scripts/qq-extras-collector.mjs --search 鲸鱼   # 全文检索归档
 //   node scripts/qq-extras-collector.mjs --no-summary   # 不触发摘要（省 token）
 // 选项：--log <file> --data-dir <dir> --plugin-dir <dir> --summary-every <n> --interval <sec> --dsh-url <url>
+//       --peer <key> --limit <n> --role <owner|agent|member>
 //
 // 归档到达到阈值时会调用插件的 summarizeOnce()：它会在 DSH 里开一个临时会话让模型
 // 压缩对话（因此会消耗 token），所以默认 10 分钟内最多触发一次。
@@ -50,6 +53,8 @@ const USAGE = `用法：node scripts/qq-extras-collector.mjs [选项]
   --interval <秒>      轮询间隔（默认 30）
   --dry-run            只统计，不写归档也不改状态
   --status             打印归档现状后退出
+  --recent [n]         打印最近 n 条归档（默认 20）；可配 --peer <key> 只看某个会话
+  --search <关键词>    在归档里全文检索；可配 --limit <n>（默认 10）与 --role <owner|agent|member>
   --no-summary         不触发插件摘要
   --quiet              只打一行结果（计划任务写日志用）
   --task-log <file>    配合 --quiet：把那一行也追加到这个文件（保留最后 5000 行）
@@ -183,6 +188,23 @@ async function main() {
 
   if (args.status) {
     console.log(JSON.stringify({ ok: true, ...base, stats: archive.stats() }, null, 2));
+    return 0;
+  }
+
+  // 归档查询：插件的 memory_* 工具要等它的 MCP server 起来才可用（0.1.0 的 mcp.mjs 缺
+  // lib/comfy.mjs，起不来），所以这里直接读插件自己的归档库，给出等价的命令行入口。
+  const queryPeer = typeof args.peer === 'string' ? args.peer : '';
+  if (args.recent) {
+    const limit = Math.max(1, Number(typeof args.recent === 'string' ? args.recent : args.limit) || 20);
+    const items = archive.recent(limit, queryPeer);
+    console.log(JSON.stringify({ ok: true, mode: 'recent', ...base, limit, peer: queryPeer || null, count: items.length, items }, null, 2));
+    return 0;
+  }
+  if (typeof args.search === 'string') {
+    const limit = Math.max(1, Number(args.limit) || 10);
+    const role = typeof args.role === 'string' ? args.role : '';
+    const items = archive.search(args.search, limit, role);
+    console.log(JSON.stringify({ ok: true, mode: 'search', ...base, query: args.search, role: role || null, limit, count: items.length, items }, null, 2));
     return 0;
   }
 

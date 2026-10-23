@@ -203,6 +203,12 @@ await test('采集器：参数解析与插件目录解析', () => {
   assert.equal(args['summary-every'], '5');
   assert.equal(args['no-summary'], true);
   assert.equal(parseArgs(['--status'])['status'], true, '无值开关不能把下一个 flag 吃掉');
+  // 查询类开关：--recent 既可裸用也可带条数；--search 必须带关键词。
+  assert.equal(parseArgs(['--recent']).recent, true);
+  assert.equal(parseArgs(['--recent', '10']).recent, '10');
+  assert.equal(parseArgs(['--search', '鲸鱼']).search, '鲸鱼');
+  assert.equal(parseArgs(['--search', '鲸鱼', '--limit', '3', '--role', 'agent']).limit, '3');
+  assert.equal(parseArgs(['--search', '鲸鱼', '--limit', '3', '--role', 'agent']).role, 'agent');
 
   const home = tempDir('home');
   const fake = path.join(home, '.dsh', 'profiles', 'web', 'node_modules', 'dsh-qq-extras');
