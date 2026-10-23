@@ -106,6 +106,14 @@ async function fixture(socialV2 = {}) {
         fs.mkdirSync(path.dirname(outPath), { recursive: true });
         fs.writeFileSync(outPath, WAV);
         return { path: outPath, bytes: WAV.length, engine: 'stub-tts', voice: 'stub-voice' };
+      },
+      // 桥接现在调的是**分发器** synthesizeVoice（它内部才叫 synthesizeToFile），所以这里
+      // 也必须把分发器换成桩 —— 只桩 synthesizeToFile 的话，VM 里跑的是 tts.mjs 模块内的
+      // 真实现，会真的去 fork PowerShell 合成（本测试就不再是「不碰真合成」了）。
+      synthesizeVoice: async ({ outPath, engine = 'sapi' }) => {
+        fs.mkdirSync(path.dirname(outPath), { recursive: true });
+        fs.writeFileSync(outPath, WAV);
+        return { path: outPath, bytes: WAV.length, engine: 'stub-tts', voice: 'stub-voice', engineWanted: engine };
       }
     }
   });

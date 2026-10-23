@@ -6,6 +6,9 @@
 //      Kangkang / Yaoyao）—— 一次 fork 就能出声。主线是「先把文字→语音条整条链路打通」，
 //      真人音色（GPT-SoVITS）是第二步：那要下模型、要显卡常驻，不该挡住第一步。
 //   2. 失败了也只是「这条语音没发出去」，不影响文字聊天。
+// 【第二步已接上，见文件末尾的 synthesizeVoice】：GPT-SoVITS 服务在跑且配置齐了就优先用它，
+//   否则回落到这里的 SAPI —— 两条引擎共用「文字只走临时文件」的安全规矩（GPT-SoVITS 那条约
+//   走 HTTP body，同样不碰命令行）。
 //
 // 安全（这条最关键）：**文字只通过临时文件传递，绝不拼进命令行。**
 //   Windows 上把聊天内容拼进 powershell 的参数字符串时，一句带引号/反引号/分号的文字就能
@@ -19,6 +22,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
+import { gptsovitsSettings, synthesizeWithGptSoVits } from './tts-gptsovits.mjs';
 
 /**
  * Windows PowerShell 5.1 的绝对路径。
@@ -278,4 +282,52 @@ export async function listTtsVoices({ timeoutMs = 20000 } = {}) {
   } finally {
     try { fs.rmSync(tmp, { recursive: true, force: true }); } catch {}
   }
+}
+
+/**
+ * 按配置选引擎合成一句话 —— **桥接只调这一个**（第二步：真人音色）。
+ *
+ * engine：
+ *   'sapi'（默认）—— Windows 自带声音：零依赖、秒出，音色是「微软的机器音」。
+ *   'gptsovits'   —— 本机 GPT-SoVITS 服务（api_v2.py，默认 127.0.0.1:9880）：零样本克隆音色，
+ *                    需要服务在跑 + 参考音频与它的逐字文本配对；首次调用要加载模型，比较慢。
+ *
+ * 为什么默认回落 SAPI：GPT-SoVITS 要显卡常驻、模型下好、参考音频配对，任一项没就绪都不该让
+ * 「她想说句话」变成整条失败。回落时返回值带 `fallbackReason`，日志里看得见为什么回落。
+ * 想「不是 GPT-SoVITS 就不发」就把 `socialV2.voice.gptsovits.fallback` 设成 false（那时抛错）。
+ *
+ * 注意：GPT-SoVITS 用自己的 `gptsovits.timeoutMs`（默认 120000，首次要加载模型），
+ * 不受这里 SAPI 用的 `timeoutMs`（默认 30000）影响。
+ */
+export async function synthesizeVoice({
+  text,
+  outPath,
+  voice = '',
+  rate = 0,
+  timeoutMs = 30000,
+  engine = 'sapi',
+  gptsovits = {},
+  root = process.cwd()
+} = {}) {
+  const wanted = String(engine ?? 'sapi').trim().toLowerCase();
+  const viaSapi = async (fallbackReason) => {
+    const made = await synthesizeToFile({ text, outPath, voice, rate, timeoutMs });
+    return fallbackReason ? { ...made, engineWanted: wanted || 'sapi', fallbackReason } : { ...made, engineWanted: wanted || 'sapi' };
+  };
+
+  if (wanted === 'gptsovits' || wanted === 'gpt-sovits') {
+    const settings = gptsovitsSettings(gptsovits, { root });
+    if (!settings.enabled) return viaSapi('socialV2.voice.gptsovits.enabled=false');
+    try {
+      const made = await synthesizeWithGptSoVits({ text, outPath, settings, root });
+      return { ...made, engineWanted: 'gptsovits' };
+    } catch (error) {
+      if (settings.fallback === false) throw error;
+      return viaSapi(error?.message ?? String(error));
+    }
+  }
+  if (wanted && wanted !== 'sapi' && wanted !== 'sapi5' && wanted !== 'onecore') {
+    throw new Error(`不认识的语音引擎：${engine}（可用 sapi / gptsovits）`);
+  }
+  return viaSapi();
 }

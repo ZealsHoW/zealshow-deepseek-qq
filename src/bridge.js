@@ -42,7 +42,7 @@ import { createMood } from './qqb/persona/mood.mjs';
 import { readWatch, shouldNotifyWatch, markWatchNotified, buildWatchNotice } from './qqb/read-login-watch.mjs';
 // 本机 TTS（Windows 自带 SAPI/OneCore）：qq_send_voice 传 text 就能当场合成一条语音。
 // 实现与安全边界（文字只走临时文件、绝不拼命令行）见 src/qqb/tts.mjs。
-import { synthesizeToFile, ttsAvailable } from './qqb/tts.mjs';
+import { synthesizeVoice, ttsAvailable } from './qqb/tts.mjs';
 import { createMemoryLogWriter, memoryLogPath } from './qqb/memory-log.mjs';
 import { createEvolve } from './qqb/persona/evolve.mjs';
 import { createIntervene } from './qqb/persona/intervene.mjs';
@@ -2460,11 +2460,17 @@ async function main() {
       autoReadback: v.autoReadback !== false,
       tts: {
         enabled: t.enabled !== false,
+        // 引擎：'sapi'（Windows 自带声音，默认）或 'gptsovits'（本机 GPT-SoVITS 服务，真人音色）。
+        // 认不出的值会在合成时抛错，不会静默退回 —— 免得「以为在用真人音色」。
+        engine: String(t.engine ?? 'sapi').trim().toLowerCase() || 'sapi',
         voice: String(t.voice ?? ''),
         rate: Number.isFinite(Number(t.rate)) ? Math.trunc(Math.max(-10, Math.min(10, Number(t.rate)))) : 0,
         maxChars: Number(t.maxChars) > 0 ? Math.trunc(Number(t.maxChars)) : 200,
         timeoutMs: Number(t.timeoutMs) > 0 ? Math.trunc(Number(t.timeoutMs)) : 30000,
-        keepFiles: Number(t.keepFiles) >= 0 ? Math.trunc(Number(t.keepFiles)) : 20
+        keepFiles: Number(t.keepFiles) >= 0 ? Math.trunc(Number(t.keepFiles)) : 20,
+        // GPT-SoVITS 那一套设置**原样**带下去，由 src/qqb/tts-gptsovits.mjs 规整（含路径解析）。
+        // 这里不解析是为了让 voiceCfg() 保持「读配置、不做 IO」的轻量语义。
+        gptsovits: { ...(t.gptsovits ?? {}) }
       }
     };
   }
@@ -2813,14 +2819,33 @@ async function main() {
     if (raw.length > t.maxChars) {
       throw new Error(`要合成的文字太长（${raw.length} 字，上限 ${t.maxChars} 字）：语音是一条条说的话，请拆短再发`);
     }
-    if (!ttsAvailable()) throw new Error('本机没有可用的语音合成（需要 Windows 自带的 SAPI/OneCore 声音）');
+    // 走 GPT-SoVITS 时**不要求**本机有 SAPI 声音（那是另一条引擎的前提）。
+    // 只有「引擎不是 GPT-SoVITS」或「gptsovits.enabled=false 等于直接走 SAPI」时才必须查。
+    const gsvPrimary = (t.engine === 'gptsovits' || t.engine === 'gpt-sovits') && t.gptsovits?.enabled !== false;
+    if (!gsvPrimary && !ttsAvailable()) throw new Error('本机没有可用的语音合成（需要 Windows 自带的 SAPI/OneCore 声音）');
+    if (gsvPrimary && t.gptsovits?.fallback !== false && !ttsAvailable()) {
+      log('[voice] 本机没有 SAPI 声音：GPT-SoVITS 失败时没有回落目标（那就会直接报错）');
+    }
     try { fs.mkdirSync(vc.dir, { recursive: true }); } catch {}
     const stamp = new Date().toISOString().replace(/[-:]/g, '').replace(/\..+$/, '').replace('T', '-');
     const outPath = path.join(vc.dir, `tts-${stamp}-${Math.random().toString(36).slice(2, 6)}.wav`);
-    const made = await synthesizeToFile({ text: raw, outPath, voice: t.voice, rate: t.rate, timeoutMs: t.timeoutMs });
+    // engine / gptsovits 一路带下去：sapi 走原路，gptsovits 优先用本机 GPT-SoVITS 服务、
+    // 不可用时回落 SAPI（回落原因会写进日志与返回值）。
+    const made = await synthesizeVoice({
+      text: raw,
+      outPath,
+      voice: t.voice,
+      rate: t.rate,
+      timeoutMs: t.timeoutMs,
+      engine: t.engine,
+      gptsovits: t.gptsovits,
+      root: ROOT
+    });
     const pruned = pruneTtsLibrary(vc.dir, t.keepFiles);
-    log(`[voice] 本机合成语音 ${path.basename(made.path)}（${made.voice || '默认声音'} / ${made.engine}，${made.bytes} 字节${pruned ? `，清理旧产物 ${pruned} 个` : ''}）`);
-    return { path: made.path, name: path.basename(made.path), engine: made.engine, voice: made.voice, bytes: made.bytes, pruned };
+    const fallbackNote = made.fallbackReason ? `，回落 ${made.engine}（原因：${made.fallbackReason}）` : '';
+    log(`[voice] 本机合成语音 ${path.basename(made.path)}（${made.voice || '默认声音'} / ${made.engine}，${made.bytes} 字节${fallbackNote}${pruned ? `，清理旧产物 ${pruned} 个` : ''}）`);
+    if (made.fallbackReason) appendActivity(`${path.basename(made.path)} [voice] GPT-SoVITS 未用上，已回落 ${made.engine}：${made.fallbackReason}`);
+    return { path: made.path, name: path.basename(made.path), engine: made.engine, voice: made.voice, bytes: made.bytes, pruned, fallbackReason: made.fallbackReason ?? null };
   }
 
   /**

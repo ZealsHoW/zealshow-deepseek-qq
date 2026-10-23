@@ -326,6 +326,7 @@ qq-bridge/
     dsh-client.js       # Node 版 DSH API 客户端（WS 下行）
     md-to-plain.js      # Markdown → QQ 纯文本
     self-test.js        # DSH 侧自测
+    qqb/                # 桥接内部模块：tts.mjs（SAPI 合成 + 引擎分发）/ tts-gptsovits.mjs（GPT-SoVITS 适配层）/ memory-log.mjs（长期记忆流水）…
   scripts/              # 测试/运维脚本（含 postinstall 的 patch-snowluma-sdk.mjs）
     patch-snowluma-sdk.mjs  # 修补 SDK 的 ESM 打包 bug（postinstall 自动执行）
   state/                # 运行时数据（不入库；qq-activity.log / qq-memory.log / history / sessions.json …）
@@ -510,7 +511,93 @@ npm run voice:tts "你好呀" Kangkang  # 指定音色
 npm run test:voice-tts   # 真合成一条 + 端点 text 通道（开关 / 字数上限 / 清理安全 / 二选一 / 门禁在合成前）
 ```
 
-已知边界：这一步用的是**系统 TTS 的音质**，且只支持 Windows。以后换成自己的声音（GPT-SoVITS / RVC）时接口不变 —— 都只是往 `audio/` 里放一个 wav 而已。
+已知边界：出厂这条用的是**系统 TTS 的音质**（只支持 Windows）。想换成自己的声音见下一节 —— 对上层接口不变：都只是往 `audio/` 里放一个 wav 而已。
+
+### 真人音色（GPT-SoVITS，可选）
+
+出厂那条是「微软的机器音」。想让她用**指定的一段声音**说话，接的是本机 [GPT-SoVITS](https://github.com/RVC-Boss/GPT-SoVITS)（零样本声音克隆）。
+
+为什么是「本机服务 + HTTP」而不是把模型塞进 node：GPT-SoVITS 是 Python + torch + 显卡的活（推理几秒、首次加载模型几十秒），node 侧只该把文字递过去、把 wav 拿回来。所以 `src/qqb/tts-gptsovits.mjs` 是个**薄适配层**：调它自带的 `api_v2.py`（默认 `127.0.0.1:9880`）的 `POST /tts`。
+
+**三步装上**（以本机为例，安装目录 `_gptsovits/`；HF 在国内不可达，模型走 ModelScope）：
+
+```powershell
+# 1. 环境（本机用 uv 装 Python 3.10；系统里没有 python/pip/conda，uv 是唯一的入口）
+uv python install 3.10
+uv venv --python 3.10 D:\…\_gptsovits\env
+uv pip install --python D:\…\_gptsovits\env\Scripts\python.exe torch torchaudio --index-url https://download.pytorch.org/whl/cu126
+#   本机实测：torch 2.14.1+cu126 / torchaudio 2.11.0+cu126 / torch.cuda.is_available() = True
+#   注意 uv 建的 venv 里没有 pip，所以全程用 `uv pip install --python <venv 的 python>`。
+
+# requirements 要先动三处，否则 Windows 上装不完（那三个包只有源码包，编译要 MSVC/cmake，这台机器没有）：
+#   * 删掉首行 `--no-binary=opencc`（1.4.2 有 Windows 轮子，只有源码编译才需要 MSVC）
+#   * 删掉 `jieba_fast`（PyPI 上没有 Windows 轮子）——
+#     改用 scripts/gptsovits-shims/jieba_fast 那个同名壳转发到纯 Python 的 jieba
+#   * 删掉 `pyopenjtalk`（源码编译要 cmake+nmake+MSVC）——改用预编译轮子：
+#     uv pip install --python <venv 的 python> pyopenjtalk-prebuilt --no-deps
+#     （它自己钉 numpy==2.2.6，但 GPT-SoVITS 要 numpy<2；实测 numpy 1.26.4 下 ABI 正常）
+#   另：`av` 的源码包下载慢，默认 30 秒会 timeout，先抬高 uv 的下载超时。
+$env:UV_HTTP_TIMEOUT = '900'
+uv pip install --python D:\…\_gptsovits\env\Scripts\python.exe -r requirements-filtered.txt
+uv pip install --python D:\…\_gptsovits\env\Scripts\python.exe resampy    # 上游漏写的依赖
+uv pip install --python D:\…\_gptsovits\env\Scripts\python.exe torchcodec --index-url https://download.pytorch.org/whl/cu126
+#   torchaudio 2.11 起把音频读写全部转交 torchcodec（`backend` 参数会被忽略），所以必须装它；
+#   而 libtorchcodec 还要求在 PATH 上找到 FFmpeg 的 avcodec/avformat 等 DLL（见下一步）。
+
+# 1b. FFmpeg 共享库（给 torchcodec 找 DLL 用；GitHub 直连不通就套 gh-proxy）
+curl.exe -L -o D:\…\_gptsovits\ffmpeg-shared.zip "https://gh-proxy.com/https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl-shared.zip"
+#   解压到 D:\…\_gptsovits\ffmpeg\ 下即可：`npm run gptsovits:serve` 会自动把
+#   <安装目录>\ffmpeg\*\bin 前置到 PATH（找不到就打一行警告，不影响 SAPI 那条路）。
+
+# 2. 预训练权重（ModelScope，zip 4.3 GB / 解开 4.6 GB）→ 解到 GPT_SoVITS/pretrained_models/
+curl.exe -L -o pretrained_models.zip "https://www.modelscope.cn/models/XXXXRT/GPT-SoVITS-Pretrained/resolve/master/pretrained_models.zip"
+
+# 3. 起服务（要显卡常驻；跑哪一版模型由 tts_infer.yaml 的 custom 段决定，默认 v2）
+npm run gptsovits:serve
+#   等价于 `python api_v2.py -a 127.0.0.1 -p 9880`，只多两件事：把 jieba_fast 壳挂进
+#   PYTHONPATH，并写一份 site-packages/_gptsovits_shims.pth（这样手动起服务也认得壳）。
+```
+
+探活（不用等模型加载完）：
+
+```powershell
+curl.exe -s http://127.0.0.1:9880/control   # 回 {"message":"command is required"} 就是活着（400，正常）
+```
+
+**然后配两处**（`socialV2.voice.tts`）：
+
+| 键 | 默认 | 说明 |
+| --- | --- | --- |
+| `engine` | `sapi` | `sapi` = Windows 自带声音；`gptsovits` = 走 GPT-SoVITS |
+| `gptsovits.baseUrl` | `http://127.0.0.1:9880` | 服务地址（`api_v2.py` 的绑定） |
+| `gptsovits.refAudio` | `""` | **参考音频**，相对路径按仓库根解析（如 `audio/ref/小鲸鱼.wav`）；3~10 秒干净人声最好 |
+| `gptsovits.refText` | `""` | 参考音频的**逐字文本**（必须一致：它决定了音素对齐） |
+| `gptsovits.textLang` / `promptLang` | `zh` / `zh` | 可用 `zh/en/ja/ko/yue/auto` |
+| `gptsovits.splitMethod` | `cut5` | 长句切分法（`api_v2.py` 的 `text_split_method`） |
+| `gptsovits.speedFactor` | `1` | 语速倍数 |
+| `gptsovits.topK` / `topP` / `temperature` / `repetitionPenalty` | `15` / `1` / `1` / `1.35` | 采样参数，默认值就是上游默认值 |
+| `gptsovits.timeoutMs` | `120000` | **首次调用要加载模型**，所以比 SAPI 那条（`tts.timeoutMs`）长得多 |
+| `gptsovits.fallback` | `true` | 服务不可用时**回落**到 SAPI（那时返回值与日志都会带回落原因） |
+
+体检与回归：
+
+```bash
+npm run check:gptsovits          # 只读体检：环境/权重/配置/服务探活 + 合成一句到 audio/
+npm run check:gptsovits -- --no-synth
+npm run test:voice-gptsovits     # 离线回归：不碰真模型（本机 http 桩冒充服务）+ 桥接接线
+npm run test:voice-tts           # 第一步的 SAPI 回归，仍然要过
+```
+
+设计取舍（都在代码注释里写明了）：
+
+- **回落而不是硬失败**：语音链路不能因为「音色引擎没就绪」整条挂掉，所以 `engine:'gptsovits'` 失败时默认退回 SAPI，并把原因浮到日志（`[voice] … 回落 sapi5（原因：…）`）与 `qq_send_voice` 的返回值；想「不是真人音色就不发」就把 `fallback` 设 `false`（那时抛错）。
+- **不要求本机有 SAPI 声音**：走 GPT-SoVITS 时 SAPI 只是可选的保底，所以那里不再强制 `ttsAvailable()`。
+- **返回包要验真**：HTTP 200 也可能是一段 JSON 错误，所以校验开头是 `RIFF/OggS/fLaC/ID3` 才落盘（假音频绝不进语音库）。
+- **安全同前**：要合成的文字走 HTTP body（不拼命令行）；只发语音库里的文件；合成发生在梯队门禁与静默检查之后。
+
+本机实测（2026-10-24，RTX 4060 Laptop 8G）：首次合成（服务刚起来、要加载模型）107.6 秒，**热态 2.2 秒**；产物 32 kHz 单声道 16 bit wav，5.16 秒/330 KB。已用这条链路真发过一条 QQ 语音（走 `scripts/send-voice.mjs`，网关回读确认是 `record` 段）。
+
+已知限制：只支持 Windows 上的**同机服务**（参考音频路径是交给本机 Python 读的，所以必须是本机绝对路径）；显卡常驻（本机 RTX 4060 8G 够用，但服务起来后会占显存）；参考音频与逐字文本必须配对，否则音色会跑偏。
 
 ## 待发文件夹（qq_list_outbox / qq_save_message_image / qq_draw_image）
 
@@ -769,7 +856,7 @@ npm run test:send-silence   # 沉默窗口 / 停手 / 队列跳过 / 失败分�
 - agent 回复在回合结束时一次性发送（不做流式逐字转发）；回复超过 `socialV2.send.maxMessageChars`（默认 500 字，可用 `social.maxReplyChars` 调整）自动按句读/URL 边界分段
 - 图片及部分表情可以通过安全下载接入多模态模型；语音/视频以及无法取得图片字节的消息仍使用占位文本
 - **发**语音是支持的（独立工具的图形界面 / 命令行 / AI 工具，见 `docs/README.md` 的文档索引；AI 还能用本机 TTS 当场合成，见「发语音」）；但**收**到的语音目前只显示占位文本，不做语音转写入上下文
-- **AI 发语音默认关闭**（`socialV2.voice.enabled` 与 `tools.sendVoice` 默认 `false`）：先把音频放进 `audio/`，再到控制台打开开关；你自己发语音不受这个开关影响。打开后 AI 也可以当场用本机 TTS 合成（Windows 自带声音，不需要 ffmpeg）
+- **AI 发语音默认关闭**（`socialV2.voice.enabled` 与 `tools.sendVoice` 默认 `false`）：先把音频放进 `audio/`，再到控制台打开开关；你自己发语音不受这个开关影响。打开后 AI 也可以当场用本机 TTS 合成（Windows 自带声音，不需要 ffmpeg；想用真人音色见「真人音色（GPT-SoVITS，可选）」，那要另起一个本机 Python 服务）
 - agent 的 Markdown 回复会转成纯文本（链接保留 `文字 (url)` 形式）
 - `@snowluma/sdk` 的 npm 发布版存在 ESM 扩展名 bug，本仓库通过 postinstall 补丁修复（见 `scripts/patch-snowluma-sdk.mjs`）
 - `scripts/test-dsh-v2-wait.mjs`（`npm run test-wait:e2e`）要一次**独立的** DSH 回复，且会话工具清单里得有 `qq_wait_for_messages`：本机实测单独跑 15s 就结束、但 `HAS_qq_wait_for_messages=false`；跑能力自测时机器正被当前会话占用，必然吃满 120s 超时。属 DSH 侧集成待查，不是 QQ 能力缺失（`npm run test:capabilities` 把它算作跳过）

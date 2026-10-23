@@ -253,11 +253,30 @@
       "autoReadback": true,
       "tts": {
         "enabled": true,
+        "engine": "sapi",
         "voice": "",
         "rate": 0,
         "maxChars": 200,
         "timeoutMs": 30000,
-        "keepFiles": 20
+        "keepFiles": 20,
+        "gptsovits": {
+          "enabled": true,
+          "baseUrl": "http://127.0.0.1:9880",
+          "refAudio": "",
+          "refText": "",
+          "textLang": "zh",
+          "promptLang": "zh",
+          "mediaType": "wav",
+          "splitMethod": "cut5",
+          "speedFactor": 1,
+          "topK": 15,
+          "topP": 1,
+          "temperature": 1,
+          "repetitionPenalty": 1.35,
+          "timeoutMs": 120000,
+          "healthTimeoutMs": 3000,
+          "fallback": true
+        }
       }
     },
     "proactive": {
