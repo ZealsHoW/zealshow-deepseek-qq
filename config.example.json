@@ -21,6 +21,10 @@
     "launcherPath": "",
     "homeDir": ""
   },
+  "memoryLog": {
+    "enabled": true,
+    "maxLines": 5000
+  },
   "ownerQQ": null,
   "sessionCwd": "",
   "agentPreset": "qq-chat",

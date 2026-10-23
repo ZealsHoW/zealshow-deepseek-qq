@@ -20,6 +20,7 @@ import * as sticker from '../src/sticker-lib.js';
 import * as modelPrices from '../src/model-prices.js';
 import * as tokenLedger from '../src/token-ledger.js';
 import * as voiceLib from '../src/send-voice-lib.js';
+import * as memoryLog from '../src/qqb/memory-log.mjs';
 // 本机 TTS 模块：夹具里**注入真实现**（它只读写显式传入的路径），需要替身的用例用 globals 覆盖。
 import * as ttsLib from '../src/qqb/tts.mjs';
 import * as presetPrompt from '../src/preset-prompt.js';
@@ -419,6 +420,11 @@ export async function bridgeHarness({ config = {}, savedState, files = {}, globa
     // 夹具临时目录，不会碰到真 state/tool-calls.jsonl；再手写一套桩反而会掩盖真实的
     // 脱敏与上限轮转行为。
     createCallLog,
+    // 归档流水（state/qq-memory.log）：注入**真实现**——它只按显式路径 append，
+    // 而那个路径由 bridge.js 按被替换过的 STATE_DIR 算出来 = 夹具临时目录。
+    // 这里若漏注入，appendMemoryLog 会把 ReferenceError 吞掉，归档链路在夹具里静默失效。
+    createMemoryLogWriter: memoryLog.createMemoryLogWriter,
+    memoryLogPath: memoryLog.memoryLogPath,
     // R4：容错层的注入点。backoff/outbox/inbound 用桩（真实现会碰文件与定时器）。
     createBackoff, createOutbox, createInboundDedup,
     // R2：情绪状态机也用桩（夹具不做真磁盘读写）。

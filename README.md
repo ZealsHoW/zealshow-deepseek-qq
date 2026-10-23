@@ -328,7 +328,7 @@ qq-bridge/
     self-test.js        # DSH 侧自测
   scripts/              # 测试/运维脚本（含 postinstall 的 patch-snowluma-sdk.mjs）
     patch-snowluma-sdk.mjs  # 修补 SDK 的 ESM 打包 bug（postinstall 自动执行）
-  state/                # 运行时数据（不入库）
+  state/                # 运行时数据（不入库；qq-activity.log / qq-memory.log / history / sessions.json …）
 ```
 
 > 🎤 **独立的「发语音」工具不在这里**：它是仓库上一级的 [`../voice-tool/`](../voice-tool/)（`voice-cli.mjs` /
@@ -661,6 +661,31 @@ curl -s -X POST http://127.0.0.1:3100/api/socialV2/night-greet \
 - **分享过的话题**：`state/interests.json`，AI 用 `qq_interest_record(topic="...", note="...")` 记一笔，`qq_interest_list` 查看。唤醒时会带上最近若干条（`socialV2.interests.promptLimit`，默认 15），避免同一天把同一件事讲三遍。清单上限 `socialV2.interests.maxItems`（默认 60）。
 - 日记与话题清单**跨会话共享**（群聊、各个私聊看到的是同一份），因为它们属于「小鲸鱼自己」而不是某个会话。
 - 想关掉：`socialV2.tools.diary = false` / `socialV2.tools.interests = false`（工具不再注册，提示词里的【长期记忆】也随之消失）。
+
+## 长期记忆归档（dsh-qq-extras，可选）
+
+[`dsh-qq-extras`](https://www.npmjs.com/package/dsh-qq-extras) 会把「主人 ↔ 小鲸鱼」的对话存成一份可检索的归档，并定期让模型压成摘要，给 AI 一个跨会话的长期记忆。它自带的采集器读的是 `<BRIDGE_DIR>/state/qq-activity.log`，而那份日志的入站行长这样：
+
+```
+[00:12:34] <会话 key> [reserved2] 消息已入未读：在吗
+```
+
+——**没有说话人身份**，而插件只认 `管理员 <昵称>：` / `agent 回复：` 两种说话人（别的行一律丢弃）。所以我们**不动**活动日志（它被控制台 UI 与既有测试消费，且只留 500 行），让桥接多写一份 `state/qq-memory.log`：
+
+| 行 | 谁来写 | 说明 |
+| --- | --- | --- |
+| `[HH:MM:SS] <key> 管理员 <昵称>：<text>` | `src/bridge.js` 入站分支（`appendMemoryLog`） | 主人说的话，带真实昵称 |
+| `[HH:MM:SS] <key> 成员 <昵称>：<text>` | 同上 | 群里其他人（插件原生不认，我们自己的采集器认） |
+| `[HH:MM:SS] <key> agent 回复：<text>` | 同上，出站（`recordSentMessagesV2`） | 小鲸鱼发出去的所有文字（AI 回复 / 工具发送 / 控制台发送） |
+
+- 格式、解析、行数上限都在 `src/qqb/memory-log.mjs`：默认留 `memoryLog.maxLines = 5000` 行，单条正文截到 800 字、压平成一行并脱敏；**写失败只吞不抛**（归档绝不能拖垮收发）。入站那笔挂在「暂停 / 休眠 / 晚安」几个提前 return **之前**——暂停只表示现在不回，不代表这段对话不该被记住。
+- 归档器是我们自己的 `scripts/qq-extras-collector.mjs`（**不用**插件自带的 `collector.mjs`：它的日志路径、`BRIDGE_DIR` 与正则都写死了，插件一升级就丢）：读 `state/qq-memory.log` → 按整行 sha1 去重 → 调插件的 `lib/archive.mjs#appendMessage()` 落盘到 `~/.dsh/qq-memory/archive/`（`QQ_EXTRAS_DATA` 可改）；攒够 `summaryEvery`（默认 30）条才触发一次插件摘要，且 10 分钟冷却——摘要会真的开一轮模型，别让它被计划任务反复触发。
+- 手动跑：`npm run extras:collect`（采一轮）/ `npm run extras:status`（看归档现状）；`--dry-run` 只统计、`--no-summary` 不烧 token、`--watch` 常驻。
+- 计划任务：`qq-bridge-memory-collector` 每 5 分钟跑 `scripts\qq-extras-collector-task.bat`，自己的日志在 `state/qq-extras-collector.log`（node 侧保留最后 5000 行）。
+- 想关掉：`memoryLog.enabled = false`（桥接不再写流水，采集器自然没东西可采）。
+- 插件自带的 MCP server（`mcp-qq-extras`，让 AI 自己查归档）由插件自己的 bundle patch 挂上，**装完要重启 DSH 才生效**；它找桥接目录靠 `QQ_BRIDGE_DIR`、找归档目录靠 `QQ_EXTRAS_DATA`（DSH 会把 `DSH_*` 这类变量从子进程环境里过滤掉，`QQ_*` 能透传）。
+- 回归：`npm run test:qq-extras` —— 行格式、插件正则兼容、解析正反例、写入上限、源码接线，以及**夹具内端到端**（真跑 `handleIncoming` + `recordSentMessagesV2`，断言 `state/qq-memory.log` 里正好那三行）。
+- 已知限制：流水只在 **reserved2 模式**下写（当前运行模式）。老式 chat / closed-agent 走的是另一条入站分支，不写这份流水。
 
 ## 人员梯队与敏感动作权限（第一梯队 = 家里人）
 

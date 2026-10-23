@@ -43,6 +43,7 @@ import { readWatch, shouldNotifyWatch, markWatchNotified, buildWatchNotice } fro
 // 本机 TTS（Windows 自带 SAPI/OneCore）：qq_send_voice 传 text 就能当场合成一条语音。
 // 实现与安全边界（文字只走临时文件、绝不拼命令行）见 src/qqb/tts.mjs。
 import { synthesizeToFile, ttsAvailable } from './qqb/tts.mjs';
+import { createMemoryLogWriter, memoryLogPath } from './qqb/memory-log.mjs';
 import { createEvolve } from './qqb/persona/evolve.mjs';
 import { createIntervene } from './qqb/persona/intervene.mjs';
 import { createDirected } from './qqb/directed/direct.mjs';
@@ -1391,6 +1392,28 @@ function appendActivity(line) {
   appendActivityLog(`[${localClock()}] ${redactSensitiveText(String(line).replace(/[\r\n]+/g, ' '))}\n`);
 }
 
+// 归档流水日志（state/qq-memory.log）：给 dsh-qq-extras 的归档器读，格式见 src/qqb/memory-log.mjs。
+// 懒创建：cfg 要到 loadConfig() 之后才有值。写失败一律吞掉（append 内部 try/catch），
+// 归档日志坏掉绝不能影响收发——这条日志只是锦上添花。
+let memoryLogWriter = null;
+let memoryLogSignature = '';
+function memoryLogFor() {
+  const enabled = cfg?.memoryLog?.enabled !== false;
+  const maxLines = Number(cfg?.memoryLog?.maxLines) || 5000;
+  const signature = `${enabled}:${maxLines}`;
+  if (memoryLogWriter && signature === memoryLogSignature) return memoryLogWriter;
+  memoryLogWriter = createMemoryLogWriter({ file: memoryLogPath(STATE_DIR), enabled, maxLines });
+  memoryLogSignature = signature;
+  return memoryLogWriter;
+}
+function appendMemoryLog(key, role, name, text) {
+  try {
+    memoryLogFor().append({ key, role, name, text: redactSensitiveText(String(text ?? '').replace(/[\r\n]+/g, ' ')) });
+  } catch {
+    /* 归档日志失败不影响主流程 */
+  }
+}
+
 // 读取角色/模式状态：{"role": "傲娇助手", "mode": "active"|"silent"}
 function readRoleState() {
   return readJsonSafe(ROLE_STATE_FILE, { role: null, mode: 'active' });
@@ -1442,6 +1465,9 @@ function loadConfig() {
       ...(file.dsh ?? {})
     },
     snowluma: { wsUrl: 'ws://127.0.0.1:3001', accessToken: '', ...(file.snowluma ?? {}) },
+    // 归档流水日志（供 dsh-qq-extras 归档/摘要用）：默认开，写在 state/qq-memory.log。
+    // 与 state/qq-activity.log 分开，理由见 src/qqb/memory-log.mjs 顶部注释。
+    memoryLog: { enabled: true, maxLines: 5000, ...(file.memoryLog ?? {}) },
     // 空 => 每个会话在 state/agents/<key> 下建独立工作目录
     sessionCwd: file.sessionCwd ?? '',
     agentPreset: file.agentPreset ?? 'qq-chat',
@@ -12718,6 +12744,9 @@ async function main() {
         isSelf: true,
         time: now + i * 1000
       });
+      // 归档流水：这里是小鲸鱼所有出站文字的必经之路（AI 回复 / 工具发送 / 控制台发送），
+      // text 已经过 redactKnownTokensOnly 脱敏。
+      appendMemoryLog(key, 'agent', null, text);
     }
     if (st.recentMessages.length > recentLimit) st.recentMessages.splice(0, st.recentMessages.length - recentLimit);
     // R2：说话是要花力气的——**一次回复记一次**精力消耗。
@@ -14266,6 +14295,15 @@ async function main() {
     if (currentMode === 'reserved2') {
       const sender = kind === 'group' ? (event.sender?.card || event.sender?.nickname || String(event.user_id)) : '私聊';
       appendSocialV2Message(key, sender, textContent, plainContent, quoteTargetIsSelf, isOwner, event.message_id ?? event.msg_id ?? null, mediaList, event.user_id ?? null, extractForwardIds(event.message ?? []));
+      // 归档流水（带真实昵称与角色）：群聊用群名片/昵称，私聊用对方昵称，都没有就退回 QQ 号。
+      // 刻意放在「暂停 / 休眠 / 晚安」这几个提前 return 之前 —— 归档是长期记忆，
+      // 暂停只表示「现在不回」，不代表这段对话不该被记住。
+      appendMemoryLog(
+        key,
+        isOwner ? 'owner' : 'member',
+        kind === 'group' ? sender : (event.sender?.nickname || String(event.user_id)),
+        textContent
+      );
       // 二代同样收集群聊黑话学习素材（AI 自主提交之外，桥接仍自动提取高频陌生词）
       if (kind === 'group') feedSlangWindow(key, sender, plainContent);
       if (socialV2.paused) {
