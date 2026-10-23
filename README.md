@@ -272,6 +272,21 @@ npm run self-test
 
 预期输出：连接成功 → 测试会话创建 → prompt 被接受 → 打印 agent 回复。
 
+### 能力自测（要桥接正跑着；默认只读，可选实发）
+
+上面都是离线回归。想知道**她现在到底还能不能**到点说晚安、主动在私聊/群里说话、回复与自动回复、
+自己刷抖音、发图、自己画一张发出来、发说说、看懂图、发语音、发表情包、读抖音链接 —— 用这张表：
+
+```bash
+npm run test:capabilities -- --douyin=<一条抖音链接>   # 只读：79 个回归脚本 + 逐项探测，一条 QQ 消息都不发
+npm run test:capabilities -- --live                  # 额外实发：只发主人自己的私聊 + visibility=self 的说说
+```
+
+每项打 `✅ / ⏭ / ❌` 并附证据（配置值、日志行、工具返回值、正文长度）；有 ❌ 时退出码非 0。
+两条硬规矩写死在脚本里：实发**只允许**到 `ownerQQ` 自己的私聊与仅自己可见的空间说说；
+群发只有在白名单里存在名字带「测试」的专用群时才发 —— 家庭群绝不打扰。
+`--live` 用 `state/social-v2.json` 里的会话令牌，全程不打印任何令牌。
+
 ## 环境变化与插件体检（先体检，再改代码）
 
 DSH 升级、换安装位置、换端口、换 profile、工具面变化时，**不要先改 `bridge.js` 或守卫名单**：
@@ -601,6 +616,8 @@ curl -s -X POST http://127.0.0.1:3100/api/socialV2/night-greet \
 - **AI 发语音默认关闭**（`socialV2.voice.enabled` 与 `tools.sendVoice` 默认 `false`）：先把音频放进 `audio/`，再到控制台打开开关；你自己发语音不受这个开关影响
 - agent 的 Markdown 回复会转成纯文本（链接保留 `文字 (url)` 形式）
 - `@snowluma/sdk` 的 npm 发布版存在 ESM 扩展名 bug，本仓库通过 postinstall 补丁修复（见 `scripts/patch-snowluma-sdk.mjs`）
+- `scripts/test-dsh-v2-wait.mjs`（`npm run test-wait:e2e`）要一次**独立的** DSH 回复，且会话工具清单里得有 `qq_wait_for_messages`：本机实测单独跑 15s 就结束、但 `HAS_qq_wait_for_messages=false`；跑能力自测时机器正被当前会话占用，必然吃满 120s 超时。属 DSH 侧集成待查，不是 QQ 能力缺失（`npm run test:capabilities` 把它算作跳过）
+- `scripts/test-console-ui.mjs` 需要 Playwright（本机未安装时跳过）；`scripts/test-onebot-connection.mjs` 连 WS 用的是**发现到的 WS token**，不是 `config.json` 里那个 HTTP token（两个值不同，见上文「已知行为」）
 
 ## 合规提醒
 

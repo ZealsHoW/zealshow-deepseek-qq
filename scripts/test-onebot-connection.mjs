@@ -1,19 +1,31 @@
 // 一次性连接测试：用 @snowluma/sdk 连接 SnowLuma 的 OneBot WebSocket 网关，
-// 验证地址、端口、accessToken 是否正确。成功即打印 ✅ 并退出。
+// 验证地址、端口、WS 令牌是否正确。成功即打印 ✅ 并退出。
+//
+// ⚠ 2026-10-23 修正：原来这里直接拿 config.json 的 `snowluma.accessToken` 去连 WS —— 那是
+// **HTTP 令牌**，跟 WS 令牌不是同一个（桥接自己也要运行时才发现：`bot.accessToken = wsToken`，
+// 见 src/bridge.js 的自愈段；per-account 文件里 http / ws 各记一份，端口也可能不同）。
+// 用 HTTP 令牌连 WS 会被网关以 `1006 closed before opening` 拒掉 —— 症状是「这个脚本一直连不上，
+// 但桥接一切正常」。现在改成和桥接同一条路：`discoverSnowLumaConnection()` 取 wsUrl + wsToken。
+//
+// 注意：网关是 per-account 的（HTTP/WS 两份令牌、端口也可能不同）。用发现到的 WS 令牌连，
+// 桥接同时在跑也能连上（2026-10-23 实测）；连不上时先看 discoverSnowLumaConnection 的 tried 列表。
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { SnowLumaWebSocketClient } from '@snowluma/sdk';
+import { discoverSnowLumaConnection } from '../src/snowluma-conn.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const cfg = JSON.parse(fs.readFileSync(path.resolve(__dirname, '..', 'config.json'), 'utf8'));
-const { wsUrl, accessToken } = cfg.snowluma;
 
-console.log(`测试连接 ${wsUrl}（token ${accessToken ? '已配置' : '未配置'}）…`);
+const found = await discoverSnowLumaConnection({ cfg, timeoutMs: 6000 });
+const wsUrl = found.wsUrl || cfg.snowluma.wsUrl;
+const wsToken = found.wsToken || cfg.snowluma.accessToken;
+console.log(`测试连接 ${wsUrl}（WS 令牌 ${wsToken ? `${String(wsToken).slice(0, 4)}…` : '未发现'}；HTTP 令牌来源 ${found.source ?? '-'}）…`);
 
 const bot = new SnowLumaWebSocketClient({
   url: wsUrl,
-  accessToken: accessToken || undefined,
+  accessToken: wsToken || undefined,
   reconnect: false
 });
 
