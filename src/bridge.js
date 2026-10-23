@@ -114,6 +114,9 @@ const onebot = createOneBotClient({
   httpUrl: () => cfg?.snowluma?.httpUrl || 'http://127.0.0.1:3000',
   accessToken: () => cfg?.snowluma?.accessToken || '',
   outbox: sendOutbox,
+  // 沉默期内的会话不补发：条目留在队列里，窗口一过自然补发（不丢内容，也不对着
+  // 刚拒绝她的群每 15 秒冲一次）。
+  skipKey: (key) => sendSilenceSkip(key),
   logger: {
     warn: (message, detail) => log('OneBot', message, detail ?? ''),
     info: (message, detail) => log('OneBot', message, detail ?? '')
@@ -125,6 +128,58 @@ function outboxEnabled() {
   } catch {
     return true;
   }
+}
+// 发言失败后的「沉默窗口」：主人明确要求 —— 系统提示发言失败、或她已被移出该群时，
+// 立刻停手、保持沉默、30 秒后再试。
+// 旧行为是两个坑叠在一起：一条失败只记一行日志，本批剩下的分条**照旧往同一个会话里灌**；
+// 补发队列也照常每 15 秒冲一次。对着一个刚拒绝她的群连发，是最容易把号玩坏的动作。
+const sendSilence = new Map(); // key -> { until, reason, hard }
+// 硬失败特征：被禁言 / 被移出 / 没权限 / 被风控。这类不该马上重试，窗口要长得多。
+const SEND_HARD_FAIL_RE = /禁言|移出|踢出|不在该群|无权限|权限不足|风控|冻结|拉黑|not\s*in\s*group|kicked|muted|forbidden|no\s*permission/i;
+function sendSilenceCfg() {
+  try {
+    const s = cfg?.socialV2?.send ?? {};
+    const soft = Math.max(0, Number(s.failSilenceMs ?? 30000) || 0);
+    return { soft, hard: Math.max(soft, Number(s.hardFailSilenceMs ?? 600000) || 0) };
+  } catch {
+    return { soft: 30000, hard: 600000 };
+  }
+}
+function isHardSendFailure(message) {
+  return SEND_HARD_FAIL_RE.test(String(message ?? ''));
+}
+/** 这个会话此刻是否在沉默期（到期自动解除）。 */
+function sendSilenceState(key, nowTs = Date.now()) {
+  const rec = key ? sendSilence.get(key) : null;
+  if (!rec) return { silenced: false, remainMs: 0, reason: '', hard: false };
+  const remainMs = Number(rec.until) - nowTs;
+  if (remainMs <= 0) {
+    sendSilence.delete(key);
+    return { silenced: false, remainMs: 0, reason: '', hard: false };
+  }
+  return { silenced: true, remainMs, reason: rec.reason, hard: Boolean(rec.hard) };
+}
+/** 一次出站失败 → 给这个会话压上沉默窗口（幂等：取更晚的到期时间）。 */
+function noteSendSilence(key, error) {
+  if (!key) return sendSilenceState(key);
+  const message = String(error?.message ?? error ?? '未知错误');
+  const hard = isHardSendFailure(message);
+  const { soft, hard: hardMs } = sendSilenceCfg();
+  const waitMs = hard ? hardMs : soft;
+  const prev = sendSilence.get(key);
+  sendSilence.set(key, { until: Math.max(Date.now() + waitMs, Number(prev?.until) || 0), reason: message, hard });
+  const seconds = Math.round(waitMs / 1000);
+  log(
+    hard ? '发言静默（疑似被禁言/移出）' : '发言失败',
+    hard
+      ? `${key} 疑似被禁言或已被移出群聊：停止发送 ${seconds} 秒，期间不做任何重试。原因：${message}`
+      : `${key} 发言失败：已停止本批剩余分条，保持沉默 ${seconds} 秒后再试。原因：${message}`
+  );
+  return sendSilenceState(key);
+}
+/** 补发队列的放行判断：沉默期内的会话一律不碰网关。 */
+function sendSilenceSkip(key) {
+  return sendSilenceState(key).silenced;
 }
 // R4：入站去重。WS 重连重放 / 实时事件与 catchUp 撞车时，同一条消息只喂给模型一次。
 const inboundDedup = createInboundDedup({
@@ -1449,8 +1504,8 @@ function loadConfig() {
       mustReplyKeywords: ['deepseek', '小鲸鱼', '大肥鱼', '鲸鱼', 'd指导', '在吗'],
       // 真人式多消息分条发送：按空格分句，AI 用空格表示“这里要分成下一条”
       burstEnabled: true,             // 总开关：是否允许按空格拆成多条 QQ 消息
-      burstIntervalMinMs: 1000,       // 条间随机间隔下限（毫秒）
-      burstIntervalMaxMs: 3000,       // 条间随机间隔上限（毫秒）
+      burstIntervalMinMs: 3000,       // 条间随机间隔下限（毫秒）：像人一样，每条 3~5 秒
+      burstIntervalMaxMs: 5000,       // 条间随机间隔上限（毫秒）
       longGapProbability: 0.1,        // 长间隔概率（当前控制台保存值）
       longGapMinMs: 2500,             // 长间隔下限（当前控制台保存值）
       longGapMaxMs: 5000,             // 长间隔上限（当前控制台保存值）
@@ -1523,8 +1578,8 @@ function loadConfig() {
       send: {
         burstEnabled: true,
         burstMaxMessages: 8,
-        burstIntervalMinMs: 1000,
-        burstIntervalMaxMs: 3000,
+        burstIntervalMinMs: 3000,
+        burstIntervalMaxMs: 5000,
         longGapProbability: 0.2,
         longGapMinMs: 5000,
         longGapMaxMs: 10000,
@@ -1534,7 +1589,11 @@ function loadConfig() {
         maxGapMs: 10000,
         gapBaseMs: 800,
         gapPerCharMs: 20,
-        recommendedHint: '普通闲聊建议一次 1~3 条，条间 1~3 秒；讲故事/回忆可以 5~10 秒间隔；不要连续刷屏。'
+        // 发言失败后的沉默窗口（毫秒）：系统提示发言失败 → 停 30 秒再试；
+        // 被禁言/被移出这类硬失败 → 停 10 分钟，期间一次都不重试。
+        failSilenceMs: 30000,
+        hardFailSilenceMs: 600000,
+        recommendedHint: '每条之间 3~5 秒，像人一样一条条发；讲故事/回忆可以 5~10 秒间隔；不要一连串刷出来。'
       },
       wait: {
         defaultMs: 30000,
@@ -5560,7 +5619,7 @@ async function main() {
           // send：数值归一化
           if (body.send && typeof body.send === 'object') {
             merged.send = { ...(current.send ?? {}), ...body.send };
-            for (const k of ['burstMaxMessages', 'burstIntervalMinMs', 'burstIntervalMaxMs', 'longGapProbability', 'longGapMinMs', 'longGapMaxMs', 'maxSendPerMinute', 'maxSendPerHour', 'maxMessageChars', 'maxGapMs', 'gapBaseMs', 'gapPerCharMs']) {
+            for (const k of ['burstMaxMessages', 'burstIntervalMinMs', 'burstIntervalMaxMs', 'longGapProbability', 'longGapMinMs', 'longGapMaxMs', 'maxSendPerMinute', 'maxSendPerHour', 'maxMessageChars', 'maxGapMs', 'gapBaseMs', 'gapPerCharMs', 'failSilenceMs', 'hardFailSilenceMs']) {
               if (merged.send[k] !== undefined) {
                 const n = Number(merged.send[k]);
                 merged.send[k] = Number.isFinite(n) ? n : current.send?.[k] ?? 0;
@@ -8792,19 +8851,58 @@ async function main() {
   // 更新 lastAiReplyAt / 活跃调度，实际群里什么都没收到，而且只有一行滚动日志能看出问题。
   const lastSendFailed = new Map(); // key -> true（下一次成功即清除）
 
+  /**
+   * 把一条**没发出去**的消息放进补发队列（不丢内容）。
+   * 用途：本批第一条失败后，剩下的分条不再往同一个会话里发，但也不能凭空消失 ——
+   * 入队后由沉默窗口挡住（见 sendSilenceSkip），窗口一过自动补发。
+   * 令牌拦截与 onebotSend 同一口径：宁可丢一条，也不能把会话令牌发到 QQ 上。
+   */
+  function deferTextSend(kind, id, message, dedupKey) {
+    if (!outboxEnabled()) return false;
+    const rawMessage = String(message ?? '');
+    if ([...KNOWN_AGENT_TOKENS].some((t) => t && rawMessage.includes(t))) {
+      log(`发送内容包含会话令牌，已阻止入队 (${kind}:${id})`);
+      return false;
+    }
+    const action = kind === 'private' ? 'send_private_msg' : 'send_group_msg';
+    const segments = [{ type: 'text', data: { text: escapeCqText(rawMessage) } }];
+    const params = kind === 'private' ? { user_id: Number(id), message: segments } : { group_id: Number(id), message: segments };
+    const r = sendOutbox.enqueue({ key: `${kind}:${id}`, action, params, dedupKey });
+    return Boolean(r?.id);
+  }
+
   function sendToQQ(key, msg) {
     const assertSendAllowed = captureSendGuard(key);
+    // 沉默期内一条都不发（主人要求：发言失败 / 被移出群后先保持沉默）。
+    const sil = sendSilenceState(key);
+    if (sil.silenced) {
+      log('发言静默', `${key} 仍在沉默期（还剩 ${Math.round(sil.remainMs / 1000)} 秒），本次不发送`);
+      lastSendFailed.set(key, true);
+      return Promise.resolve();
+    }
     const safeMsg = redactKnownTokensOnly(msg);
     const [kind, id] = key.split(':');
     const parts = splitForQQ(safeMsg);
     const batchId = newSendBatchId(key);
     lastSendFailed.delete(key);
+    let stopped = null; // 本批第一条失败后置上：剩下的分条不再往这个会话里灌
+    let deferred = 0;
     for (let i = 0; i < parts.length; i++) {
       const part = parts[i];
       const dedupKey = `${batchId}:${i}`;
       sendChain = sendChain
         .then(async () => {
           assertSendAllowed();
+          if (stopped) {
+            const ok = deferTextSend(kind, id, part, dedupKey);
+            if (deferred === 0) {
+              log('发言静默', ok
+                ? `${key} 本批剩余 ${parts.length - i} 条分条不再发送，已放入补发队列等沉默窗口结束`
+                : `${key} 本批剩余 ${parts.length - i} 条分条不再发送（补发队列已关）`);
+            }
+            deferred += 1;
+            return;
+          }
           if (kind === 'private') await withTimeout(bot.sendPrivateMessage(Number(id), text(escapeCqText(part))), SEND_TIMEOUT_MS, `QQ发送 ${kind}:${id}`);
           else await withTimeout(bot.sendGroupMessage(Number(id), text(escapeCqText(part))), SEND_TIMEOUT_MS, `QQ发送 ${kind}:${id}`);
         })
@@ -8822,6 +8920,9 @@ async function main() {
             if (queued) log(`QQ 发送失败已入队补发 (${key})：队列 ${sendOutbox.size()} 条`);
           }
           if (!queued) lastSendFailed.set(key, true);
+          // 停手 + 压沉默窗口：本批后面的分条不再试，队列补发也一起被挡住。
+          stopped = stopped ?? error;
+          noteSendSilence(key, error);
         })
         .then(() => sleep(cfg.sendDelayMs));
     }
@@ -9532,9 +9633,30 @@ async function main() {
     // 这一批（= 一次回复的分条）共用一个批次号：同一批里每条一个 dedupKey，
     // 挡的是「同一个回复被两条路径同时触发 → 真发两遍」，而不是「她说了两遍一样的话」。
     const batchId = newSendBatchId(key);
+    // 沉默期内：这批一条都不碰网关，整批暂存进补发队列（内容不丢，窗口一过自动补发）。
+    const sil = sendSilenceState(key);
+    if (sil.silenced) {
+      const seconds = Math.round(sil.remainMs / 1000);
+      const held = [];
+      const dropped = [];
+      for (let i = 0; i < messages.length; i++) {
+        if (deferTextSend(kind, id, messages[i], `${batchId}:${i}`)) held.push(messages[i]);
+        else dropped.push(messages[i]);
+      }
+      log('发言静默', `${key} 仍在沉默期（还剩 ${seconds} 秒），本批 ${held.length}/${messages.length} 条暂存待补发`);
+      const err = new Error(`发送静默中：${key} 还需等待 ${seconds} 秒，本批 ${held.length}/${messages.length} 条已暂存待补发`);
+      err.sent = [];
+      err.queued = held;
+      err.skipped = dropped;
+      err.silenced = true;
+      err.softFail = true;
+      return Promise.reject(err);
+    }
     const sent = [];
     const queued = [];
     const failed = [];
+    const skipped = [];
+    let stopped = null; // 本批第一条失败后置上：剩下的分条不再往这个会话里灌
     for (let i = 0; i < messages.length; i++) {
       const msg = messages[i];
       const useReply = i === 0 ? replyToMessageId : null;
@@ -9542,14 +9664,42 @@ async function main() {
       sendChain = sendChain
         .then(async () => {
           assertSendAllowed();
-          const data = await onebotSend(kind, id, msg, useReply, useAt, `${batchId}:${i}`);
-          // queued：没发出去但已落盘待补发。要记账，但**不能**当成彻底失败 ——
-          // 以前这条路会走到 catch 里，调用方据此认为「这条回复没了」。
-          if (data?.queued) queued.push(msg);
-          else sent.push(msg);
+          if (stopped) {
+            // 同一条会话刚拒绝过她：剩下的分条不再试探，内容入队等沉默窗口结束。
+            if (deferTextSend(kind, id, msg, `${batchId}:${i}`)) queued.push(msg);
+            else skipped.push(msg);
+            return;
+          }
+          try {
+            const data = await onebotSend(kind, id, msg, useReply, useAt, `${batchId}:${i}`);
+            // queued：没发出去但已落盘待补发。要记账，但**不能**当成彻底失败 ——
+            // 以前这条路会走到 catch 里，调用方据此认为「这条回复没了」。
+            if (data?.queued) {
+              queued.push(msg);
+              // 可重试失败（网关/网络抖了一下）：这条已经入队。**剩下的分条不再往下试探** ——
+              // 继续发只会把同一批拆成「先到后到」，而补发队列本来就是按顺序重发的；
+              // 只有网关明确拒绝（被移出/被禁言）才压沉默窗口，本机到网关的网络抖动不惩罚这个会话。
+              if (!stopped) {
+                const queuedErr = new Error(String(data?.error ?? `OneBot 发送失败已入队待补发（${key}）`));
+                stopped = queuedErr;
+                log('发言失败', `${key} 首条发送失败已入队待补发，本批剩余 ${messages.length - i - 1} 条不再试探（内容入队，按顺序补发）`);
+                if (isHardSendFailure(queuedErr.message)) noteSendSilence(key, queuedErr);
+              }
+            } else {
+              sent.push(msg);
+            }
+          } catch (error) {
+            log(`QQ 发送失败 (${key}):`, error?.message ?? error);
+            failed.push(error);
+            // 停手 + 压沉默窗口：本批后面的分条不再试，队列补发也一起被挡住。
+            stopped = stopped ?? error;
+            noteSendSilence(key, error);
+          }
         })
         .catch((error) => {
-          log(`QQ 发送失败 (${key}):`, error?.message ?? error);
+          // 走到这里的是「发送前置检查」失败（会话/模式/白名单已变），不是 QQ 拒绝 ——
+          // 这种不该压沉默窗口，只记账。
+          log(`QQ 发送被取消 (${key}):`, error?.message ?? error);
           failed.push(error);
         });
       if (i < delays.length) {
@@ -9562,12 +9712,14 @@ async function main() {
         const err = new Error(`QQ 发送失败 ${failed.length}/${messages.length} 条：${failed[0]?.message ?? '未知错误'}`);
         err.sent = sent.slice();
         err.queued = queued.slice();
+        err.skipped = skipped.slice();
         throw err;
       }
       if (queued.length > 0) {
         const err = new Error(`QQ 发送暂存待补发 ${queued.length}/${messages.length} 条（SnowLuma 恢复后自动重发）`);
         err.sent = sent.slice();
         err.queued = queued.slice();
+        err.skipped = skipped.slice();
         err.softFail = true;
         throw err;
       }
@@ -10445,7 +10597,7 @@ async function main() {
         if (sendOutbox.size() === 0) return;
         const res = await onebot.flush({ limit: Math.max(1, Math.min(50, Number(outboxCfg.flushBatch) || 20)) });
         if (res.sent || res.failed || res.dropped) {
-          log(`发送队列补发：成功 ${res.sent}、失败 ${res.failed}、放弃 ${res.dropped}（队列剩 ${res.remaining}）`);
+          log(`发送队列补发：成功 ${res.sent}、失败 ${res.failed}、放弃 ${res.dropped}${res.skipped ? `、沉默期跳过 ${res.skipped}` : ''}（队列剩 ${res.remaining}）`);
           appendActivity(`发送队列补发：成功 ${res.sent}、失败 ${res.failed}、放弃 ${res.dropped}`);
         }
       } catch (error) {

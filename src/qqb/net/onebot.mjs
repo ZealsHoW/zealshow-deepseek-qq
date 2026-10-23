@@ -18,6 +18,16 @@ export const VERSION = '0.1.0';
 /** 这些 retcode 重试多少次都不会变好（参数错/无权限/未登录），不要进队列。 */
 export const PERMANENT_RETCODES = new Set([1400, 1401, 1403, 1404, 1405]);
 
+/**
+ * 网关明确拒绝过的话术：重试还是同一句拒绝，不该进队列反复敲门。
+ *
+ * 真实样本（SnowLuma 2026-10-23 日志）：`result=110 err=发送失败，你已被移出该群，请重新加群。`
+ * retcode 110 不在 PERMANENT_RETCODES 里 —— 只看 retcode 会把它当网络抖动塞进补发队列，
+ * 于是「刚被踢出群的那批分条」会被 2/4/8… 秒地反复补发，正是最容易把号玩坏的动作。
+ * 网络类失败的 error.message（fetch failed / timeout）不含这些词，所以仍按可重试处理。
+ */
+export const REJECTED_WORDING_RE = /移出|重新加群|禁言|踢出|不在该群|无权限|权限不足|风控|冻结|拉黑|not\s*in\s*group|kicked|muted|forbidden|no\s*permission/i;
+
 export const DEFAULTS = Object.freeze({
   timeoutMs: 15000,
   maxAttempts: 6,
@@ -38,7 +48,12 @@ function valueOf(source, fallback = '') {
 }
 
 /** 一次失败到底该不该重试。 */
-export function classifyFailure({ status = 0, retcode = null, error = null } = {}) {
+export function classifyFailure({ status = 0, retcode = null, error = null, wording = null } = {}) {
+  // 先看网关拒绝的原话：这是「对端明确说不行」，优先级高于 retcode 表和网络类推断。
+  const rejected = String(wording ?? '');
+  if (rejected && REJECTED_WORDING_RE.test(rejected)) {
+    return { retryable: false, reason: `网关拒绝发送：${rejected.slice(0, 120)}` };
+  }
   if (error && !status) return { retryable: true, reason: `网络/超时：${String(error?.message ?? error).slice(0, 120)}` };
   const code = Number(retcode);
   if (Number.isFinite(code) && PERMANENT_RETCODES.has(code)) {
@@ -55,6 +70,8 @@ export function classifyFailure({ status = 0, retcode = null, error = null } = {
  * @param {string|Function} options.httpUrl 形如 http://127.0.0.1:3000（可传函数，桥接里 cfg 会变）
  * @param {string|Function} [options.accessToken]
  * @param {object} [options.outbox] createOutbox() 的实例；不传则失败即抛（不排队）
+ * @param {(key: string) => boolean} [options.skipKey] 返回 true 表示这个会话此刻不该发
+ *   （桥接用它实现「发言失败后沉默 30 秒」：条目留在队列里，窗口过了再补发）
  * @param {{warn?: Function, info?: Function}} [options.logger]
  * @param {() => number} [options.now]
  * @param {Function} [options.fetchImpl] 单测注入
@@ -62,6 +79,7 @@ export function classifyFailure({ status = 0, retcode = null, error = null } = {
 export function createOneBotClient(options = {}) {
   const logger = options.logger ?? {};
   const outbox = options.outbox ?? null;
+  const skipKey = typeof options.skipKey === 'function' ? options.skipKey : null;
   const now = options.now ?? Date.now;
   const fetchImpl = options.fetchImpl ?? globalThis.fetch;
   const defaultTimeoutMs = Math.max(1000, Number(options.timeoutMs) || DEFAULTS.timeoutMs);
@@ -100,7 +118,7 @@ export function createOneBotClient(options = {}) {
       const body = await res.json().catch(() => ({}));
       if (!res.ok || body?.status !== 'ok' || body?.retcode !== 0) {
         const hint = res.status === 426 ? '（HTTP 426：snowluma.httpUrl 可能指向了 WebSocket 端口）' : '';
-        const failure = classifyFailure({ status: res.status, retcode: body?.retcode });
+        const failure = classifyFailure({ status: res.status, retcode: body?.retcode, wording: body?.wording });
         const error = `OneBot ${action} 失败: ${body?.wording || body?.retcode || res.status}${hint}`;
         lastError = error;
         return { ok: false, action, status: res.status, retcode: body?.retcode ?? null, error, ...failure };
@@ -153,11 +171,17 @@ export function createOneBotClient(options = {}) {
 
     /** 补发一批到点的条目。 */
     async flush({ limit = flushBatch } = {}) {
-      const summary = { sent: 0, failed: 0, dropped: 0, remaining: 0, errors: [] };
+      const summary = { sent: 0, failed: 0, dropped: 0, skipped: 0, remaining: 0, errors: [] };
       if (!outbox) return summary;
       outbox.prune();
       const due = outbox.pending().slice(0, Math.max(1, Number(limit) || flushBatch));
       for (const item of due) {
+        // 沉默期内的会话一律不补发：条目原样留在队列里（不含进重试次数），
+        // 窗口一过它还是「到点」的，下一轮自然补发。
+        if (skipKey && item.key && skipKey(item.key)) {
+          summary.skipped += 1;
+          continue;
+        }
         if ((Number(item.attempts) || 0) >= maxAttempts) {
           outbox.markFailed(item.id, { error: `重试 ${item.attempts} 次仍未成功`, permanent: true });
           summary.dropped += 1;

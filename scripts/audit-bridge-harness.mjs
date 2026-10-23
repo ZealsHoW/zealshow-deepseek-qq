@@ -341,6 +341,8 @@ export async function bridgeHarness({ config = {}, savedState, files = {}, globa
     getSocialV2State, appendSocialV2Message, recordSentMessagesV2,
     buildWakePromptV2, buildWakeSnapshotV2, sendWakePromptV2, socialV2,
     wakePriorityV2, tierGuardV2, scheduleProactiveCheckV2,
+    // 发言失败后的沉默窗口：停手 / 静默时长 / 整批暂存 / 补发队列跳过（对应主人 m00363 的要求）。
+    sendMessagesV2, deferTextSend, sendSilenceState, noteSendSilence, sendSilenceCfg, sendSilenceSkip, sendSilence,
     refreshMode, modeAllowed, trackTurnEvent, replayPendingWakeReasonsV2,
     collectors, setupSleepTimerV2,
     getInitialPrompt, setInitialPrompt, loadInitialPrompts, formatInitialPromptV2,

@@ -643,6 +643,38 @@ npm run test:security-tiers   # 纯函数 + 真 bridge.js 的 403/放行/零副�
 
 老实说清楚边界：这是**行为层 + 工具层**的护栏，不是操作系统级沙箱 —— 她被话术绕进去、在文字里答应别人什么，是拦不住的；但"发出去就收不回"的那些动作，动手那一刻会被工具层拦住。
 
+## 发言失败 → 立刻停手 + 沉默 + 到点重试
+
+主人明确要求：**系统提示发言失败、或者她已经被移出该群时，立刻停止尝试发送任何消息、保持沉默，30 秒后再试；消息不要一串全倒出来，要像人一样每条隔 3~5 秒**。两条都在出站链路里实现，且**按会话隔离**（一个群出事，不影响她跟别人说话）。
+
+失败分几类，**处理方式故意不同**：
+
+| 失败是哪一类 | 怎么认 | 桥接怎么做 |
+| --- | --- | --- |
+| 网关**明确拒绝**（被移出群 / 被禁言 / 没权限 / 风控） | retcode 在 `PERMANENT_RETCODES` 里，**或返回原话命中** `REJECTED_WORDING_RE` | **不进补发队列**（重试还是同一句拒绝）；本批剩余分条立刻停手；该会话沉默 `hardFailSilenceMs`（默认 10 分钟） |
+| 本机到网关**发不出去**（网络断/超时/5xx/429） | 归类为可重试 | 这条落盘进补发队列（内容不丢）；本批剩余分条也不再往下试（避免把一批拆成"先到后到"）；沉默 `failSilenceMs`（默认 30 秒），窗口一过按顺序补发 |
+| 其它被拒（参数错等，话术不含上述词） | 不可重试 | 停手 + 沉默 30 秒；本批剩余分条入队等窗口结束 |
+
+- 沉默窗口**按会话**记（`sendSilence` Map，key 形如 `group:123` / `private:456`）：窗口内任何发送路径（一代 `sendToQQ`、二代 `sendMessagesV2`、补发队列的 flush）都不碰网关；
+- 补发队列在沉默期内**跳过**该会话：条目留在队列里、**不消耗重试次数**，窗口一过照常补发（`src/qqb/net/onebot.mjs` 的 `skipKey`）；
+- 每条之间 3~5 秒：`socialV2.send.burstIntervalMinMs`（默认 `3000`）/ `burstIntervalMaxMs`（默认 `5000`），间隔由 `computeGapsV2` 算、`clampGapV2` 夹住；再按 `longGapProbability` 概率插一次 5~10 秒的长停顿（像人打字时的走神）。
+
+为什么"被移出群"要单独认出来：SnowLuma 真实日志里给的是 `result=110 err=发送失败，你已被移出该群，请重新加群。` —— retcode 110 **不在**永久失败表里，只看 retcode 就会把它当网络抖动塞进队列，接着 2/4/8… 秒地去敲一个已经把她踢出来的群。这条判据现在按**原话**匹配，比数字表稳。
+
+配置（`config.json` → `socialV2.send`）：
+
+| 键 | 默认 | 含义 |
+| --- | --- | --- |
+| `failSilenceMs` | `30000` | 一般发言失败后的沉默窗口 |
+| `hardFailSilenceMs` | `600000` | 疑似被移出/被禁言/风控时的沉默窗口（取 `max(failSilenceMs, 本值)`） |
+| `burstIntervalMinMs` / `burstIntervalMaxMs` | `3000` / `5000` | 分条之间的间隔 |
+
+```bash
+npm run test:send-silence   # 沉默窗口 / 停手 / 队列跳过 / 失败分类（真 bridge.js + 真 outbox）
+```
+
+老实说清楚边界：**"到点重试"靠补发队列**（`socialV2.outbox.enabled !== false` 时默认开）。队列关掉时沉默仍然生效，但失败的那条不会自动补发 —— 那是"只沉默不重试"。另外补发队列 flush 时**不复查白名单**（见「已知限制」）。
+
 ## 已知限制
 
 - agent 回复在回合结束时一次性发送（不做流式逐字转发）；回复超过 `socialV2.send.maxMessageChars`（默认 500 字，可用 `social.maxReplyChars` 调整）自动按句读/URL 边界分段
@@ -652,6 +684,7 @@ npm run test:security-tiers   # 纯函数 + 真 bridge.js 的 403/放行/零副�
 - agent 的 Markdown 回复会转成纯文本（链接保留 `文字 (url)` 形式）
 - `@snowluma/sdk` 的 npm 发布版存在 ESM 扩展名 bug，本仓库通过 postinstall 补丁修复（见 `scripts/patch-snowluma-sdk.mjs`）
 - `scripts/test-dsh-v2-wait.mjs`（`npm run test-wait:e2e`）要一次**独立的** DSH 回复，且会话工具清单里得有 `qq_wait_for_messages`：本机实测单独跑 15s 就结束、但 `HAS_qq_wait_for_messages=false`；跑能力自测时机器正被当前会话占用，必然吃满 120s 超时。属 DSH 侧集成待查，不是 QQ 能力缺失（`npm run test:capabilities` 把它算作跳过）
+- 补发队列（`state/outbox.jsonl`）在 flush 时**只做沉默期与去重检查、不复查白名单/模式**：一条消息在入队时是合法的，之后该群被移出 `allow.groups`（或模式切到 chat/reserved），队列里剩下的条目仍会被补发出去。要彻底堵住得把 `skipKey` 也接上"当前是否仍允许发这个 key"——目前是已知缺口，不是已修行为
 - `scripts/test-console-ui.mjs` 需要 Playwright（本机未安装时跳过）；`scripts/test-onebot-connection.mjs` 连 WS 用的是**发现到的 WS token**，不是 `config.json` 里那个 HTTP token（两个值不同，见上文「已知行为」）
 
 ## 合规提醒
