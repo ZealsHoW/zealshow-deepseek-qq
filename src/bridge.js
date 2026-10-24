@@ -10,7 +10,7 @@ import os from 'node:os';
 import http from 'node:http';
 import path from 'node:path';
 import crypto from 'node:crypto';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import yaml from 'js-yaml';
 import { extractPresetPrefix, presetPromptBlockers, presetPromptWarnings, renderPresetPromptYaml } from './preset-prompt.js';
 import { GEN1_ROLE_LINE_RE, parseRoleSections, roleCharStats, roleSectionReport, selectRoleText } from './role-card.js';
@@ -1732,6 +1732,10 @@ function loadConfig() {
     collectSticker: true,
     getSelfImage: true,
     sendVoice: false,
+    // 唱歌（qq_sing）：ACE-Step 生成 + Seed-VC 换音色，再由语音链路发出去。
+    // 默认关：单次要 1~3 分钟、独占显存，还得先停掉真人音色服务，属于"重动作"，
+    // 想让她唱就在控制台打开（或 config 里给 socialV2.tools.sing: true）。
+    sing: false,
     // 待发文件夹（state/outbox）对模型可见 + 自己画图（见 mcp-snowluma-safe.js 的
     // qq_list_outbox / qq_save_message_image / qq_draw_image）。
     listOutbox: true,
@@ -7424,6 +7428,158 @@ async function main() {
             });
           } catch (error) {
             sendJson({ ok: false, error: error?.message ?? String(error) }, 500);
+          }
+          return;
+        }
+
+        // ── 唱歌（AI 通道：qq_sing）：ACE-Step 生成 + Seed-VC 换成她的音色，再走语音发送 ──
+        // 为什么放在桥接里而不是纯脚本：她要能自己决定「唱一首」并直接发到当前会话，
+        // 所以门禁（模式/token/工具开关/梯队/静默）与发送都复用 send-voice 那一套。
+        function listenerPid(port) {
+          try {
+            const out = execFileSync('netstat', ['-ano', '-p', 'TCP'], { encoding: 'utf8', timeout: 5000, stdio: ['ignore', 'pipe', 'ignore'] });
+            const m = new RegExp(`^\\s*TCP\\s+\\S+:${port}\\s+\\S+\\s+LISTENING\\s+(\\d+)\\s*$`, 'm').exec(out);
+            return m ? Number(m[1]) : 0;
+          } catch {
+            return 0; // 探不出来就不杀，宁可少腾一点内存
+          }
+        }
+
+        function runNodeScript(argv, { timeoutMs = 600000 } = {}) {
+          return new Promise((resolve) => {
+            const child = spawn(process.execPath, argv, { cwd: ROOT, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
+            let out = '';
+            const cap = (buf) => { out = (out + buf.toString('utf8')).slice(-200000); };
+            child.stdout.on('data', cap);
+            child.stderr.on('data', cap);
+            const timer = setTimeout(() => { try { child.kill(); } catch { /* 已经退出 */ } }, timeoutMs);
+            child.on('error', (error) => { clearTimeout(timer); resolve({ code: -1, out: `${out}\n${error?.message ?? error}` }); });
+            child.on('close', (code) => { clearTimeout(timer); resolve({ code, out }); });
+          });
+        }
+
+        // 脚本最后一行约定是 {"ok":true,"file":"audio/xxx.wav"}；前面是进度日志，从后往前找。
+        function lastJsonLine(output) {
+          const lines = String(output ?? '').split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+          for (let i = lines.length - 1; i >= 0; i--) {
+            if (!lines[i].startsWith('{')) continue;
+            try { return JSON.parse(lines[i]); } catch { /* 不是结果行，继续往前 */ }
+          }
+          return null;
+        }
+
+        // 唱歌要独占显存：先把 Ollama 的常驻模型卸掉、把 GPT-SoVITS 停掉。
+        // 停掉的服务由看门狗负责再拉起来，但这里落了 state/tts-hold.json，让它这段时间别抢内存。
+        async function releaseResourcesForSinging(voice) {
+          try {
+            const listRes = await fetch('http://127.0.0.1:11434/api/ps', { signal: AbortSignal.timeout(4000) });
+            const listData = await listRes.json();
+            for (const model of listData?.models ?? []) {
+              if (!model?.name) continue;
+              await fetch('http://127.0.0.1:11434/api/generate', {
+                method: 'POST',
+                headers: { 'content-type': 'application/json' },
+                body: JSON.stringify({ model: model.name, keep_alive: 0 }),
+                signal: AbortSignal.timeout(15000)
+              }).catch(() => {});
+            }
+          } catch {
+            // Ollama 没开或没装：本来就不占显存
+          }
+          const portMatch = /^https?:\/\/[^:]+:(\d+)/.exec(String(voice?.tts?.gptsovits?.baseUrl ?? ''));
+          const port = Number(portMatch?.[1]) || 9880;
+          const pid = listenerPid(port);
+          if (pid && pid !== process.pid) {
+            try {
+              process.kill(pid);
+              await new Promise((resolve) => setTimeout(resolve, 1500));
+            } catch {
+              // 没权限就算了，让它继续占着（生成可能会 OOM，错误会照实返回）
+            }
+          }
+          // 服务还在「加载模型、没监听端口」的阶段时，上面按端口是找不到它的——可它那时已经吃了
+          // 好几个 GB，不杀掉就会把 ACE-Step 挤成 0xC0000005。启动器（scripts/gptsovits-serve.py）
+          // 会把真正吃内存的那个 PID 写进 state/gptsovits-serve.pid，这里按 PID 停。
+          // 不用 taskkill /T 杀 wrapper：wrapper 被 /F 杀掉后 python 子进程会变成孤儿继续占内存（实测）。
+          try {
+            const pidFile = path.join(STATE_DIR, 'gptsovits-serve.pid');
+            if (fs.existsSync(pidFile)) {
+              const servePid = Number(String(fs.readFileSync(pidFile, 'utf8')).trim());
+              const ageSec = (Date.now() - fs.statSync(pidFile).mtimeMs) / 1000;
+              // 只认 10 分钟内的 PID：PID 会被复用，太旧的宁可不动（那时它基本已在监听端口，上面那条路处理）
+              if (Number.isInteger(servePid) && servePid > 0 && servePid !== process.pid && ageSec < 600) {
+                try { process.kill(servePid); } catch { /* 已经退了 */ }
+                await new Promise((resolve) => setTimeout(resolve, 1500));
+              }
+            }
+          } catch {
+            // pid 文件读不动就算了，按端口那条路已经尽力
+          }
+        }
+
+        if (req.method === 'POST' && url.pathname === '/api/socialV2/sing') {
+          const body = await readBody();
+          const token = String(body.token ?? req.headers['x-agent-token'] ?? '').trim();
+          const key = String(body.key ?? body.target ?? '').trim();
+          const voice = voiceCfg();
+          if (!voice.enabled) { sendJson({ ok: false, error: '语音功能已关闭' }, 403); return; }
+          if (!key) { sendJson({ ok: false, error: 'key 不能为空（格式 group:群号 或 private:QQ号）' }, 400); return; }
+          if (currentMode !== 'reserved2') { sendJson({ ok: false, error: '该接口仅 reserved2 模式可用' }, 403); return; }
+          if (!token) { sendJson({ ok: false, error: 'reserved2 模式调用必须携带 agent token' }, 403); return; }
+          if (!agentTokenOk(key, token)) { sendJson({ ok: false, error: 'agent token 无效' }, 403); return; }
+          if (!v2ToolEnabled('sing')) { sendJson({ ok: false, error: '工具未启用：qq_sing' }, 403); return; }
+          if (!v2SessionAllowed(key)) { sendJson({ ok: false, error: '目标不在当前模式允许范围内' }, 403); return; }
+          if (shouldBlockSilentReply(key)) { sendJson({ ok: false, error: '静默模式已开启，当前不允许发送' }, 403); return; }
+          const tierGate = await tierGuardV2(key, 'qq_sing');
+          if (!tierGate.ok) { sendJson({ ok: false, error: tierGate.error, tier: tierGate.tier, requester: tierGate.requester }, 403); return; }
+          const lyrics = String(body.lyrics ?? '').trim();
+          if (!lyrics) { sendJson({ ok: false, error: 'lyrics 不能为空（要唱什么）' }, 400); return; }
+          if (lyrics.length > 1200) { sendJson({ ok: false, error: '歌词太长了（上限 1200 字）' }, 400); return; }
+          const tags = String(body.tags ?? '').trim().slice(0, 200);
+          const duration = Math.min(Math.max(Number(body.duration) || 20, 8), 60);
+          const steps = Math.min(Math.max(Number(body.steps) || 20, 8), 40);
+          const withVc = body.vc !== false;
+          const holdFile = path.join(STATE_DIR, 'tts-hold.json');
+          try {
+            fs.mkdirSync(STATE_DIR, { recursive: true });
+            // 15 分钟后自动失效：万一桥接中途崩了，看门狗不会一直被这个文件挡住。
+            fs.writeFileSync(holdFile, JSON.stringify({ until: Date.now() + 15 * 60 * 1000, by: 'qq_sing' }));
+            await releaseResourcesForSinging(voice);
+            const outRel = path.join('audio', `sing-${Date.now()}.wav`);
+            const argv = [
+              path.join(ROOT, 'scripts', 'sing.mjs'),
+              '--lyrics', lyrics,
+              '--duration', String(duration),
+              '--steps', String(steps),
+              '--out', outRel,
+              '--json'
+            ];
+            if (tags) argv.push('--tags', tags);
+            if (withVc) argv.push('--vc');
+            const run = await runNodeScript(argv, { timeoutMs: 10 * 60 * 1000 });
+            const result = lastJsonLine(run.out);
+            if (run.code !== 0 || !result?.ok) {
+              const detail = String(run.out).trim().split(/\r?\n/).slice(-6).join('\n');
+              sendJson({ ok: false, error: `唱歌失败（exit=${run.code}）`, detail }, 500);
+              return;
+            }
+            // 发送链路只认语音库内的**文件名**：它自己会做 safeJoin，传 'audio/xxx.wav' 会被拼成
+            // audio/audio/xxx.wav 然后报「语音库里找不到」。脚本给的是相对仓库根的路径，这里取 basename。
+            const voiceName = path.basename(String(result.file));
+            const sent = await sendVoiceForV2(key, voiceName, { label: '唱了首歌', verify: true });
+            sendJson({
+              ok: true,
+              file: result.file,
+              messageId: sent?.messageId ?? sent?.data?.message_id ?? null,
+              // 硬证据看 get_msg 回读：sendVoiceForV2 把结果放在 verification.confirmed（顶层没有 verified）
+              verified: sent?.verification?.confirmed === true,
+              readback: sent?.readback ?? null,
+              usedVc: withVc
+            });
+          } catch (error) {
+            sendJson({ ok: false, error: error?.message ?? String(error) }, 500);
+          } finally {
+            try { fs.rmSync(holdFile, { force: true }); } catch { /* 删不掉就等它自己过期 */ }
           }
           return;
         }

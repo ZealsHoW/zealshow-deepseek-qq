@@ -370,6 +370,7 @@ const TOOL_CONFIG_FLAGS = {
   qq_slang_submit: 'slangSubmit',
   qq_send_voice: 'sendVoice',
   qq_list_voices: 'sendVoice',
+  qq_sing: 'sing',
   // 下面这些曾经漏登记。漏一个不是"多注册一个工具"那么轻：桥接那边按 `v2ToolEnabled(flag)`
   // 在**调用期**一律 403，而这里不登记就等于"控制台显示已关闭、模型每次请求仍收到它的完整
   // 描述与参数 schema，然后调用它、再拿到 403"——既白烧 token（本文件开头 176 行起就是为省这份
@@ -2179,6 +2180,43 @@ if (cfg.socialV2?.voice?.enabled !== false && cfg.socialV2?.tools?.sendVoice !==
         return { content: [{ type: 'text', text: serializeModelData(data) }] };
       } catch (error) {
         return { content: [{ type: 'text', text: `获取语音库失败：${error?.message ?? error}` }], isError: true };
+      }
+    }
+  );
+}
+
+if (cfg.socialV2?.voice?.enabled !== false && cfg.socialV2?.tools?.sing !== false) {
+  server.tool(
+    'qq_sing',
+    '唱一首歌并发到指定会话（本机 ACE-Step 生成曲子 + Seed-VC 换成你自己的音色）。只有 lyrics 是必填：把你想要的歌词按行写进去（每行一句、押韵更好听）。可选 tags 描述风格（如 "chinese pop, female vocal, gentle, acoustic guitar"）、duration 决定时长（秒，8~60，默认 20）、vc 决定要不要换成你自己的音色（默认 true；改成 false 就是别的女声在唱）。注意：① 生成一次要 1~3 分钟，很吃显存——bridge 会自动先停掉真人音色服务、卸载 Ollama 模型，这几分钟里你可能没法用语音说话，属正常；② 返回 ok=true 且 verified=true 才表示歌真的发到 QQ 了；③ 这是「表演」型动作，别频繁用，一次最多一首；④ 歌词要自己写（原创或即兴），不要照抄完整受版权保护的歌词。',
+    {
+      key: z.string().describe('会话 key，格式 group:群号 或 private:QQ号'),
+      token: z.string().describe('会话令牌（见唤醒提示中的【会话令牌】）'),
+      lyrics: z.string().describe('歌词：每行一句，用换行分隔（最多 1200 字）'),
+      tags: z.string().optional().describe('风格描述，英文逗号分隔，如 chinese pop, female vocal, warm, acoustic guitar'),
+      duration: z.number().optional().describe('时长（秒），8~60，默认 20；歌词多就长一点'),
+      vc: z.boolean().optional().describe('是否用 Seed-VC 换成你自己的音色（默认 true）'),
+      steps: z.number().optional().describe('扩散步数（8~40，默认 20）；越大越细腻也越慢')
+    },
+    async ({ key, token, lyrics, tags, duration, vc, steps }) => {
+      try {
+        const data = await agentApi('/api/socialV2/sing', {
+          method: 'POST',
+          body: JSON.stringify({
+            key,
+            token,
+            lyrics,
+            ...(tags ? { tags } : {}),
+            ...(duration !== undefined ? { duration } : {}),
+            ...(steps !== undefined ? { steps } : {}),
+            vc: vc !== false
+          }),
+          headers: { 'x-agent-token': token },
+          timeoutMs: 600000
+        });
+        return { content: [{ type: 'text', text: serializeModelData(data) }] };
+      } catch (error) {
+        return { content: [{ type: 'text', text: `唱歌失败：${error?.message ?? error}` }], isError: true };
       }
     }
   );

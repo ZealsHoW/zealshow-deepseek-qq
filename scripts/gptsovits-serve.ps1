@@ -75,15 +75,21 @@ if (-not $Quiet) {
 }
 
 # api_v2.py 里大量相对路径（GPT_SoVITS/…），必须在源码目录下跑
+# 走 gptsovits-serve.py 这一层而不是直接起 api_v2.py：它会把真正的 PID 写进
+# state/gptsovits-serve.pid，桥接唱歌前就能停掉「正在加载、还没监听端口」的这个进程。
+$launcher = Join-Path $PSScriptRoot 'gptsovits-serve.py'
+if (-not (Test-Path $launcher)) { throw "找不到启动器：$launcher" }
 Push-Location $src
 try {
   $line = "[{0}] 启动 api_v2.py -a {1} -p {2} -c {3}" -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $Bind, $Port, $TtsConfig
   Add-Content -LiteralPath $Log -Value $line -Encoding utf8
   if ($Wait) {
-    & $python $api -a $Bind -p $Port -c $TtsConfig *>&1 | Tee-Object -FilePath $Log -Append
+    & $python $launcher $api -a $Bind -p $Port -c $TtsConfig *>&1 | Tee-Object -FilePath $Log -Append
     exit $LASTEXITCODE
   } else {
-    & $python $api -a $Bind -p $Port -c $TtsConfig
+    # 后台跑（看门狗就是这么起的）时也把输出写进日志：隐藏窗口里崩掉，不落盘就完全查不到原因
+    # （2026-10-24 就踩过：服务起不来、日志里只有一行「启动 api_v2.py」，python 的报错全丢了）。
+    & $python $launcher $api -a $Bind -p $Port -c $TtsConfig *>&1 | Tee-Object -FilePath $Log -Append
     exit $LASTEXITCODE
   }
 } finally {

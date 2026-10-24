@@ -520,6 +520,8 @@ AI 也能主动发图（照片、截图、表情图、自己生成的图）。�
 
 AI 也能发语音条。**出厂默认关**（`config.example.json` 里 `socialV2.voice.enabled` 与 `socialV2.tools.sendVoice` 都是 `false`），把这两个开关打开之后才可用。发语音属于敏感动作，所以还受人员梯队约束（只对第一梯队和本群群主开放，见「人员梯队与敏感动作权限」）。
 
+想让她**唱歌**是另一个开关（`socialV2.tools.sing`，默认也关）：那会走 ACE-Step + Seed-VC，单次 1~3 分钟，见「唱她自己的歌」。
+
 两种用法（`text` 与 `voice` **二选一**，同时给会被直接拒掉）：
 
 | 用法 | 传什么 | 说明 |
@@ -717,7 +719,53 @@ _acestep/env/Scripts/python.exe scripts/sing.py --lyrics-file lyrics.txt --steps
 - **性能实测**（RTX 4060 Laptop 8G，`--cpu_offload` 开）：20 秒的歌 / 20 步 = 生成 21.7s、总 40s；8 秒 / 8 步 = 43s（含加载）。显存占用峰值约 7GB。
 - 2026-10-24 已真机发出第一首（`messageId=1207806362`，19.97s / 48kHz 立体声 / mean -15.4dB）。
 
-**还没接的下一步**：ACE-Step 出来的是「某个嗓子」唱的歌，不是小鲸鱼自己的音色。要变成她的声音，得再加一道**零样本音色转换**（Seed-VC 之类，拿 `audio/ref/edge-*.wav` 当参考），然后把「生成 + 转换 + 发出去」包成一个 MCP 工具（`qq_sing`）让她自己会唱。这块还没做。
+### 唱她自己的歌：生成 → 换音色 → 发出去（`qq_sing`）
+
+ACE-Step 唱出来的是「某个女声」，不是小鲸鱼。中间那道是**零样本音色转换**：拿她现在的嗓子（`socialV2.voice.tts.gptsovits.refAudio`，也就是 TTS 用的那对参考文件）当目标，把歌声的嗓子换掉——不用为唱歌单独训模型。
+
+```bash
+# 手动两步：先生成，再换成她的音色（不给 --target 就用配置里她现在的嗓子）
+node scripts/sing.mjs --lyrics "第一句\n第二句" --duration 20
+node scripts/voice-convert.mjs --source audio/sing-out.wav --out audio/sing-mine.wav
+
+# 也可以一条命令到底：--vc 生成完自动换音色，--send 再直接发 QQ
+npm run sing -- --lyrics "…" --duration 20 --vc --send private:<QQ号>
+
+# 单独换任意一段声音（比如你录的一句话）
+node scripts/voice-convert.mjs --source audio/xxx.wav --target audio/ref/edge-xiaoyi.wav --send private:<QQ号>
+```
+
+| voice-convert 参数 | 说明 |
+| --- | --- |
+| `--source` | 要换嗓子的音频（必需） |
+| `--target` | 音色参考，默认取 `socialV2.voice.tts.gptsovits.refAudio`，兜底 `audio/ref/sapi-ref.wav` |
+| `--out` | 产物路径，默认跟源音频放同一目录（Seed-VC 自己会按参数拼一个长名字） |
+| `--steps` | 扩散步数，默认 30；12~20 也能听，30 更干净（30 步约 47 秒） |
+| `--similarity` / `--intelligibility` | 像不像她 / 咬字清不清楚，默认都 0.7 |
+| `--send` | 转完直接发出去 |
+
+**给她的工具**：`socialV2.tools.sing` 打开后，她就有 `qq_sing` 这个 MCP 工具（`key` / `token` / `lyrics` 必填，可选 `tags` / `duration` / `vc` / `steps`），自己写歌词、自己决定唱什么，唱完自己发到当前会话（返回 `verified=true` 才算真发出）。**默认关**——单次 1~3 分钟、独占显存，属于重动作，要显式开。
+
+**唱歌前怎么腾显存**（这台机器 16GB 内存 + 8GB 显存，ACE-Step 和 TTS 不能共存）：
+
+- 先把 Ollama 的常驻模型逐个 `keep_alive:0` 卸掉；
+- 再停 GPT-SoVITS。**两条路都要走**：按端口（netstat 找 LISTENING 的 PID）能停「已经在服务」的，但如果它正处在**加载模型、还没监听端口**的那一两分钟，按端口是找不到的——那时它已经吃了 5GB 以上，不杀掉就会把 ACE-Step 挤成 `exit=3221225477`（0xC0000005 访问违例）。所以 `scripts/gptsovits-serve.py` 这个薄启动器会把**真正吃内存的那个 python 的 PID** 写进 `state/gptsovits-serve.pid`（桥接只认 10 分钟内的，防 PID 复用误杀）；
+- 同时落 `state/tts-hold.json`（15 分钟后自动失效），看门狗看到它就不会在这段时间把 TTS 抢着拉起来——否则唱到一半必定 `WinError 1455`。
+- **别用 `taskkill /T` 杀那个 pwsh 包装脚本**：`/F` 之后 python 子进程会变成孤儿继续占着 5GB（实测），只能直接按 python 的 PID 停。
+
+**Seed-VC 装在哪、怎么装的**：源码 `https://gh-proxy.com/https://github.com/Plachtaa/seed-vc/archive/refs/heads/main.zip` → `../_seedvc/seed-vc-main`；venv `../_seedvc/env`（`uv venv --python 3.10`；`torch==2.4.0/torchvision==0.19.0/torchaudio==2.4.0` 走 `--index-url https://download.pytorch.org/whl/cu124`，再 `uv pip install hydra-core omegaconf transformers==4.46.3 librosa==0.10.2 pydub soundfile huggingface_hub einops scipy "numpy<2" pyyaml safetensors munch==4.0.0 matplotlib`）；权重约 1.5GB 从 `hf-mirror.com` 下到 `../_seedvc/seed-vc-main/checkpoints`。`_seedvc/` 也不随仓库发布。
+
+**Seed-VC 踩过的坑（都在 `voice-convert.mjs` 里兜住了）**：
+
+- **`WinError 126 ... fbgemm.dll`**：torch 2.4.0 的 fbgemm.dll 要 `libomp140.x86_64.dll`，本机 VC 运行时只有 `vcomp140.dll`。解法是把 venv 里自带的 `libiomp5md.dll` 复制成 `libomp140.x86_64.dll`（`_seedvc/env/Lib/site-packages/torch/lib/` 下）——这是别名不是官方库，**重装 venv 后要重做**。
+- **`PermissionError: [WinError 5]`**：不设 `HF_HUB_CACHE`/`HF_HOME` 时 transformers 会去默认缓存目录，那里没权限。脚本默认指到 `checkpoints/`，顺带复用它已经下好的 whisper 分片。
+- **`Couldn't find ffmpeg or avconv`**：pydub 要 ffmpeg。脚本把 ffmpeg 所在目录塞进子进程 PATH（来源顺序 `FFMPEG_PATH` → `socialV2.voice.ffmpegPath` → 已知的 `_gptsovits/ffmpeg/.../bin`）。
+- **`ModuleNotFoundError: No module named 'munch'`**：`requirements.txt` 之外的隐式依赖，装 `munch==4.0.0` 即可。
+- 2026-10-24 已真机验证：`audio/sing-test.wav` → `audio/vc_v2_sing-test_edge-xiaoyi_1.0_30_0.7.wav`（22.1kHz 单声道，30 步 46.7 秒），发出 `messageId=-1809630381`。
+- **端到端（`qq_sing` 真发）**：同一台机器上走接口跑了三次——第一次暴露「发出去时把 `audio/xxx.wav` 当库内子目录」的 bug（返回 500，但歌已经生成好了）；修掉后 `HTTP 200 / messageId=1015680856`，但 `verified` 读错了字段（顶层没有 `verified`，硬证据在 `verification.confirmed`）；再修后 `verified: true / messageId=1413453481`。单次耗时 108~260 秒（生成 + 30 步换音色 + 发送）。
+- **偶发 `exit=3221225477`（0xC0000005 访问违例）**：diffusion 跑完、后处理阶段崩，重试一次就过（这台 16GB 机器 `available` 常年在 0MB 附近）。脚本会把最后 6 行日志写进 `detail`，看到它重试即可；连续崩就先把 Ollama 模型卸掉再唱。
+
+回归：`npm run test:sing`（ACE-Step 层）、`npm run test:voice-convert`（Seed-VC 层，`VOICE_CONVERT_LIVE=1` 才真跑一次）、`npm run test:sing-tool`（`qq_sing` 的路由/工具开关/hold 文件）；`SING_LIVE=1 npm run test:sing` 会真生成一段 8 秒的。
 
 回归：`npm run test:sing`（离线静态检查两端参数接线；`SING_LIVE=1 npm run test:sing` 才真生成一段 8 秒的）。
 

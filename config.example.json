@@ -160,6 +160,7 @@
       "collectSticker": true,
       "getSelfImage": true,
       "sendVoice": false,
+      "sing": false,
       "history": true,
       "diary": true,
       "interests": true,
