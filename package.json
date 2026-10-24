@@ -46,6 +46,8 @@
     "test:sing": "node scripts/test-sing.mjs",
     "test:sing-tool": "node scripts/test-sing-tool.mjs",
     "voice:audition": "node scripts/voice-audition.mjs",
+    "voice:clone": "node scripts/clone-voice.mjs",
+    "test:voice-clone": "node scripts/test-clone-voice.mjs",
     "sing": "node scripts/sing.mjs",
     "voice:convert": "node scripts/voice-convert.mjs",
     "test:voice-convert": "node scripts/test-voice-convert.mjs",

@@ -685,6 +685,45 @@ node scripts/voice-audition.mjs --set audio/ref/edge-xiaoyi.wav --ref-text "主�
 
 已知限制：只支持 Windows 上的**同机服务**（参考音频路径是交给本机 Python 读的，所以必须是本机绝对路径）；显卡常驻（本机 RTX 4060 8G 够用，但服务起来后会占显存）；参考音频与逐字文本必须配对，否则音色会跑偏。
 
+### 把她自己的声音克隆出来（`voice:clone`：给一段音频或视频就行）
+
+上面那节是「借 Edge TTS 的嗓子」；这一节是「用一段真人录音」。主人随手丢一个 `.wav` / `.mp3` / `.mp4` 过来，一条命令就能切出参考片段、算出逐字文本、写进 `config.json`：
+
+```powershell
+# 只切片段，先看看切在哪、文本是什么（不动配置，最安全）
+npm run voice:clone -- --audio ../sound/大肥鱼.wav --no-set
+
+# 满意就直接切（同时改 socialV2.voice.tts.gptsovits.refAudio + refText）
+npm run voice:clone -- --audio ../sound/大肥鱼.wav
+
+# 切完用新音色合成一句试听，并立刻发到 QQ
+npm run voice:clone -- --audio ../sound/大肥鱼.wav --send private:3482501440
+```
+
+| 参数 | 说明 |
+| --- | --- |
+| `--audio <文件>` | 必填。任意音频或**视频**（`.mp4` 直接喂，内部 `ffmpeg -vn` 丢视频轨） |
+| `--no-set` | 只切片段并打印结果，不改 `config.json` |
+| `--send <private:QQ号\|group:群号>` | 切完配置后合成一句试听并立刻发出去 |
+| `--text "<台词>"` | 试听台词（默认「主人，你听，这是我的新声音。……」） |
+| `--min-sec` / `--max-sec` | 参考片段时长窗口，默认 4 ~ 10 秒（GPT-SoVITS 最佳区间） |
+
+它做四件事：`ffmpeg` 抽成 32kHz 单声道 → funasr（`paraformer-zh` + `fsmn-vad` + `ct-punc`）把整段转写成全文 → 在 VAD 语音段里找**最长的、正好停在断句处**的前缀切出来 → 对切出来的那一段**单独再转写一次**当 `refText`（`refText` 必须与 `refAudio` 逐字一致，所以不能直接截全文）。
+
+**这段流程踩过的四个坑（都写进代码了，改的时候别踩回去）**
+
+1. **funasr 的模型缓存目录写不进**。它默认往 `C:\Users\<你>\.cache\modelscope` 下，这个路径的 ACL 常常只有 `(RX)`，于是 `PermissionError [WinError 5]`，最后伪装成 `RuntimeError: model 'paraformer-zh' is not registered.`（看着像模型名写错）。`MODELSCOPE_CACHE` 环境变量对它**无效**；改法是在 `AutoModel(..., hub="hf")` 走 HuggingFace，配 `HF_ENDPOINT=https://hf-mirror.com` + `HF_HUB_CACHE` / `HF_HOME` 指到可写目录（`scripts/clone-voice.mjs` 已经默认设好，`_hf-cache`）。
+2. **`refText` 里有英文词，TTS 会 HTTP 400**。`cmudict` → `averaged_perceptron_tagger_eng` 一个接一个地缺（"Resource 'cmudict' not found."）。一次装齐，装到 GPT-SoVITS 自己会搜的目录：
+   ```powershell
+   _gptsovits\env\Scripts\python.exe -m nltk.downloader -d D:\34825\zhuomian\youqq\_gptsovits\GPT-SoVITS-main\runtime\nltk_data cmudict averaged_perceptron_tagger_eng averaged_perceptron_tagger punkt punkt_tab
+   ```
+3. **「切出来的那段结尾是句号」根本不能当判据**。`ct-punc` 会给任意长度的输入补一个句号，所以切在词中间也「结尾是句号」。正确做法是回到**全文**核对：切出片段的去标点字符数，必须正好落在原文某个断句标点的位置上（`full_norm.startswith(tn)` 还能顺带防 ASR 跑偏）。
+4. **连续说话的人，句号可能在时长窗口之外**。真机那段 13.87 秒里唯一的句号在 11.5 秒以后（超过 10 秒上限），窗口内只有逗号。所以逗号/顿号/冒号也算断句点，切在逗号上远好过切在词中间。
+
+**真机证据（2026-10-24）**：`sound\大肥鱼.wav`（13.87 秒，48kHz 单声道）→ `audio/ref/dyf-7s.wav`（7.0 秒）+ `refText="网上到处都是本鱼在狂飙散装rap和讲相声。原来是有人在github上偷偷进货。"` → 合成 10.2 秒 → 已发出，`messageId=68627126`。同一段素材用 `clone-voice.mjs` 自动跑，切点是 7.2 秒、文本停在「……偷偷进货。」（自动版比手动切的多出 0.2 秒，文本同样对得上）。
+
+注意 `config.json` 在 `.gitignore` 里（换音色属于本机私事），所以切完 `git status` 不会变脏。回归：`npm run test:voice-clone`（默认离线只查代码约定；`CLONE_VOICE_LIVE=1` 才真跑一次 funasr，约 90 秒，要 `_gptsovits/env`）。
+
 ### 唱一首歌（ACE-Step，可选）
 
 GPT-SoVITS 是 **TTS**：它只会「说」，没有旋律的概念（`api_v2.py` 里连 sing/melody 之类的参数都没有，别指望它唱）。要唱歌得另上一个会写音乐 + 唱词的模型，本机用的是 **ACE-Step**（3.5B，8GB 显存可跑，官方 2025-05-10 那版就把峰值显存压到 8GB 了）。
