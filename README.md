@@ -762,12 +762,10 @@ node scripts/voice-convert.mjs --source audio/xxx.wav --target audio/ref/edge-xi
 - **`Couldn't find ffmpeg or avconv`**：pydub 要 ffmpeg。脚本把 ffmpeg 所在目录塞进子进程 PATH（来源顺序 `FFMPEG_PATH` → `socialV2.voice.ffmpegPath` → 已知的 `_gptsovits/ffmpeg/.../bin`）。
 - **`ModuleNotFoundError: No module named 'munch'`**：`requirements.txt` 之外的隐式依赖，装 `munch==4.0.0` 即可。
 - 2026-10-24 已真机验证：`audio/sing-test.wav` → `audio/vc_v2_sing-test_edge-xiaoyi_1.0_30_0.7.wav`（22.1kHz 单声道，30 步 46.7 秒），发出 `messageId=-1809630381`。
-- **端到端（`qq_sing` 真发）**：同一台机器上走接口跑了三次——第一次暴露「发出去时把 `audio/xxx.wav` 当库内子目录」的 bug（返回 500，但歌已经生成好了）；修掉后 `HTTP 200 / messageId=1015680856`，但 `verified` 读错了字段（顶层没有 `verified`，硬证据在 `verification.confirmed`）；再修后 `verified: true / messageId=1413453481`。单次耗时 108~260 秒（生成 + 30 步换音色 + 发送）。
+- **端到端（`qq_sing` 真发）**：同一台机器上走接口跑了四次——第一次暴露「发出去时把 `audio/xxx.wav` 当库内子目录」的 bug（返回 500，但歌已经生成好了）；修掉后 `HTTP 200 / messageId=1015680856`，但 `verified` 读错了字段（顶层没有 `verified`，硬证据在 `verification.confirmed`）；再修后 `verified: true / messageId=1413453481`；最后验的是「按 PID 停 TTS」那条路（先刷新 `state/gptsovits-serve.pid` 的时间戳强制走 PID 分支，跑起来 20 秒后那个 python 就没了、`9880=000`、`state/tts-hold.json` 在位）→ `verified: true / messageId=1715772539`。单次耗时 108~260 秒（生成 + 30 步换音色 + 发送）。
 - **偶发 `exit=3221225477`（0xC0000005 访问违例）**：diffusion 跑完、后处理阶段崩，重试一次就过（这台 16GB 机器 `available` 常年在 0MB 附近）。脚本会把最后 6 行日志写进 `detail`，看到它重试即可；连续崩就先把 Ollama 模型卸掉再唱。
 
-回归：`npm run test:sing`（ACE-Step 层）、`npm run test:voice-convert`（Seed-VC 层，`VOICE_CONVERT_LIVE=1` 才真跑一次）、`npm run test:sing-tool`（`qq_sing` 的路由/工具开关/hold 文件）；`SING_LIVE=1 npm run test:sing` 会真生成一段 8 秒的。
-
-回归：`npm run test:sing`（离线静态检查两端参数接线；`SING_LIVE=1 npm run test:sing` 才真生成一段 8 秒的）。
+回归：`npm run test:sing`（ACE-Step 层）、`npm run test:voice-convert`（Seed-VC 层，`VOICE_CONVERT_LIVE=1` 才真跑一次）、`npm run test:sing-tool`（`qq_sing` 的路由/工具开关/hold 文件/PID 文件）；`SING_LIVE=1 npm run test:sing` 会真生成一段 8 秒的。
 
 ## 待发文件夹（qq_list_outbox / qq_save_message_image / qq_draw_image）
 
