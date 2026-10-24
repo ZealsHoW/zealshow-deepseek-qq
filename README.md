@@ -647,6 +647,32 @@ npm run test:voice-tts           # 第一步的 SAPI 回归，仍然要过
 
 本机实测（2026-10-24，RTX 4060 Laptop 8G）：首次合成（服务刚起来、要加载模型）107.6 秒，**热态 2.2 秒**；产物 32 kHz 单声道 16 bit wav，5.16 秒/330 KB。已用这条链路真发过一条 QQ 语音（走 `scripts/send-voice.mjs`，网关回读确认是 `record` 段）。
 
+### 换音色：借一个干净的嗓子（Edge TTS 参考 + 试听）
+
+GPT-SoVITS 是**零样本克隆**：音色不靠训练，完全由 `socialV2.voice.gptsovits` 里的 `refAudio`（参考音频）+ `refText`（参考文本）决定。所以换音色 = 换一对参考文件，不用重训模型。
+
+机器自带的 SAPI 参考（`audio/ref/sapi-ref.wav`）本身就是合成音，克隆出来还是机器味。用 Edge TTS 的自然女声当参考，等于借一个干净的嗓子：
+
+```powershell
+# 1) 造参考音频（需要 edge-tts：uv pip install --python _gptsovits/env/Scripts/python.exe edge-tts）
+python scripts/make-ref-voice.py --list                       # 看看有哪些中文音色
+python scripts/make-ref-voice.py --voice zh-CN-XiaoyiNeural --out audio/ref/edge-xiaoyi.wav
+
+# 2) 同一句台词，用每个候选各合成一遍（产物在 audio/audition-<名字>.wav）
+node scripts/voice-audition.mjs
+node scripts/voice-audition.mjs --text "自定义台词"
+
+# 3) 选定后切换（同时写 refAudio + refText，其余配置不动）
+node scripts/voice-audition.mjs --set audio/ref/edge-xiaoyi.wav --ref-text "主人，我是小鲸鱼。……"
+```
+
+- `refText` **必须和参考音频逐字一致**（GPT-SoVITS 靠它对齐音素）；`make-ref-voice.py` 的默认文本与 `config.json` 的 `refText` 是同一句，改文本就要两边一起改。
+- 桥接每次发语音都会重新读配置，切换后**不用重启**；音色服务按 `tts_infer.yaml` 加载权重，与参考音频无关。
+- 参考音频规格统一 32 kHz / 16 bit / 单声道（脚本里用 ffmpeg 转）。
+- 试听产物想直接发到 QQ：`node scripts/send-voice.mjs send audio/audition-edge-xiaoyi.wav private:<QQ号>`（注意 `socialV2.voice.maxPerMinute` 限流）。
+- 2026-10-24 已真机发出三个候选（xiaoyi / xiaoxiao / xiaobei，messageId 分别为 -1081032749 / 504873378 / -491824197），等主人挑一个再切默认。
+- 回归：`npm run test:voice-audition`（离线，用临时配置验证 `--set` 只改这两个键、出错不写盘、参考音频规格）。
+
 **服务由看门狗保活（2026-10-24 起）**：`scripts/gptsovits-serve.ps1` 现在由 `qq-bridge-keepalive.ps1`（计划任务 `\qq-bridge-watchdog`）托管 —— 只有当 `socialV2.voice.tts.engine` 是 `gptsovits` 且没被 `gptsovits.enabled:false` 关掉时才会拉起，端口取自 `gptsovits.baseUrl`，探活用 `curl --max-time 3 …/control`（收到 400 就算活），两次拉起之间留 180 秒给首次加载模型。
 在此之前它是手工 `Start-Process` 起的，属于 DSH 的作业对象，**DSH 一重启（换端口/升级）就跟着消失**，症状是「语音还能正常发，但全是机器音」——因为 `fallback:true` 会静默回落 SAPI。现在 DSH 重启不再牵连它。同理：**别在 DSH 的终端里起桥接或这个 TTS 服务**，要重启就跑 `schtasks /run /tn "\qq-bridge-watchdog"`（见「运行与运维」）。
 注：`qq-bridge-keepalive.ps1` 与 `.vbs` 在本仓库根目录之外（`qq-bridge` 的上一级），不随仓库发布，只随本机维护。
