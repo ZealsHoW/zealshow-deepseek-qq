@@ -39,6 +39,7 @@
     "test-forward": "node scripts/test-forward.mjs",
     "test-slang": "node scripts/test-slang-learn.mjs",
     "test-stickers": "node scripts/test-stickers.mjs",
+    "test:keepalive-tts": "node scripts/test-keepalive-tts.mjs",
     "test-voice": "node scripts/test-voice.mjs",
     "test-voice:gui": "node scripts/test-voice-gui.mjs",
     "test-voice:system": "node scripts/test-voice-system.mjs",

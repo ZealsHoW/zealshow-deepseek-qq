@@ -647,6 +647,10 @@ npm run test:voice-tts           # 第一步的 SAPI 回归，仍然要过
 
 本机实测（2026-10-24，RTX 4060 Laptop 8G）：首次合成（服务刚起来、要加载模型）107.6 秒，**热态 2.2 秒**；产物 32 kHz 单声道 16 bit wav，5.16 秒/330 KB。已用这条链路真发过一条 QQ 语音（走 `scripts/send-voice.mjs`，网关回读确认是 `record` 段）。
 
+**服务由看门狗保活（2026-10-24 起）**：`scripts/gptsovits-serve.ps1` 现在由 `qq-bridge-keepalive.ps1`（计划任务 `\qq-bridge-watchdog`）托管 —— 只有当 `socialV2.voice.tts.engine` 是 `gptsovits` 且没被 `gptsovits.enabled:false` 关掉时才会拉起，端口取自 `gptsovits.baseUrl`，探活用 `curl --max-time 3 …/control`（收到 400 就算活），两次拉起之间留 180 秒给首次加载模型。
+在此之前它是手工 `Start-Process` 起的，属于 DSH 的作业对象，**DSH 一重启（换端口/升级）就跟着消失**，症状是「语音还能正常发，但全是机器音」——因为 `fallback:true` 会静默回落 SAPI。现在 DSH 重启不再牵连它。同理：**别在 DSH 的终端里起桥接或这个 TTS 服务**，要重启就跑 `schtasks /run /tn "\qq-bridge-watchdog"`（见「运行与运维」）。
+注：`qq-bridge-keepalive.ps1` 与 `.vbs` 在本仓库根目录之外（`qq-bridge` 的上一级），不随仓库发布，只随本机维护。
+
 已知限制：只支持 Windows 上的**同机服务**（参考音频路径是交给本机 Python 读的，所以必须是本机绝对路径）；显卡常驻（本机 RTX 4060 8G 够用，但服务起来后会占显存）；参考音频与逐字文本必须配对，否则音色会跑偏。
 
 ## 待发文件夹（qq_list_outbox / qq_save_message_image / qq_draw_image）
