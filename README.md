@@ -685,6 +685,57 @@ node scripts/voice-audition.mjs --set audio/ref/edge-xiaoyi.wav --ref-text "主�
 
 已知限制：只支持 Windows 上的**同机服务**（参考音频路径是交给本机 Python 读的，所以必须是本机绝对路径）；显卡常驻（本机 RTX 4060 8G 够用，但服务起来后会占显存）；参考音频与逐字文本必须配对，否则音色会跑偏。
 
+### 音色微调：在原声附近小改（`voice:tune`）
+
+「不好听，回到原来那版附近，只小调」这类需求**不是**换音色，别去换参考、更别重训。能小幅动的就三个旋钮：**参考音频变调**、**参考音频轻 EQ**、合成参数（`speedFactor` / `temperature` / `topK`）。前两个由脚本扫参，第三个沿用 `config.json` 里现有的值：
+
+```powershell
+# 每个音高各出一条试听句：原样、降 1、降 2，并顺带各加一条「轻 EQ」版
+node scripts/voice-tune.mjs --ref audio/ref/dyf-7s-soft.wav --pitch 0,-1,-2 --warm
+
+# 只试一版、换一句台词
+node scripts/voice-tune.mjs --ref audio/ref/dyf-7s-soft.wav --pitch -2 --text "换一句话试试"
+```
+
+产物落在 `audio/tune/`（`audio/` 已被 `.gitignore` 忽略）：
+
+- `ref-m2.wav` / `ref-m2-warm.wav`：变调（+轻 EQ）之后的**参考音频**；
+- `probe-m2.wav` / `probe-m2-warm.wav`：用它的参考合成的**试听句**。每版用同一句话，才好横向比。
+
+变成了之后，把 `socialV2.voice.tts.gptsovits.refAudio` 指过去即可（`refText` **不用改**：变调/EQ 不改字，逐字对齐仍在）：
+
+```jsonc
+"refAudio": "audio/ref/dyf-7s-soft-m2w.wav"   // 选中的那一版搬进 audio/ref/ 再引用
+```
+
+**变调数学**（脚本里就是这条链）：降 `n` 个半音 = 重采样比率 `2^(-n/12)`，时长会因此变长 `1/比率`，再用 `atempo` 拉回 `1/比率`：
+
+```text
+filter: asetrate=32000*0.8909, aresample=32000, atempo=1.1225
+```
+
+`比率 × atempo` 必须恒等于 1，否则出来的音频会「跑调 + 变时长」。回归里对 `-11 / -5 / -2 / 0 / 3 / 7 / 11` 逐个断言这个乘积。
+
+**轻 EQ**（`--warm`）：`equalizer=f=200:t=q:w=1:g=2`（低中频抬 2 dB，多点胸腔感）+ `equalizer=f=4000:t=q:w=1:g=-2`（4 kHz 压 2 dB，齿音/尖利少一点）。只动音色，不动音高。
+
+实测一例（2026-10-24，参考 `audio/ref/dyf-7s-soft.wav`，同一句台词）：
+
+| 变体 | 中位 F0 | 频谱质心（中位） | ASR 复核 |
+| --- | --- | --- | --- |
+| `p0`（原样） | 413 Hz | 2061 Hz | 完整 |
+| `p0-warm` | 366 Hz | 2053 Hz | 丢开头三个字 |
+| `m2`（−2 半音） | 363 Hz | 1836 Hz | 完整 |
+| `m2-warm`（−2 半音 + 轻 EQ） | 345 Hz | **1653 Hz** | **完整** |
+
+选中 `m2-warm`：质心降了 400 Hz（听感更沉、更少尖利），吐字仍然完整。
+
+两个坑：
+
+- **别拿整首歌的 F0 当目标**。拿 `audio/sing-test.wav` 量出来中位 F0 只有 147 Hz —— 那不是人声，是伴奏的贝斯/鼓把 `pyin` 的中位数拉下去了。要量人声就取**清唱段**，或者干脆只比频谱质心、靠耳朵定。
+- **降得越多不等于越好听**。降到 −3 半音时 ASR 把「主人」听成「主任」、`m1`（−1 半音）丢了开头三个字 —— 变调会同时改变共振峰，糊字是它的代价。所以每次都用 `audio/asr-check.py` 复核一遍（`funasr`，见「把她自己的声音克隆出来」那节的依赖），**先保吐字，再选音色**。
+
+回归：`npm run test:voice-tune`（离线，不碰 ffmpeg 与 TTS：只验变调数学、命名、滤镜顺序、`--pitch` 解析，以及 README / package.json 的接线）。
+
 ### 把她自己的声音克隆出来（`voice:clone`：给一段音频或视频就行）
 
 上面那节是「借 Edge TTS 的嗓子」；这一节是「用一段真人录音」。主人随手丢一个 `.wav` / `.mp3` / `.mp4` 过来，一条命令就能切出参考片段、算出逐字文本、写进 `config.json`：
