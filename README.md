@@ -246,6 +246,7 @@ npm start          # 或双击 start.bat（守护模式：崩溃自动重启，�
 - **用 start.bat 启动**（守护模式），窗口别关——桥接崩溃会在 5 秒后自动拉起
 - 桥接异常/消息无反应时：双击 `restart.bat`（自动杀旧实例 → 清理锁 → 重新启动守护）
 - **重启 DSH 通常不需要动桥接**：每 5 秒探活，DSH 不可用期间收到的 QQ 消息在桥接进程内排队（最多 50 条/会话，满后丢最旧项），恢复后尝试补投。桥接进程退出会丢失内存队列；断线期间已经结束的回复暂不保证补发。
+- **⚠️ 别在 DSH 的终端里起桥接**：那样桥接属于 DSH 自己的 Windows 作业对象，DSH 一重启（换端口、升级、崩溃）桥接会被连坐杀掉——表现为 DSH 可用但 QQ 完全没反应、`state/bridge.log` 停在 `⚠️ DSH 不可用（重启中？）`、`curl http://127.0.0.1:3100/health` 不通。正确做法是走计划任务（活在 DSH 之外）：`schtasks /run /tn "\qq-bridge-watchdog"`，它会按序拉起 SnowLuma → 常驻 MCP 服务 → 桥接，并自动把 `config.json` 里的 DSH 端口同步成当前端口。
 - **关机/断网期间漏掉的消息会自动补进未读**：桥接每次连上 QQ 后，会回看白名单会话最近的历史消息（`socialV2.catchUp.count` 默认 20 条、`maxAgeHours` 默认 24 小时、`graceMs` 默认 2 分钟），只补「上一个进程最后一次心跳之后」的消息，并按 `messageId` 去重；补入后会触发一次 `offlineReview` 唤醒，让 agent 把真正需要回应的补上。桥接每分钟写一次心跳（`state/last-alive.json`），所以重启/开机都不会把很久以前已经被处理过的旧消息再翻出来。
 - 修改 `config.json` / `roles/` / `state/current-role.json` 后重启桥接生效；修改 `dsh/agent-presets/`（改完要跑 `node scripts/build-agent-preset-patches.mjs` 重新生成 bundle patch）或 MCP 配置后重启 DSH 生效
 
@@ -318,6 +319,23 @@ npm run test:capabilities -- --live                  # 额外实发：只发主�
 两条硬规矩写死在脚本里：实发**只允许**到 `ownerQQ` 自己的私聊与仅自己可见的空间说说；
 群发只有在白名单里存在名字带「测试」的专用群时才发 —— 家庭群绝不打扰。
 `--live` 用 `state/social-v2.json` 里的会话令牌，全程不打印任何令牌。
+
+### 最近一次实机验证（2026-10-24，真号真网关）
+
+`npm run test:capabilities -- --live --no-tests` → **PASS 17 / FAIL 0 / SKIP 2**，原始输出存 `state/selftest-live-1035.txt`。
+不是"配置对上了"，是每条都真的经过 QQ 网关或真打了外部站点：
+
+| 能力 | 实机证据 |
+| --- | --- |
+| 发图片 / 生成后发出来 | `messageId=-1383012150`、`-904620467`，各 12528 字节，来源 file |
+| 发说说（仅自己可见） | `{"tid":"bf0d6d167418dc6abdfc0400","time":1792809076}` |
+| 发表情包 | `ok:true`，`resId` 回填 |
+| 刷完分享给家里人 | `{"ok":true,"key":"private:…","sent":1,"failed":0}` |
+| 读抖音链接 | 正文 1833 字，标题解析成功 |
+| 看懂图（本地视觉） | `qwen2.5vl:3b` 描述出「卡通小鲸鱼表情包 + 深蓝渐变背景」 |
+
+两项 SKIP 是脚本里写死的保护：白名单里没有名字带「测试」的群 ⇒ 群发实发跳过（家庭群不打扰）；
+私聊消息本就没有 `messageId` ⇒ 引用回复不实发，链路由回归 `test-reply-wait.mjs` 覆盖。
 
 ## 环境变化与插件体检（先体检，再改代码）
 
