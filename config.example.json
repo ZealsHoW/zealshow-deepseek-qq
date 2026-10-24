@@ -146,6 +146,7 @@
       "setWakeConfig": true,
       "markRead": true,
       "memory": true,
+      "knowledge": true,
       "slangQuery": true,
       "slangSubmit": true,
       "getImages": true,
@@ -374,7 +375,17 @@
     },
     "diary": {
       "days": 2,
-      "maxChars": 1500
+      "maxChars": 1500,
+      "publish": {
+        "enabled": false,
+        "at": "20:30",
+        "visibility": "friends",
+        "keys": [],
+        "windowHours": 24,
+        "maxMemories": 12,
+        "maxKnowledge": 6,
+        "retryMinutes": 45
+      }
     },
     "interests": {
       "maxItems": 60,
@@ -391,6 +402,9 @@
         "firstDelayMs": 30000,
         "maxPerRun": 12
       }
+    },
+    "knowledge": {
+      "promptLimit": 3
     },
     "outbox": {
       "enabled": true,

@@ -364,6 +364,10 @@ const TOOL_CONFIG_FLAGS = {
   qq_get_active_members: 'getActiveMembers',
   qq_memory_append: 'memory',
   qq_memory_query: 'memory',
+  // 长期记忆库检索（FTS5）+ 知识库：都挂在记忆库同一个 state/memory.db 上。
+  qq_memory_search: 'memory',
+  qq_knowledge_add: 'knowledge',
+  qq_knowledge_search: 'knowledge',
   qq_memory_remove: 'memory',
   qq_memory_clear: 'memory',
   qq_slang_query: 'slangQuery',
@@ -1083,6 +1087,86 @@ server.tool(
       return { content: [{ type: 'text', text: serializeModelData(data) }] };
     } catch (error) {
       return { content: [{ type: 'text', text: `记忆读取失败：${error?.message ?? error}` }], isError: true };
+    }
+  }
+);
+
+server.tool(
+  'qq_memory_search',
+  '在**自己的长期记忆库**里按关键词检索（不是本会话聊天记录，是提炼过的「关于我们的事」：谁答应过什么、聊到过什么、对谁的印象）。聊天里提到某件具体的事、想确认自己记没记错、要接上几天前的话题时用。库里带 FTS5 全文索引，中文 3 个字以上走索引，1~2 个字自动回落模糊匹配。（只读）',
+  {
+    key: z.string().describe('会话 key，格式 group:群号 或 private:QQ号'),
+    token: z.string().describe('会话令牌（见唤醒提示中的【会话令牌】）'),
+    query: z.string().describe('检索词，越具体越准，比如「演唱会」「单词抽查」「语音好听」'),
+    limit: z.number().optional().describe('返回条数，默认 8，最多 30')
+  },
+  async ({ key, token, query, limit }) => {
+    try {
+      const data = await agentApi('/api/socialV2/memory-search', {
+        method: 'POST',
+        body: JSON.stringify({ key, query, limit }),
+        headers: { 'x-agent-token': token }
+      });
+      const items = Array.isArray(data?.items) ? data.items : [];
+      if (!items.length) return { content: [{ type: 'text', text: `记忆库里没搜到跟「${query}」有关的事。` }] };
+      const lines = items.map((it, i) => `${i + 1}. [${it.kind}] ${it.text}${it.subject ? `（${it.subject}）` : ''}`);
+      return { content: [{ type: 'text', text: `记忆库里关于「${query}」的有 ${items.length} 条：\n${lines.join('\n')}` }] };
+    } catch (error) {
+      return { content: [{ type: 'text', text: `记忆检索失败：${error?.message ?? error}` }], isError: true };
+    }
+  }
+);
+
+server.tool(
+  'qq_knowledge_add',
+  '往**知识库**里存一条「外面的事」：今天上网/群里刷到的、学会的、想明白的，用自己的话总结成一条。和记忆不同——记忆是关于我们之间的事，知识是关于世界的事。同一件事看到好几遍不会被存成好几条（会自动合并）。',
+  {
+    key: z.string().describe('会话 key，格式 group:群号 或 private:QQ号'),
+    token: z.string().describe('会话令牌（见唤醒提示中的【会话令牌】）'),
+    text: z.string().describe('这条知识本身（一两句话，自己复述，不要整段复制原文）'),
+    title: z.string().optional().describe('短标题，方便以后翻'),
+    source: z.string().optional().describe('哪来的：web / group / private / self …'),
+    url: z.string().optional().describe('原文链接（有就带上）'),
+    tags: z.array(z.string()).optional().describe('标签，2~4 个词'),
+    importance: z.number().optional().describe('重要程度 0~1，默认 0.5；觉得以后一定会用到的给 0.7+')
+  },
+  async ({ key, token, text, title, source, url, tags, importance }) => {
+    try {
+      const data = await agentApi('/api/socialV2/knowledge-add', {
+        method: 'POST',
+        body: JSON.stringify({ key, text, title: title || '', source: source || 'self', url: url || '', tags: tags || [], importance }),
+        headers: { 'x-agent-token': token }
+      });
+      const total = data?.stats?.total;
+      return { content: [{ type: 'text', text: `存进知识库了（${data?.action === 'merged' ? '和已有那条合并' : '新的一条'}${Number.isFinite(total) ? `，现在共 ${total} 条` : ''}）。` }] };
+    } catch (error) {
+      return { content: [{ type: 'text', text: `知识入库失败：${error?.message ?? error}` }], isError: true };
+    }
+  }
+);
+
+server.tool(
+  'qq_knowledge_search',
+  '在**知识库**里检索（自己存过的「外面的事」），写日记、聊天要引经据典、想不起某个东西查过什么时用。（只读）',
+  {
+    key: z.string().describe('会话 key，格式 group:群号 或 private:QQ号'),
+    token: z.string().describe('会话令牌（见唤醒提示中的【会话令牌】）'),
+    query: z.string().optional().describe('检索词；不给就按重要性返回最近记住的几条'),
+    limit: z.number().optional().describe('返回条数，默认 8，最多 30')
+  },
+  async ({ key, token, query, limit }) => {
+    try {
+      const data = await agentApi('/api/socialV2/knowledge-search', {
+        method: 'POST',
+        body: JSON.stringify({ key, query: query || '', limit }),
+        headers: { 'x-agent-token': token }
+      });
+      const items = Array.isArray(data?.items) ? data.items : [];
+      if (!items.length) return { content: [{ type: 'text', text: query ? `知识库里没搜到「${query}」。` : '知识库还是空的。' }] };
+      const lines = items.map((it, i) => `${i + 1}. ${it.title ? `【${it.title}】` : ''}${it.text}${it.url ? `（${it.url}）` : ''}`);
+      return { content: [{ type: 'text', text: `知识库 ${items.length} 条：\n${lines.join('\n')}` }] };
+    } catch (error) {
+      return { content: [{ type: 'text', text: `知识检索失败：${error?.message ?? error}` }], isError: true };
     }
   }
 );

@@ -135,6 +135,108 @@ export function openStore(options = {}) {
       used INTEGER NOT NULL DEFAULT 0
     );
   `);
+  // 检索索引（R1「具体提到某件事就去库里查」）：FTS5 + **trigram** 分词器。
+  // 必须用 trigram —— 默认的 unicode61 按词切分，中文整句会被当成一个长词，
+  // 「她说过什么关于演唱会的事」这种子串检索等于没有索引，只能全表 LIKE 扫。
+  // external content 表：索引只存倒排表，正文仍在 memories 里，不复制一份数据。
+  // 老库（已有 158 条）上触发器是新建的，索引是空的 —— 下面按行数差做一次 rebuild。
+  //
+  // 坑（2026-10-24 实测）：`SELECT COUNT(*) FROM memories_fts` 在 **external content** 表上
+  // 查的是内容表（memories），永远等于 memories 的行数 —— 拿它当「索引完不完整」的判据永远为真，
+  // 老库升级上来时索引其实是空的，检索会静默回落 LIKE（还以为是索引在跑）。真正建了索引的
+  // 文档数在 FTS5 的影子表 `memories_fts_docsize` 里（一篇一行），重建后用 MATCH 也才查得到。
+  function indexedDocCount(table) {
+    try {
+      return Number(db.prepare(`SELECT COUNT(*) AS n FROM ${table}_docsize`).get().n);
+    } catch {
+      return null; // 影子表不在（运行时禁了 columnsize）：交给调用方决定
+    }
+  }
+  let ftsReady = false;
+  try {
+    db.exec(`
+      CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(
+        text, norm, subject, content='memories', content_rowid='id', tokenize='trigram'
+      );
+      CREATE TRIGGER IF NOT EXISTS memories_fts_ai AFTER INSERT ON memories BEGIN
+        INSERT INTO memories_fts(rowid, text, norm, subject) VALUES (new.id, new.text, new.norm, COALESCE(new.subject, ''));
+      END;
+      CREATE TRIGGER IF NOT EXISTS memories_fts_ad AFTER DELETE ON memories BEGIN
+        INSERT INTO memories_fts(memories_fts, rowid, text, norm, subject) VALUES ('delete', old.id, old.text, old.norm, COALESCE(old.subject, ''));
+      END;
+      CREATE TRIGGER IF NOT EXISTS memories_fts_au AFTER UPDATE ON memories BEGIN
+        INSERT INTO memories_fts(memories_fts, rowid, text, norm, subject) VALUES ('delete', old.id, old.text, old.norm, COALESCE(old.subject, ''));
+        INSERT INTO memories_fts(rowid, text, norm, subject) VALUES (new.id, new.text, new.norm, COALESCE(new.subject, ''));
+      END;
+    `);
+    ftsReady = true;
+  } catch (error) {
+    // 老 SQLite / 未编 FTS5 的运行时：不装索引也能跑，检索回落 LIKE。
+    logger?.warn?.('记忆全文索引不可用（回落 LIKE 检索）', { error: String(error?.message ?? error) });
+  }
+  if (ftsReady) {
+    try {
+      const contentRows = Number(db.prepare('SELECT COUNT(*) AS n FROM memories').get().n);
+      const indexRows = indexedDocCount('memories_fts');
+      if (indexRows === null || contentRows !== indexRows) {
+        db.exec("INSERT INTO memories_fts(memories_fts) VALUES('rebuild')");
+        logger?.info?.('记忆全文索引已重建', { rows: contentRows });
+      }
+    } catch (error) {
+      logger?.warn?.('记忆全文索引重建失败（回落 LIKE 检索）', { error: String(error?.message ?? error) });
+      ftsReady = false;
+    }
+  }
+
+  // 知识库（R6）：她「在外面看到的、学到的、总结出来的」都落这张表。
+  // 与 memories 分开的理由不是技术上的，是语义上的：记忆是「关于我们的事」，知识是「关于世界的事」，
+  // 混在一张表里迟早会被同一套召回打分搅在一起（知识不该按「谁说的」分层，记忆必须分层）。
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS knowledge (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      scope TEXT NOT NULL DEFAULT 'global',
+      title TEXT,
+      text TEXT NOT NULL,
+      norm TEXT NOT NULL,
+      hash TEXT NOT NULL UNIQUE,
+      source TEXT,
+      url TEXT,
+      tags TEXT,
+      importance REAL NOT NULL DEFAULT 0.5,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      use_count INTEGER NOT NULL DEFAULT 0,
+      deleted_at INTEGER
+    );
+    CREATE INDEX IF NOT EXISTS idx_knowledge_recent ON knowledge(updated_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_knowledge_scope ON knowledge(scope, updated_at DESC);
+  `);
+  let knowledgeFtsReady = false;
+  try {
+    db.exec(`
+      CREATE VIRTUAL TABLE IF NOT EXISTS knowledge_fts USING fts5(
+        title, text, tags, content='knowledge', content_rowid='id', tokenize='trigram'
+      );
+      CREATE TRIGGER IF NOT EXISTS knowledge_fts_ai AFTER INSERT ON knowledge BEGIN
+        INSERT INTO knowledge_fts(rowid, title, text, tags) VALUES (new.id, COALESCE(new.title, ''), new.text, COALESCE(new.tags, ''));
+      END;
+      CREATE TRIGGER IF NOT EXISTS knowledge_fts_ad AFTER DELETE ON knowledge BEGIN
+        INSERT INTO knowledge_fts(knowledge_fts, rowid, title, text, tags) VALUES ('delete', old.id, COALESCE(old.title, ''), old.text, COALESCE(old.tags, ''));
+      END;
+      CREATE TRIGGER IF NOT EXISTS knowledge_fts_au AFTER UPDATE ON knowledge BEGIN
+        INSERT INTO knowledge_fts(knowledge_fts, rowid, title, text, tags) VALUES ('delete', old.id, COALESCE(old.title, ''), old.text, COALESCE(old.tags, ''));
+        INSERT INTO knowledge_fts(rowid, title, text, tags) VALUES (new.id, COALESCE(new.title, ''), new.text, COALESCE(new.tags, ''));
+      END;
+    `);
+    knowledgeFtsReady = true;
+    const contentRows = Number(db.prepare('SELECT COUNT(*) AS n FROM knowledge').get().n);
+    const indexRows = indexedDocCount('knowledge_fts');
+    if (indexRows === null || contentRows !== indexRows) db.exec("INSERT INTO knowledge_fts(knowledge_fts) VALUES('rebuild')");
+  } catch (error) {
+    logger?.warn?.('知识库全文索引不可用（回落 LIKE 检索）', { error: String(error?.message ?? error) });
+    knowledgeFtsReady = false;
+  }
+
   // schema v2：memories 增加 archived_at（R1 旧记忆归档）。旧库就地补列：ADD COLUMN
   // 只改表头、不重写已有数据，7 条真实记忆的库上是毫秒级的操作。
   const columns = db.prepare('PRAGMA table_info(memories)').all().map((row) => String(row.name));
@@ -231,6 +333,29 @@ export function openStore(options = {}) {
     return { action: 'inserted', id: Number(info.lastInsertRowid) };
   }
 
+  // FTS5 的 MATCH 表达式：双引号包成短语（trigram 下等于「包含这段子串」），内部引号按
+  // FTS5 规矩用两个双引号转义。少于 3 个字符时 trigram 一个词都切不出来，直接回落 LIKE。
+  function ftsMatchExpr(needle) {
+    return `"${String(needle).replace(/"/g, '""')}"`;
+  }
+
+  /**
+   * 用全文索引拿一批候选 id。返回 null 表示「索引不可用/太短，调用方回落 LIKE」；
+   * 返回空数组表示「索引确实查了，但没有一条命中」——两者对调用方含义不同。
+   */
+  function ftsIds(table, needle, limit = 400) {
+    const ready = table === 'knowledge_fts' ? knowledgeFtsReady : ftsReady;
+    if (!ready || !needle || needle.length < 3) return null;
+    try {
+      return db.prepare(`SELECT rowid AS id FROM ${table} WHERE ${table} MATCH ? ORDER BY rank LIMIT ?`)
+        .all(ftsMatchExpr(needle), Math.max(1, Number(limit) || 400))
+        .map((row) => Number(row.id));
+    } catch (error) {
+      logger?.warn?.('全文检索失败（本次回落 LIKE）', { table, error: String(error?.message ?? error) });
+      return null;
+    }
+  }
+
   function recall(query = {}) {
     const ts = nowMs(now);
     const scope = query.scope ? String(query.scope) : null;
@@ -245,7 +370,18 @@ export function openStore(options = {}) {
     if (scope) { where.push('(scope = ? OR scope = ?)'); params.push(scope, 'global'); }
     if (layers?.length) { where.push(`layer IN (${layers.map(() => '?').join(',')})`); params.push(...layers); }
     if (kinds?.length) { where.push(`kind IN (${kinds.map(() => '?').join(',')})`); params.push(...kinds); }
-    if (needle) { where.push('(norm LIKE ? OR LOWER(COALESCE(subject, \'\')) LIKE ?)'); params.push(`%${needle}%`, `%${needle}%`); }
+    // 有关键词走全文索引（走索引才叫「检索」，老实现是全表 LIKE 扫 500 行再打分）；
+    // 只有索引不可用或关键词太短（trigram 切不出词）时才回落 LIKE。
+    if (needle) {
+      const indexed = ftsIds('memories_fts', needle);
+      if (indexed?.length) {
+        where.push(`id IN (${indexed.map(() => '?').join(',')})`);
+        params.push(...indexed);
+      } else {
+        where.push('(norm LIKE ? OR LOWER(COALESCE(subject, \'\')) LIKE ?)');
+        params.push(`%${needle}%`, `%${needle}%`);
+      }
+    }
 
     const rows = db.prepare(`SELECT * FROM memories WHERE ${where.join(' AND ')} ORDER BY updated_at DESC LIMIT 500`).all(...params);
     const tokens = needle ? needle.split(' ').filter((item) => item.length > 1) : [];
@@ -269,11 +405,130 @@ export function openStore(options = {}) {
     return scored;
   }
 
+  /** 最近的记忆（不分层过滤时按 scope 收敛：「我们最近在聊什么」比检索更常用）。 */
+  function recentMemories(query = {}) {
+    const scope = query.scope ? String(query.scope) : null;
+    const layers = Array.isArray(query.layers) && query.layers.length ? query.layers.map(String) : null;
+    const kinds = Array.isArray(query.kinds) && query.kinds.length ? query.kinds.map(String) : null;
+    const limit = Math.max(1, Math.min(100, Number(query.limit) || 8));
+    const ts = nowMs(now);
+    const where = ['deleted_at IS NULL', 'archived_at IS NULL', '(expires_at IS NULL OR expires_at > ?)'];
+    const params = [ts];
+    if (scope) { where.push('(scope = ? OR scope = ?)'); params.push(scope, 'global'); }
+    if (layers) { where.push(`layer IN (${layers.map(() => '?').join(',')})`); params.push(...layers); }
+    if (kinds) { where.push(`kind IN (${kinds.map(() => '?').join(',')})`); params.push(...kinds); }
+    return db.prepare(`SELECT * FROM memories WHERE ${where.join(' AND ')} ORDER BY updated_at DESC LIMIT ?`)
+      .all(...params, limit)
+      .map((row) => rowToMemory(row));
+  }
+
+  const KNOWLEDGE_TEXT_MAX = 4000;
+
+  /** 把 tags（数组或字符串）归一成 JSON 数组字符串，方便 FTS 和展示两用。 */
+  function tagsJsonOf(tags) {
+    if (tags == null) return null;
+    const list = (Array.isArray(tags) ? tags : String(tags).split(/[,，;；\s]+/))
+      .map((item) => String(item ?? '').trim())
+      .filter(Boolean)
+      .slice(0, 20);
+    return list.length ? JSON.stringify(list) : null;
+  }
+
+  function rowToKnowledge(row) {
+    if (!row) return null;
+    let tags = [];
+    try { tags = row.tags ? JSON.parse(row.tags) : []; } catch { tags = []; }
+    return {
+      id: Number(row.id),
+      scope: row.scope,
+      title: row.title ?? null,
+      text: row.text,
+      source: row.source ?? null,
+      url: row.url ?? null,
+      tags,
+      importance: row.importance,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+      useCount: row.use_count,
+    };
+  }
+
+  /**
+   * 记一条知识。同 scope 下正文归一化后重复的，不新增行，只把 use_count/importance
+   * 和来源合并上去（同一件事看到三遍说明它重要，而不是要存三份）。
+   */
+  function knowledgeAdd(entry = {}) {
+    const ts = nowMs(now);
+    const scope = String(entry.scope ?? 'global') || 'global';
+    const text = String(entry.text ?? '').trim().slice(0, KNOWLEDGE_TEXT_MAX);
+    if (!text) throw new Error('knowledgeAdd 需要 text');
+    const title = entry.title ? String(entry.title).trim().slice(0, 200) : null;
+    const norm = normalizeText(text);
+    const hash = crypto.createHash('sha1').update(`${scope}|${norm}`).digest('hex');
+    const importance = clamp01(entry.importance, 0.5);
+    const source = entry.source ? String(entry.source).slice(0, 100) : null;
+    const url = entry.url ? String(entry.url).slice(0, 2000) : null;
+    const tags = tagsJsonOf(entry.tags);
+    const existing = db.prepare('SELECT * FROM knowledge WHERE hash = ?').get(hash);
+    if (existing) {
+      db.prepare(`UPDATE knowledge SET use_count = use_count + 1, updated_at = ?,
+        importance = MAX(importance, ?), source = COALESCE(?, source), url = COALESCE(?, url),
+        tags = COALESCE(?, tags), title = COALESCE(?, title), deleted_at = NULL WHERE id = ?`)
+        .run(ts, importance, source, url, tags, title, Number(existing.id));
+      return { action: 'merged', id: Number(existing.id) };
+    }
+    const info = db.prepare(`INSERT INTO knowledge
+      (scope, title, text, norm, hash, source, url, tags, importance, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+      .run(scope, title, text, norm, hash, source, url, tags, importance, ts, ts);
+    return { action: 'inserted', id: Number(info.lastInsertRowid) };
+  }
+
+  /** 知识检索：有关键词走 FTS，没有就按重要性/新鲜度列最近的。 */
+  function knowledgeSearch(query = {}) {
+    const ts = nowMs(now);
+    const scope = query.scope ? String(query.scope) : null;
+    const limit = Math.max(1, Math.min(100, Number(query.limit) || 10));
+    const needle = normalizeText(query.query);
+    const where = ['deleted_at IS NULL'];
+    const params = [];
+    if (scope && query.includeGlobal !== false) { where.push('(scope = ? OR scope = ?)'); params.push(scope, 'global'); }
+    else if (scope) { where.push('scope = ?'); params.push(scope); }
+    if (needle) {
+      const indexed = ftsIds('knowledge_fts', needle);
+      if (indexed?.length) {
+        where.push(`id IN (${indexed.map(() => '?').join(',')})`);
+        params.push(...indexed);
+      } else {
+        where.push('(norm LIKE ? OR LOWER(COALESCE(title, \'\')) LIKE ? OR LOWER(COALESCE(tags, \'\')) LIKE ?)');
+        params.push(`%${needle}%`, `%${needle}%`, `%${needle}%`);
+      }
+    }
+    const rows = db.prepare(`SELECT * FROM knowledge WHERE ${where.join(' AND ')} ORDER BY importance DESC, updated_at DESC LIMIT ?`)
+      .all(...params, limit);
+    if (query.markUsed !== false && rows.length) {
+      const touch = db.prepare('UPDATE knowledge SET use_count = use_count + 1, updated_at = MAX(updated_at, ?) WHERE id = ?');
+      for (const row of rows) touch.run(ts, Number(row.id));
+    }
+    return rows.map((row) => rowToKnowledge(row));
+  }
+
   return {
     version: VERSION,
     path: file,
     remember,
     recall,
+    recentMemories,
+    knowledge: {
+      add: knowledgeAdd,
+      search: knowledgeSearch,
+      recent({ scope = null, limit = 10 } = {}) { return knowledgeSearch({ scope, limit, markUsed: false }); },
+      stats() {
+        const total = Number(db.prepare('SELECT COUNT(*) AS n FROM knowledge WHERE deleted_at IS NULL').get().n);
+        const row = db.prepare('SELECT MIN(created_at) AS oldest, MAX(updated_at) AS newest FROM knowledge WHERE deleted_at IS NULL').get();
+        return { total, oldestAt: row?.oldest ?? null, newestAt: row?.newest ?? null };
+      },
+    },
     get(id) { return rowToMemory(statements.byId.get(Number(id))); },
     forget(id, { reason } = {}) {
       const ts = nowMs(now);

@@ -445,6 +445,7 @@ const ENGINE_RULES = [
   '【要不要说话】看完再决定。群里在聊就自然接一句；没人找你、也没什么想说的，就安静收尾（qq_mark_read 或 qq_set_wake_config 设置下次唤醒）。不要为了说话而说话。',
   '【自己刷一会儿】桥接偶尔会给你一段自由时间（唤醒原因写 browse）：那是一次自己看点东西的机会——用 `qq_read_page` 读页面正文（比截图快，抖音热榜/微博热搜都行），或用 `qq_web_screenshot` 截个图看画面（抖音热榜 https://www.douyin.com/hot 、微博热搜 https://s.weibo.com/top/summary 之类）或用 `mcp__web-search-safe__web_search` 看热点/梗。**浏览器里用的是主人自己的账号（已经替你登录好了，直接用就行）**；但只读不互动——不点赞、不评论、不私信、不关注、不绕验证码，也**别去登录别人的账号**。登录态会过期（提示「登录态可能过期」就是这样）：碰到了别反复重试，桥接会提醒主人重新扫码。看到真有意思、值得说的就开口聊一句，没有就什么都别写、安静收尾。一天三五次就够，别刷太久。',
   '想记东西用 qq_memory_append；想给自己写日记用 qq_diary_write；分享过的话题用 qq_interest_record。',
+  '【记忆库 / 知识库】聊天里提到某件以前的具体的事、你记不准了，用 `qq_memory_search(query="...")` 去自己的长期记忆库里查（不是翻本会话聊天记录，别硬编）；今天在外面看到/学到/想明白了什么，用 `qq_knowledge_add(text="...")` 存一条（记忆是"我们之间的事"，知识是"世界上的事"），以后想翻用 `qq_knowledge_search(query="...")`。',
 ].join('\n');
 
 /** DSH 路径与直连引擎共用这两行行为口径：两处提示词各写一份必然漂移，所以提到模块级。 */
@@ -1719,6 +1720,10 @@ function loadConfig() {
     setWakeConfig: true,
     markRead: true,
     memory: true,
+    // 知识库（qq_knowledge_add / qq_knowledge_search）：把「今天在外面看到/学到/总结出的事」
+    // 写进 state/memory.db 的 knowledge 表，供日后检索、写日记时回看。默认开——
+    // 它不发出任何消息、可改可删，属于「记东西」这类轻动作。
+    knowledge: true,
     slangQuery: true,
     slangSubmit: true,
     getImages: true,
@@ -6085,7 +6090,8 @@ async function main() {
             getActiveMembers: 'qq_get_active_members',
             setWakeConfig: 'qq_set_wake_config',
             markRead: 'qq_mark_read',
-            memory: 'qq_memory_append / qq_memory_query / qq_memory_remove / qq_memory_clear',
+            memory: 'qq_memory_append / qq_memory_query / qq_memory_search / qq_memory_remove / qq_memory_clear',
+            knowledge: 'qq_knowledge_add / qq_knowledge_search',
             slangQuery: 'qq_slang_query',
             slangSubmit: 'qq_slang_submit',
             getImages: 'qq_get_message_images',
@@ -8804,6 +8810,90 @@ async function main() {
           sendJson({ ok: true, key, category: category || 'all', memory: formatMemoryV2(st) });
           return;
         }
+        // ── 记忆库检索 / 知识库（R1 + R6）：她自己查「最近聊过什么」「那件事到底是怎么说的」
+        // 和「我在外面看到过什么」。检索走 FTS5 trigram 索引（见 src/qqb/memory/store.mjs），
+        // 查询词短于 3 个字时库里自动回落 LIKE —— 这两条路对调用方是同一个接口。
+        if (req.method === 'POST' && url.pathname === '/api/socialV2/memory-search') {
+          const body = await readBody();
+          const key = String(body.key ?? '').trim();
+          const query = String(body.query ?? '').trim();
+          const limit = Math.max(1, Math.min(30, Number(body.limit) || 8));
+          if (!key) { sendJson({ ok: false, error: 'key 不能为空' }, 400); return; }
+          if (req.headers['x-agent-token'] && !agentTokenOk(key, req.headers['x-agent-token'])) { sendJson({ ok: false, error: 'agent token 无效' }, 403); return; }
+          if (req.headers['x-agent-token'] && !v2SessionAllowed(key)) { sendJson({ ok: false, error: '目标不在当前模式允许范围内' }, 403); return; }
+          if (req.headers['x-agent-token'] && !v2ToolEnabled('memory')) { sendJson({ ok: false, error: '工具未启用：qq_memory_search' }, 403); return; }
+          if (!memoryDbEnabled()) { sendJson({ ok: false, error: '长期记忆库未启用（socialV2.memoryDb.enabled=false）' }, 503); return; }
+          let store = null;
+          try {
+            store = openStore({ root: ROOT, logger: { warn: (m, d) => log('长期记忆检索', m, d ?? '') } });
+            const result = store.recall({ scope: key, query, limit, markUsed: true })
+              .map((item) => ({ id: item.id, kind: item.kind, layer: item.layer, subject: item.subject, text: item.text, importance: item.importance, updatedAt: item.updated_at, score: item.score }));
+            sendJson({ ok: true, key, query, count: result.length, items: result, indexed: query.length >= 3 });
+          } catch (error) {
+            sendJson({ ok: false, error: `记忆检索失败：${error?.message ?? error}` }, 500);
+          } finally {
+            try { store?.close?.(); } catch { /* 已关就算了 */ }
+          }
+          return;
+        }
+        if (req.method === 'POST' && url.pathname === '/api/socialV2/knowledge-add') {
+          const body = await readBody();
+          const key = String(body.key ?? '').trim();
+          const text = redactKnownTokensOnly(String(body.text ?? '')).trim();
+          const title = body.title ? redactKnownTokensOnly(String(body.title)).trim().slice(0, 200) : '';
+          const source = body.source ? String(body.source).trim().slice(0, 100) : 'self';
+          const url0 = body.url ? String(body.url).trim().slice(0, 2000) : '';
+          if (!key) { sendJson({ ok: false, error: 'key 不能为空' }, 400); return; }
+          if (!text) { sendJson({ ok: false, error: 'text 不能为空' }, 400); return; }
+          if (text.length > 4000) { sendJson({ ok: false, error: '太长啦（最多 4000 字），拆成几条再存' }, 400); return; }
+          if (req.headers['x-agent-token'] && !agentTokenOk(key, req.headers['x-agent-token'])) { sendJson({ ok: false, error: 'agent token 无效' }, 403); return; }
+          if (req.headers['x-agent-token'] && !v2SessionAllowed(key)) { sendJson({ ok: false, error: '目标不在当前模式允许范围内' }, 403); return; }
+          if (req.headers['x-agent-token'] && !v2ToolEnabled('knowledge')) { sendJson({ ok: false, error: '工具未启用：qq_knowledge_add' }, 403); return; }
+          if (!memoryDbEnabled()) { sendJson({ ok: false, error: '知识库未启用（socialV2.memoryDb.enabled=false）' }, 503); return; }
+          let store = null;
+          try {
+            store = openStore({ root: ROOT, logger: { warn: (m, d) => log('知识库', m, d ?? '') } });
+            // 知识不分层，但按会话 scope 记来源：群聊里看到的进群 scope，私聊里的进私聊 scope，
+            // 检索时 scope + global 一起看，避免「这条知识是谁告诉你的」被写死成某人。
+            const written = store.knowledge.add({
+              scope: key,
+              text,
+              title: title || null,
+              source,
+              url: url0 || null,
+              tags: Array.isArray(body.tags) ? body.tags : (body.tags ? String(body.tags) : undefined),
+              importance: Number(body.importance),
+            });
+            sendJson({ ok: true, key, ...written, stats: store.knowledge.stats() });
+          } catch (error) {
+            sendJson({ ok: false, error: `知识入库失败：${error?.message ?? error}` }, 500);
+          } finally {
+            try { store?.close?.(); } catch { /* 已关就算了 */ }
+          }
+          return;
+        }
+        if (req.method === 'POST' && url.pathname === '/api/socialV2/knowledge-search') {
+          const body = await readBody();
+          const key = String(body.key ?? '').trim();
+          const query = String(body.query ?? '').trim();
+          const limit = Math.max(1, Math.min(30, Number(body.limit) || 8));
+          if (!key) { sendJson({ ok: false, error: 'key 不能为空' }, 400); return; }
+          if (req.headers['x-agent-token'] && !agentTokenOk(key, req.headers['x-agent-token'])) { sendJson({ ok: false, error: 'agent token 无效' }, 403); return; }
+          if (req.headers['x-agent-token'] && !v2SessionAllowed(key)) { sendJson({ ok: false, error: '目标不在当前模式允许范围内' }, 403); return; }
+          if (req.headers['x-agent-token'] && !v2ToolEnabled('knowledge')) { sendJson({ ok: false, error: '工具未启用：qq_knowledge_search' }, 403); return; }
+          if (!memoryDbEnabled()) { sendJson({ ok: false, error: '知识库未启用（socialV2.memoryDb.enabled=false）' }, 503); return; }
+          let store = null;
+          try {
+            store = openStore({ root: ROOT, logger: { warn: (m, d) => log('知识库检索', m, d ?? '') } });
+            const items = store.knowledge.search({ scope: key, query, limit, markUsed: true });
+            sendJson({ ok: true, key, query, count: items.length, items, indexed: query.length >= 3 });
+          } catch (error) {
+            sendJson({ ok: false, error: `知识检索失败：${error?.message ?? error}` }, 500);
+          } finally {
+            try { store?.close?.(); } catch { /* 已关就算了 */ }
+          }
+          return;
+        }
         // ── 二代黑话学习（reserved2）：AI 查询/提交黑话候选 ─────────────────
         if (req.method === 'GET' && url.pathname === '/api/socialV2/slang/query') {
           const key = String(url.searchParams.get('key') ?? '').trim();
@@ -11356,6 +11446,201 @@ async function main() {
     } catch { return ''; }
   }
 
+  // ── 日记 → 说说（每天固定时间一次）──────────────────────────────────────
+  // 主人的需求（m07477）：「让她学会写日记，发送到说说里；把每天最重要的、觉得更高兴的就写进去」。
+  // 日记的素材来自两个库——记忆库（关于我们之间的事）+ 知识库（外面的事）。做法是到点
+  // （默认 20:30，得赶在「晚安休眠」把她关掉之前）给「写日记的那个会话」投一次 `diaryRitual` 唤醒，唤醒词里直接把她这两个库
+  // 最近 24 小时的内容摆好，让她自己挑、自己写、自己发——而不是桥接替她拼一篇假日记。
+  //
+  // 为什么只叫**一个**会话：日记文件是全局每天一份（`state/diary/YYYY-MM-DD.md`，追加写），
+  // 叫醒多个会话就会同一件事写三遍、说说也发三条。默认叫 `nightRitual.parents[0]` 的私聊，
+  // 可用 `socialV2.diary.publish.keys` 指定（例如 ["private:10001","group:123"]）。
+  //
+  // 为什么默认 `enabled: false`：每天定时往外发一条说说属于「重动作」，这里沿用仓库的规矩——
+  // 放宽/外发的一侧要主人在 config.json 里显式打开，别人的部署不该被悄悄改了行为。
+  const DIARY_PUBLISH_FILE = path.join(STATE_DIR, 'diary-publish.json');
+  let diaryPublishTimer = null;
+
+  function diaryPublishCfg() {
+    const p = cfg?.socialV2?.diary?.publish || {};
+    const at = /^([01]?\d|2[0-3]):[0-5]\d$/.test(String(p.at ?? '').trim()) ? String(p.at).trim() : '20:30';
+    const visibility = ['all', 'friends', 'self'].includes(String(p.visibility ?? '')) ? String(p.visibility) : 'friends';
+    return {
+      enabled: p.enabled === true,
+      at,
+      visibility,
+      windowHours: Math.max(1, Math.min(72, Number(p.windowHours) || 24)),
+      maxMemories: Math.max(1, Math.min(40, Number(p.maxMemories) || 12)),
+      maxKnowledge: Math.max(0, Math.min(20, Number(p.maxKnowledge) || 6)),
+      // 醒了她却没写（回合失败/被占用/在睡觉）：同一天隔一段时间再叫，最多 4 次。
+      retryMinutes: Math.max(5, Math.min(240, Number(p.retryMinutes) || 45)),
+      keys: Array.isArray(p.keys) ? p.keys : [],
+    };
+  }
+
+  /** 该叫哪个会话去写日记：显式配置优先，否则家里人名单第一个的私聊。 */
+  function diaryPublishKeys(dc) {
+    const explicit = (dc.keys || [])
+      .map((k) => canonicalV2Key(String(k ?? '').trim()))
+      .filter(Boolean);
+    if (explicit.length) return [...new Set(explicit)];
+    const parents = cfg?.socialV2?.nightRitual?.parents ?? cfg?.socialV2?.nightRitual?.greetTargets ?? [];
+    for (const q of parents) {
+      const s = String(q ?? '').trim();
+      if (/^\d+$/.test(s)) return [`private:${Number(s)}`];
+    }
+    return [];
+  }
+
+  function readDiaryPublishState() {
+    try {
+      const obj = JSON.parse(fs.readFileSync(DIARY_PUBLISH_FILE, 'utf8'));
+      return obj && typeof obj === 'object' ? obj : {};
+    } catch { return {}; }
+  }
+
+  function saveDiaryPublishState(next) {
+    try {
+      atomicWriteJson(DIARY_PUBLISH_FILE, next);
+    } catch (error) {
+      log('日记→说说：状态写盘失败（下次可能重复唤醒）', error?.message ?? error);
+    }
+  }
+
+  /** 今天 `at` 之后有没有写过日记（解析 `- HH:MM 正文` 行的最后一条时间）。 */
+  function diaryWrittenSince(day, atHm) {
+    const text = diaryRead(day);
+    if (!text) return false;
+    const re = /^- (\d{2}):(\d{2})\s/gm;
+    let m;
+    let last = '';
+    while ((m = re.exec(text))) last = `${m[1]}:${m[2]}`;
+    return last ? last >= atHm : false;
+  }
+
+  /**
+   * 把「最近 windowHours 小时内进库的东西」整理成提示词素材。
+   * 只读最近的（按 updated_at 倒序取一页再按时间过滤），不扫全表——日记只要「今天」。
+   */
+  function diaryDigestText(key, dc) {
+    const empty = { memories: [], knowledge: [] };
+    if (!memoryDbEnabled()) return empty;
+    let store = null;
+    try {
+      store = openStore({ root: ROOT, logger: { warn: (m, d) => log('日记素材', m, d ?? '') } });
+      const since = Date.now() - dc.windowHours * 3_600_000;
+      const memories = store.recentMemories({ scope: key, limit: 80 })
+        .filter((m) => Number(m.updated_at) >= since)
+        .slice(0, dc.maxMemories);
+      const knowledge = dc.maxKnowledge > 0
+        ? store.knowledge.recent({ scope: key, limit: 60 })
+            .filter((k) => Number(k.updatedAt) >= since)
+            .slice(0, dc.maxKnowledge)
+        : [];
+      return { memories, knowledge };
+    } catch (error) {
+      log('日记素材读取失败（本次唤醒不带素材）', error?.message ?? error);
+      return empty;
+    } finally {
+      try { store?.close?.(); } catch { /* 关不掉不影响这一轮 */ }
+    }
+  }
+
+  /**
+   * 「今天的日记时间」这段提示词，**DSH 与直连引擎两条路共用**。
+   *
+   * 2026-10-24 的真机坑：直连引擎有自己的一套提示词（buildEnginePrompts），它的定时唤醒
+   * 当时只认 browse / proactiveCheck —— diaryRitual 落到空分支，她只看到「唤醒原因：diaryRitual」，
+   * 于是把这次唤醒当成一次普通聊天：回了三句话、一个工具都没调（日志 `工具：无`），
+   * 日记没写、说说也没发。两处各写一份必然漂移，所以抽到这里。
+   */
+  function diaryRitualPromptText(key) {
+    const dc = diaryPublishCfg();
+    const digest = diaryDigestText(key, dc);
+    const today = diaryDayKey();
+    const memLines = digest.memories
+      .map((m) => `- [${m.kind}] ${m.text}${m.subject ? `（${m.subject}）` : ''}`)
+      .join('\n');
+    const knoLines = digest.knowledge
+      .map((k) => `- ${k.title ? `【${k.title}】` : ''}${k.text}`)
+      .join('\n');
+    return `【今天的日记时间】${today}（${key}）
+原因：每天这个时候你要写一篇日记，再挑一件今天的事发成说说。下面两个库里最近 ${dc.windowHours} 小时的东西，就是你今天真实经历过的：
+${memLines ? `\n记忆库里：\n${memLines}\n` : '\n记忆库最近没有新东西。\n'}${knoLines ? `\n知识库里：\n${knoLines}\n` : ''}
+按这个顺序做，一次做完：
+1) 从中挑今天**最重要**或者**最让你高兴**的 1~3 件事（都很平淡的话，就写一件你自己真的在意的小事；别编造没发生过的事、别补对话里没有的细节）；
+2) 用 qq_diary_write(text="...") 写成第一人称日记，两三句话，带上具体的人/时间/细节，别写成流水账；
+3) 再写一句给说说看的短文字（可以比日记轻快一点，但别写别人的 QQ 号、别放隐私），用 qq_post_qzone(content="...", visibility="${dc.visibility}") 发出去；
+4) 做完就收尾（qq_set_wake_config 设好下次唤醒，或 qq_mark_read 表示这一轮结束）。一天只发一条说说，别重复发。
+如果 qq_post_qzone 被门禁拒绝，把原因用一句话告诉我，日记写下来就够了。`;
+  }
+
+  function tickDiaryPublish() {
+    const dc = diaryPublishCfg();
+    if (!dc.enabled) return;
+    if (!memoryDbEnabled()) return;
+    const nowTs = Date.now();
+    const day = diaryDayKey(nowTs);
+    const [hh, mm] = dc.at.split(':').map(Number);
+    const target = new Date(nowTs);
+    target.setHours(hh, mm, 0, 0);
+    if (nowTs < target.getTime()) return;
+    // 今天已经写过（或者她自己在别的时间写了）就不再催。
+    if (diaryWrittenSince(day, dc.at)) return;
+    const pst = readDiaryPublishState();
+    const sameDay = String(pst.day ?? '') === day;
+    const attempts = sameDay ? Math.max(0, Number(pst.attempts) || 0) : 0;
+    const lastAttemptAt = sameDay ? Number(pst.lastAttemptAt) || 0 : 0;
+    if (attempts >= 4) return;
+    if (lastAttemptAt && nowTs - lastAttemptAt < dc.retryMinutes * 60_000) return;
+    const keys = diaryPublishKeys(dc);
+    if (!keys.length) {
+      if (!attempts) log('日记→说说：没有可唤醒的会话（socialV2.diary.publish.keys 为空，也没配 nightRitual.parents）');
+      return;
+    }
+    // 先记状态再唤醒：即使这一轮投递失败/进程重启，也不会在同一分钟内反复叫。
+    saveDiaryPublishState({ day, attempts: attempts + 1, lastAttemptAt: nowTs, keys });
+    for (const key of keys) scheduleWakeV2(key, 'diaryRitual');
+    log(`[diary] ${day} ${dc.at} 日记时间到（第 ${attempts + 1} 次），唤醒 ${keys.join(' ')}`);
+  }
+
+  function startDiaryPublish() {
+    if (diaryPublishTimer) return;
+    const dc = diaryPublishCfg();
+    if (!dc.enabled) { log('日记→说说：未启用（socialV2.diary.publish.enabled=false）'); return; }
+    if (!memoryDbEnabled()) { log('日记→说说：未启用（socialV2.memoryDb.enabled=false，没有库可取材）'); return; }
+    diaryPublishTimer = setInterval(tickDiaryPublish, 60_000);
+    diaryPublishTimer.unref?.();
+    // 启动时补一次：桥接在日记时段之前重启过，今天也要照常写。
+    const kick = setTimeout(tickDiaryPublish, 20_000);
+    kick.unref?.();
+    log(`日记→说说：每天 ${dc.at} 提醒 ${diaryPublishKeys(dc).join(' ') || '（无会话）'} 写日记并把说说发到 ${dc.visibility}`);
+  }
+
+  /**
+   * 知识库最近几条，拼成给模型看的一小段。
+   *
+   * 为什么每次都读库而不是缓存：知识是「谁知道什么时候被写入」的东西（她自己随时可能
+   * 调 qq_knowledge_add），缓存反而要维护失效；一次 SQLite 查询在这个量级可以忽略。
+   * 读失败/库没开一律当「没有」——提示词少一段，不该让整次唤醒挂掉。
+   */
+  function knowledgeRecentText(key, limit = 3, maxChars = 400) {
+    if (!memoryDbEnabled()) return '';
+    let store = null;
+    try {
+      store = openStore({ root: ROOT, logger: { warn: (m, d) => log('知识库', m, d ?? '') } });
+      const items = store.knowledge.recent({ scope: key, limit });
+      if (!items.length) return '';
+      const body = items.map((it) => `- ${it.title ? `【${it.title}】` : ''}${it.text}`).join('\n');
+      return truncateText(body, maxChars);
+    } catch (error) {
+      log('知识库读取失败（本次提示词不带知识）:', error?.message ?? error);
+      return '';
+    } finally {
+      try { store?.close?.(); } catch { /* 已关就算了 */ }
+    }
+  }
+
   function diaryRecentText(days, maxChars) {
     const list = [];
     for (let i = days - 1; i >= 0; i--) {
@@ -11748,6 +12033,8 @@ async function main() {
   // R1：跨会话事实的 LLM 精炼 + 旧记忆归档（见 startMemoryRefine / startMemoryArchive 注释）。
   startMemoryRefine();
   startMemoryArchive();
+  // 日记 → 说说：每天固定时间把她两个库里的「今天」找出来，让她自己写日记、发说说。
+  startDiaryPublish();
   // R4：发送失败落盘后的定时补发（见 startOutboxFlush 注释）。
   startOutboxFlush();
   // 待发文件夹（state/outbox/）的自动清理：只删够老的，保护刚放进去还没发的（见 cleanupOutboxMedia）。
@@ -13280,6 +13567,7 @@ async function main() {
       : '';
     const diaryText = diaryRecentText(Math.max(1, Math.min(7, Number(cfg.socialV2?.diary?.days) || 2)), Math.max(200, Number(cfg.socialV2?.diary?.maxChars) || 1500));
     const interestText = interestsText(Math.max(5, Number(cfg.socialV2?.interests?.promptLimit) || 15));
+    const knowledgeText = knowledgeRecentText(key, Math.max(1, Number(cfg.socialV2?.knowledge?.promptLimit) || 3));
     const participationText = formatParticipationV2(st);
     const stickerCfg = cfg.socialV2?.sticker ?? {};
     const stickerLine = stickerCfg.enabled !== false && stickerCfg.includeInPrompt !== false
@@ -13302,6 +13590,7 @@ async function main() {
       longTermText,
       familyNotesTextV2(),
       diaryText ? `【你最近写的日记】\n${diaryText}` : '',
+      knowledgeText ? `【你最近记进知识库的东西】\n${knowledgeText}` : '',
       interestText ? `【已经分享过的话题（同一件事别反复讲）】\n${interestText}` : '',
       participationText,
       stickerLine,
@@ -13330,9 +13619,12 @@ async function main() {
       `【此刻状态】${statusBits.join('；')}`,
     ];
     if (recentText) bits.push(`【最近的聊天记录（直接接着这些话说，不用再翻一遍）】\n${recentText}`);
-    // 定时唤醒（主动机会 / 自己刷一会儿）在 DSH 路径有专门的行为口径，直连路径以前没有：
-    // 她一睁眼只看到「唤醒原因：proactiveCheck」，不知道这是一次可以主动开口、可以自己去刷的机会。
-    const reasonLine = reason === 'browse'
+    // 定时唤醒（主动机会 / 自己刷一会儿 / 写日记）在 DSH 路径有专门的行为口径，直连路径也得有：
+    // 她一睁眼只看到「唤醒原因：proactiveCheck」，不知道这是一次可以主动开口、可以自己去刷的机会；
+    // diaryRitual 更糟 —— 落到空分支时她把「日记时间」当成一次普通聊天，回了三句话、一个工具没调。
+    const reasonLine = reason === 'diaryRitual'
+      ? diaryRitualPromptText(key)
+      : reason === 'browse'
       ? '【自己刷一会儿】这次不是有人找你，是给你一段自由时间：可以用 qq_web_screenshot 打开页面（抖音热榜、微博热搜之类）或 mcp__web-search-safe__web_search 看点热点/梗——**用主人替你登录好的那个账号看就行，只读不互动（不点赞/评论/私信/关注），别去登录别人的账号**。要是 qq_read_page 提示「登录态可能过期」，那是抖音掉了登录、不怪你，别硬刷，桥接会提醒主人重新扫码。看到真有意思、值得说的就开口聊一句；没有就什么都别写，桥接不会发任何东西。'
       : reason === 'proactiveCheck'
         ? '【主动机会】会话已经安静一段时间了，这是一次你可以主动冒泡的机会：开个话题、追问上次没聊完的事、或分享一个刚想到的东西。想聊就开口，没话就不写。'
@@ -13773,7 +14065,9 @@ async function main() {
     const diaryDays = Math.max(1, Math.min(7, Number(cfg.socialV2?.diary?.days) || 2));
     const diaryText = diaryRecentText(diaryDays, Math.max(200, Number(cfg.socialV2?.diary?.maxChars) || 1500));
     const interestText = interestsText(Math.max(5, Number(cfg.socialV2?.interests?.promptLimit) || 15));
-    const memoryHintLine = `【长期记忆】${diaryText ? `\n你最近写的日记：\n${diaryText}\n` : '\n（还没写日记）\n'}${interestText ? `\n已经分享过的话题（同一件事别反复讲，换点新的）：\n${interestText}\n` : ''}\n睡前或遇到值得记住的事，用 qq_diary_write(text="...") 写一句；想翻更早的日记用 qq_diary_read(days=7)；刚分享完新话题，用 qq_interest_record(topic="...") 记一笔。\n\n`;
+    // 知识库最近几条：不塞满（写日记时会再单独检索），只让她知道「我脑子里有这些东西」。
+    const knowledgeText = knowledgeRecentText(key, Math.max(1, Number(cfg.socialV2?.knowledge?.promptLimit) || 3));
+    const memoryHintLine = `【长期记忆】${diaryText ? `\n你最近写的日记：\n${diaryText}\n` : '\n（还没写日记）\n'}${interestText ? `\n已经分享过的话题（同一件事别反复讲，换点新的）：\n${interestText}\n` : ''}${knowledgeText ? `\n你最近记进知识库的东西：\n${knowledgeText}\n` : ''}\n睡前或遇到值得记住的事，用 qq_diary_write(text="...") 写一句；想翻更早的日记用 qq_diary_read(days=7)；刚分享完新话题，用 qq_interest_record(topic="...") 记一笔。聊天里提到某件具体的事、你记不准了，就用 qq_memory_search(query="...") 去记忆库里查（别硬编）；今天在外面看到/学到/想明白了什么，用 qq_knowledge_add(text="...") 存一条，以后想翻用 qq_knowledge_search(query="...")。\n\n`;
     // 原生能力说明放在提示词前段：它属于"插件会什么"，与角色卡无关，
     // 换人设、换群、甚至没有角色卡时，发图/上网/日记这些能力依然成立。
     const capabilityLine = capabilityHintV2();
@@ -13801,6 +14095,9 @@ async function main() {
     }
     if (reason === 'timeout') {
       return `${base}【唤醒】${key}\n原因：你设置的有限潜水时间已到；在你规定的时间内没有任何一项条件被触发，只是因为时间到了所以你被唤醒。\n你可以查看消息，或继续设置新的唤醒条件。`;
+    }
+    if (reason === 'diaryRitual') {
+      return `${base}${diaryRitualPromptText(key)}`;
     }
     if (reason === 'replyCheck') {
       return `${base}【回复检查】${key}\n原因：你刚刚发送过消息，现在回来检查是否有人回复。\n已有回复时先看消息，需要短静默就用 qq_wait_for_messages(purpose="reply") 判断对方是否说完；如果没人回你，不用硬补一句，但也不要立刻潜水——先调用 qq_wait_for_messages(timeoutMs=${preSleepMs}) 完成沉睡前观察：没人说话可收尾；有人说话则查看 newMessages，不需要你参与也可直接收尾（qq_mark_read 或 qq_set_wake_config）。`;
@@ -14049,6 +14346,7 @@ async function main() {
     keyword: 60,
     anyMessage: 50,
     replyCheck: 40,
+    diaryRitual: 35,
     timeout: 30,
     proactiveCheck: 20
   };
@@ -14069,7 +14367,10 @@ async function main() {
   // 与「未读消息」无关的唤醒原因（定时器/引导）。这些原因在会话繁忙时被暂存后，
   // 不能用「unread 里还有没有对应 seq」来判断是否还要补发 —— 那一轮很可能已经把
   // 未读全部标读了，结果就是 timeout 定时器被静默丢掉、会话停在无定时器的静默态。
-  const TIMER_WAKE_REASONS = new Set(['timeout', 'replyCheck', 'proactiveCheck', 'browse', 'bootstrap', 'admin']);
+  // diaryRitual：每天到点提醒她自己写日记并发说说。必须在这里登记成「定时唤醒原因」，
+  // 否则会话繁忙时的排队判定会把它当成「有未读 seq 才值得叫醒」，日记这种没有新消息的
+  // 唤醒就会被静默吞掉（nightWake 当初就踩过这个坑）。
+  const TIMER_WAKE_REASONS = new Set(['timeout', 'replyCheck', 'proactiveCheck', 'browse', 'bootstrap', 'admin', 'diaryRitual']);
   function isTimerWakeReason(reason) {
     return TIMER_WAKE_REASONS.has(String(reason ?? '').split(':')[0]);
   }

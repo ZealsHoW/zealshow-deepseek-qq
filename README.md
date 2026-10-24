@@ -956,6 +956,59 @@ curl -s -X POST http://127.0.0.1:3100/api/socialV2/night-greet \
 - 日记与话题清单**跨会话共享**（群聊、各个私聊看到的是同一份），因为它们属于「小鲸鱼自己」而不是某个会话。
 - 想关掉：`socialV2.tools.diary = false` / `socialV2.tools.interests = false`（工具不再注册，提示词里的【长期记忆】也随之消失）。
 
+### 记忆库与知识库（qq_memory_search / qq_knowledge_add / qq_knowledge_search）
+
+两个库都长在 `state/memory.db`（SQLite，用 Node 内置的 `node:sqlite`，**不需要** `better-sqlite3`）：
+
+| 库 | 回答什么问题 | 谁写进去 | 怎么查 |
+| --- | --- | --- | --- |
+| `memories`（记忆库） | 我们之间发生过什么 | 聊天里自动提炼（`qqb/memory/intake.mjs`）、`qq_memory_append`、精炼归并 | `qq_memory_search(query="...")` |
+| `knowledge`（知识库） | 世界上的事：看到的、学到的、想明白的 | `qq_knowledge_add(text="...")` | `qq_knowledge_search(query="...")` |
+
+- **检索走 FTS5 索引**（`memories_fts` / `knowledge_fts`，`tokenize='trigram'`——只有 trigram 才支持中文**子串**命中；unicode61 只按词切，中文整句会变成一个 token）：
+  - 查询 ≥3 个汉字 → `MATCH` 走索引；1~2 个字 → 自动回落 `LIKE '%…%'`（trigram 索引在 3 字以下没有可用片段）。
+  - 模糊匹配结果记为 `indexed: false`，工具返回里会说明「按关键词简单匹配」，别当成索引坏了。
+  - 旧的「先 `ORDER BY updated_at DESC LIMIT 500` 再打分」并没有删，命中索引时先按索引收窄 id 再打分（`0.45*importance + 0.25*match + 0.2*recency + 0.1*usage`）。
+- **唤醒提示词**会自动带上最近 `socialV2.knowledge.promptLimit`（默认 3）条知识（`- 【标题】正文`，总量 `maxChars` 400），记忆库最近几条本来就在【长期记忆】里（`socialV2.memoryDb.promptLimit`，默认 6）。
+- **知识会合并**：同一 scope 下正文归一化后 hash 相同就只留一条，`use_count+1`、`importance` 取更高、title/source/url/tags 用新值补空位（`COALESCE`，**显式给的新 source 会覆盖旧的**）。
+- scope：私聊 key（`private:QQ号`）各自隔离；`global` 谁都查得到（`includeGlobal: false` 可只查自己的）。
+- 想关掉：`socialV2.tools.memory = false` / `socialV2.tools.knowledge = false`（重训练/整库重建时用）。
+- 回归：`npm run test:qqb-knowledge`（入库/合并、scope 隔离、中文子串与 2 字回落、索引自愈、三个工具与路由接线、日记仪式接线）。
+
+**踩过的坑（改这块前先读）**：
+
+1. `SELECT COUNT(*) FROM memories_fts` 在 **external content** 表上返回的是内容表（`memories`）的行数，永远相等 ⇒ 拿它判断「索引完不完整」永远为真，老库升级上来索引一直空着、检索静默回落 LIKE。真正的索引文档数在影子表 **`memories_fts_docsize`**，`store.mjs` 的 `indexedDocCount(table)` 查它，行数不等就 `VALUES('rebuild')` 重建一次（重建 135 条约几十毫秒）。
+2. **不要**对外部内容表做 `DELETE FROM memories_fts` / `INSERT INTO memories_fts(memories_fts) VALUES('delete-all')`：实测直接写成 `database disk image is malformed`（267 = `SQLITE_CORRUPT_VTAB`），随后 `memories` 的 UPDATE 触发器就炸。要重来就 `DROP TABLE memories_fts` + 重开（索引自愈那条测试就是这么模拟的）。
+3. 建索引/建表的 DDL 都在 `openStore()` 里跑，**开库即自愈**，不需要单独迁移脚本。
+
+### 日记 → 说说（每天到点自己写一条）
+
+`socialV2.diary.publish` 打开后，桥接每分钟看一眼表；到了点且**今天还没写过日记**，就唤醒一个会话，让她从两个库里挑今天最值得记的事，写成日记再发成一条说说：
+
+```jsonc
+"diary": {
+  "days": 2,
+  "maxChars": 1500,
+  "publish": {
+    "enabled": true,          // 默认 false：每天定时往外发说说属重动作，要显式开
+    "at": "20:30",            // 默认 20:30 —— 晚安休眠 20 点后就开始了，晚了唤醒会被跳过
+    "visibility": "friends",  // all | friends | self
+    "keys": ["private:3482501440"],
+    "windowHours": 24,        // 只取近 N 小时进库的内容当素材
+    "maxMemories": 12,
+    "maxKnowledge": 6,
+    "retryMinutes": 45        // 唤醒没接住时隔多久再叫一次（一天最多 4 次）
+  }
+}
+```
+
+- 唤醒原因 `diaryRitual`（优先级 35，夹在 `replyCheck` 与 `timeout` 之间），**必须同时登记进 `TIMER_WAKE_REASONS`** —— 不然会话繁忙排队时会按「有没有未读 seq」判断，把它当无事可做静默吞掉。
+- 提示词分支会列出「记忆库里 / 知识库里」的近 24 小时素材，并给四步指令：挑 1~3 件 → `qq_diary_write` → `qq_post_qzone(content=..., visibility=...)` → 收尾。要求**一天一条**、别编造、不写别人 QQ 号。
+- **两套提示词都要接**：走 DSH 投递时用 `buildWakePromptV2`，走直连引擎（`engineEnabled()`）时用 `buildEnginePrompts`——它们是两份互不相干的 system/user 拼装。日记这段抽成了共用函数 `diaryRitualPromptText(key)`，两边都调它；只在一边写，另一边（线上默认是直连引擎）就只看到「【本次唤醒原因】diaryRitual」，把它当普通聊天回。2026-10-24 18:40 就这么踩过一次：日志 `直连引擎 已发言（1690ms，57 字 / 3 条，工具：无）`，日记没写、说说没发；抽函数后 18:49 同一条链路 `工具：qq_diary_write,qq_post_qzone`，`state/diary/2026-10-24.md` 与说说都真的落地了。回归里用「`diaryRitualPromptText(key)` 出现 ≥2 次、`reason === 'diaryRitual'` 出现 ≥2 次」两条断言防漂移。
+- 去重靠 `state/diary-publish.json`（`{day, attempts, lastAttemptAt, keys}`）+ 日记文件里最后一条时间戳（`diaryWrittenSince()`）：**先记账再唤醒**，投递失败或重启都不会同一分钟反复叫。
+- 发说说要过梯队门禁：主人是第一梯队，私聊里能发；群里别人的请求会被拒（提示词里让她一句话说明，不许偷偷绕过）。
+- 关掉：`socialV2.diary.publish.enabled = false`。
+
 ## 长期记忆归档（dsh-qq-extras，可选）
 
 [`dsh-qq-extras`](https://www.npmjs.com/package/dsh-qq-extras) 会把「主人 ↔ 小鲸鱼」的对话存成一份可检索的归档，并定期让模型压成摘要，给 AI 一个跨会话的长期记忆。它自带的采集器读的是 `<BRIDGE_DIR>/state/qq-activity.log`，而那份日志的入站行长这样：
