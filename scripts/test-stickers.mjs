@@ -124,6 +124,28 @@ console.log('## bridge 路由/函数存在性');
   }
 }
 
+console.log('## 启动预热时机（回归：抢跑 WS 让每次开机都刷「同步收藏表情失败」）');
+{
+  // 症状：`[sticker] 同步收藏表情失败: SnowLuma WebSocket closed before opening`，
+  // 每次开机一行、看着像故障。根因是预热在 bot.connect() 之后**立刻**跑，而首次连接
+  // 必然先失败（HTTP token 与 WS token 不同 → 401 → 自愈 → 重连）。所以预热必须挪到
+  // bot.on('open') 里，并且只做一次（重连不重复预热）。
+  const bridgeSrc = fs.readFileSync(path.join(ROOT, 'src', 'bridge.js'), 'utf8');
+  const startupStart = bridgeSrc.indexOf("log('桥接已启动");
+  const startupEnd = bridgeSrc.indexOf('startDshWatch();', startupStart);
+  const startupBlock = startupStart >= 0 && startupEnd > startupStart ? bridgeSrc.slice(startupStart, startupEnd) : '';
+  ok(startupBlock.length > 0, '能定位到启动阶段代码块');
+  ok(!startupBlock.includes('syncStickerLibrary('), '启动阶段不再抢跑同步收藏表情');
+  // ⚠️ 必须带 `, () =>`：文件里还有几处**注释**提到 bot.on('open')，只写这个会被注释骗到。
+  const openIdx = bridgeSrc.indexOf("bot.on('open', () =>");
+  const openBlock = openIdx >= 0 ? bridgeSrc.slice(openIdx, openIdx + 8000) : '';
+  ok(openIdx >= 0 && openBlock.includes('stickerPrewarmed = true') && openBlock.includes('syncStickerLibrary(true)'),
+    "预热挪到 WS open 之后（bot.on('open') 里）");
+  ok(/let stickerPrewarmed = false/.test(bridgeSrc), '预热有「只做一次」的标记，重连不重复');
+  // 顺带：首次连接被拒时 SDK 会丢空对象，日志以前打成 `SnowLuma 错误：{}`
+  ok(/detail === '\{\}'/.test(bridgeSrc), 'SnowLuma 空错误不再打成 {}');
+}
+
 if (process.env.QQ_BRIDGE_TEST_LIVE === '1') {
   console.log('## live：SnowLuma 收藏表情链路');
   try {

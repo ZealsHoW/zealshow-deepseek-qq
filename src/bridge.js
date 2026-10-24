@@ -2367,6 +2367,11 @@ async function main() {
   }
   let stickerSyncedAt = 0; // 上次从 SnowLuma 拉取收藏表情的时间戳（毫秒）
   let lastForcedAgentStickerSync = 0; // AI 强制刷新表情库的最小间隔保护
+  // 启动预热只在**首次连上 SnowLuma** 后做一次：以前是在启动时立刻同步，
+  // 那时 WS 还没 open（首次连接必然先失败再走 token 自愈），于是每次开机都会
+  // 刷一行 `[sticker] 同步收藏表情失败: SnowLuma WebSocket closed before opening` ——
+  // 看着像故障，其实只是抢跑。重连（换 token 自愈后）不算首次，不重复预热。
+  let stickerPrewarmed = false;
 
   function stickerEnabled() {
     return cfg.socialV2?.sticker?.enabled !== false;
@@ -15360,6 +15365,11 @@ async function main() {
     // 连接成功后顺手确认一下 token 是否已跟当前账号对齐；不一致就写回 config.json，
     // 让 MCP 工具（另一个进程）也能拿到正确的 token。
     void syncTokenToFile();
+    // 预热表情库：等 WS 真的 open 之后再同步（启动时抢跑必然失败，见 stickerPrewarmed 处的说明）。
+    if (!stickerPrewarmed && cfg.socialV2?.sticker?.enabled !== false) {
+      stickerPrewarmed = true;
+      syncStickerLibrary(true).catch((error) => log('启动预热表情库失败:', error?.message ?? error));
+    }
   });
 
   /**
@@ -15473,7 +15483,9 @@ async function main() {
     const detail = error && typeof error === 'object'
       ? [error.code, error.message, error.reason, error.type].filter(Boolean).join(' | ') || JSON.stringify(error)
       : String(error ?? '');
-    log(`SnowLuma 错误：${detail || '(无详情)'}`);
+    // 首次连接被 token 拒绝时 SDK 有时丢一个空对象过来，JSON.stringify 会打成 `{}` ——
+    // 那行日志以前是 `SnowLuma 错误：{}`，看不出是什么错，改成明说「无详情」。
+    log(`SnowLuma 错误：${!detail || detail === '{}' ? '(无详情)' : detail}`);
     void healTokenIfStale(`error ${detail}`.trim().slice(0, 200));
   });
 
@@ -15495,10 +15507,7 @@ async function main() {
   startLastAliveHeartbeat();
   // 晚安休眠状态：进程重启后若仍在休眠窗口内，接着睡（唤醒定时器重新排）。
   loadNightSleepState();
-  // 预热表情库：启动时同步一次 QQ 收藏表情，失败不阻塞（AI 首次调用工具时还会再试）。
-  if (cfg.socialV2?.sticker?.enabled !== false) {
-    syncStickerLibrary(true).catch((error) => log('启动预热表情库失败:', error?.message ?? error));
-  }
+  // 预热表情库已挪到 bot.on('open') 里：启动那一刻 WS 还没通，抢跑必然失败并刷一行红色日志。
   startDshWatch();
   startSnowlumaWatch();
   startConsoleServer();
