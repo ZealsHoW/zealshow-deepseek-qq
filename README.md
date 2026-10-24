@@ -247,6 +247,7 @@ npm start          # 或双击 start.bat（守护模式：崩溃自动重启，�
 - 桥接异常/消息无反应时：双击 `restart.bat`（自动杀旧实例 → 清理锁 → 重新启动守护）
 - **重启 DSH 通常不需要动桥接**：每 5 秒探活，DSH 不可用期间收到的 QQ 消息在桥接进程内排队（最多 50 条/会话，满后丢最旧项），恢复后尝试补投。桥接进程退出会丢失内存队列；断线期间已经结束的回复暂不保证补发。
 - **⚠️ 别在 DSH 的终端里起桥接**：那样桥接属于 DSH 自己的 Windows 作业对象，DSH 一重启（换端口、升级、崩溃）桥接会被连坐杀掉——表现为 DSH 可用但 QQ 完全没反应、`state/bridge.log` 停在 `⚠️ DSH 不可用（重启中？）`、`curl http://127.0.0.1:3100/health` 不通。正确做法是走计划任务（活在 DSH 之外）：`schtasks /run /tn "\qq-bridge-watchdog"`，它会按序拉起 SnowLuma → 常驻 MCP 服务 → 桥接，并自动把 `config.json` 里的 DSH 端口同步成当前端口。
+- **⚠️ 看门狗的探活不许用 WMI**：这台机器上 `Get-CimInstance Win32_Process` 与 `Get-NetTCPConnection` 会**卡死**（实测 20 秒都不回，而 `Restart-Service Winmgmt` 要管理员权限、拿不到）。看门狗一旦卡进去就整段停摆——症状是「bridge / GPT-SoVITS 死了没人拉、`_keepalive.log` 停在最后一条正常记录上」，看起来像什么都没发生（2026-10-24 就是这样白停了一段，11:49 被我停掉的 TTS 服务一直没人拉回来）。现在 `qq-bridge-keepalive.ps1` 的探活只走 `netstat.exe -ano -p TCP` + `Get-Process`：bridge 用 `state/bridge.lock` 里的 PID 认、SnowLuma 用「可执行文件路径是 `$snowDir\node.exe`」认、DSH 端口按进程名 `DeepSeek Harness` 认、端口探活一律 `Test-PortListening`。给它加新探活时照这个来，回归是 `npm run test:keepalive-probes`（代码里再出现那几个 cmdlet 就直接判失败）。临时诊断也一样，别在会话里直接调 `Get-NetTCPConnection`——要知道端口通不通就 `curl.exe -s -o NUL -w "%{http_code}" --max-time 3`。
 - **关机/断网期间漏掉的消息会自动补进未读**：桥接每次连上 QQ 后，会回看白名单会话最近的历史消息（`socialV2.catchUp.count` 默认 20 条、`maxAgeHours` 默认 24 小时、`graceMs` 默认 2 分钟），只补「上一个进程最后一次心跳之后」的消息，并按 `messageId` 去重；补入后会触发一次 `offlineReview` 唤醒，让 agent 把真正需要回应的补上。桥接每分钟写一次心跳（`state/last-alive.json`），所以重启/开机都不会把很久以前已经被处理过的旧消息再翻出来。
 - 修改 `config.json` / `roles/` / `state/current-role.json` 后重启桥接生效；修改 `dsh/agent-presets/`（改完要跑 `node scripts/build-agent-preset-patches.mjs` 重新生成 bundle patch）或 MCP 配置后重启 DSH 生效
 
@@ -528,6 +529,9 @@ AI 也能发语音条。**出厂默认关**（`config.example.json` 里 `socialV
 
 `text` 通道**不需要 ffmpeg**：转 SILK 是网关（SnowLuma）自己做的，桥接只把 wav 路径交给它（`{type:'record'}`）。本机没有 `ffprobe` 也不影响发送，只是跳过时长校验（会留一条警告）。
 
+**ffmpeg / ffprobe 的定位**（2026-10-24 修）：`socialV2.voice.ffmpegPath` / `ffprobePath`（或环境变量 `FFMPEG_PATH` / `FFPROBE_PATH`）显式指出位置；**只写 ffmpegPath 就够**——ffprobe 会去 ffmpeg 的同目录里找（官方 zip 里两个永远在一起，本机用的就是 GPT-SoVITS 自带那份，没加进 PATH）。找不到才回退裸名交给 PATH。回归：`npm run test:voice-probe`。
+之前这里有过一个**静默**缺陷：`probeAudio` 给 ffprobe 传了 `-o outFile`（那是 ffmpeg 的参数，ffprobe 没有），于是每次都退出码 1、一个字节都不产出，时长校验被悄悄跳过——日志里只有一行「无法探测时长」。现在改成把 ffprobe 的 stdout 直接绑到文件句柄上（不经过 pipe，受限沙箱里也能跑）。
+
 ### 本机 TTS 是怎么发声的
 
 用 Windows 自带的语音合成（先试 SAPI5，找不到就退回 OneCore），**不下载模型、不联网、零依赖**：
@@ -678,6 +682,44 @@ node scripts/voice-audition.mjs --set audio/ref/edge-xiaoyi.wav --ref-text "主�
 注：`qq-bridge-keepalive.ps1` 与 `.vbs` 在本仓库根目录之外（`qq-bridge` 的上一级），不随仓库发布，只随本机维护。
 
 已知限制：只支持 Windows 上的**同机服务**（参考音频路径是交给本机 Python 读的，所以必须是本机绝对路径）；显卡常驻（本机 RTX 4060 8G 够用，但服务起来后会占显存）；参考音频与逐字文本必须配对，否则音色会跑偏。
+
+### 唱一首歌（ACE-Step，可选）
+
+GPT-SoVITS 是 **TTS**：它只会「说」，没有旋律的概念（`api_v2.py` 里连 sing/melody 之类的参数都没有，别指望它唱）。要唱歌得另上一个会写音乐 + 唱词的模型，本机用的是 **ACE-Step**（3.5B，8GB 显存可跑，官方 2025-05-10 那版就把峰值显存压到 8GB 了）。
+
+```bash
+# 生成一首歌（用 _acestep 里的 venv python；node 侧只是薄壳）
+node scripts/sing.mjs --lyrics "第一句\n第二句" --tags "chinese pop, female vocal, gentle" --duration 30
+
+# 生成完直接发到 QQ（走 send-voice，受 maxPerMinute 限流）
+node scripts/sing.mjs --lyrics "…" --duration 20 --send private:<QQ号>
+
+# 只跑 python 那一层（看更细的日志 / 换参数）
+_acestep/env/Scripts/python.exe scripts/sing.py --lyrics-file lyrics.txt --steps 28
+```
+
+| 参数 | 说明 |
+| --- | --- |
+| `--tags` | 风格提示，英文更稳：流派 / 性别 / 情绪 / 乐器，默认 `chinese pop, female vocal, warm, gentle, acoustic` |
+| `--lyrics` / `--lyrics-file` | 歌词，`\n` 或用 `[verse]` `[chorus]` 分段 |
+| `--duration` / `--steps` | 目标时长（秒）与推理步数；8G 卡上 `--steps` 别过 40 |
+| `--out` | 产物路径，默认 `audio/sing-out.wav` |
+| `--checkpoint-dir` | 权重目录，默认 `~/.cache/ace-step/checkpoints` |
+| `--cpu-offload` | 默认开。8GB 显存必须开，关掉会在加载阶段 OOM |
+| `--send` | 生成完立刻用 `send-voice` 发出去 |
+
+**装在哪、怎么装的**：源码 `https://gh-proxy.com/https://github.com/ace-step/ACE-Step/archive/refs/heads/main.zip` → `../_acestep/ACE-Step-main`；venv `../_acestep/env`（`uv venv --python 3.10`，torch 走 `--index-url https://download.pytorch.org/whl/cu126`，然后 `uv pip install -e ACE-Step-main`）；权重从 `hf-mirror.com/ACE-Step/ACE-Step-v1-3.5B` 下到 `~/.cache/ace-step/checkpoints`，共约 7.9GB（transformer 6305MB + umt5 1075MB + dcae 299MB + vocoder 197MB）。`_acestep/` 不随仓库发布。
+
+**踩过的坑（都写进代码了，别改回去）**：
+
+- **`torchaudio.save` 要 torchcodec**：torchaudio 2.11 起存盘默认走 torchcodec（还要 ffmpeg 的 C 库）。`scripts/sing.py` 在调模型前把 `torchaudio.save` 换成 soundfile 后端（顺手把 `(channels, time)` 转置成 soundfile 要的 `(time, channels)`），产物完全一样。
+- **内存不够就 `WinError 1455`（页面文件太小）**：ACE-Step 加载要 ~10GB 提交内存，而这台机器 16GB 内存 + 系统托管页面文件经常只剩几百 MB。症状是 `OSError: [WinError 1455] 页面文件太小，无法完成操作 ... shm.dll`。临时解法：生成前先腾内存（`curl -X POST http://127.0.0.1:11434/api/generate -d '{"model":"qwen2.5vl:3b","keep_alive":0}'` 卸掉视觉模型，再停掉 GPT-SoVITS 的 python），跑完让看门狗把它拉回来。
+- **性能实测**（RTX 4060 Laptop 8G，`--cpu_offload` 开）：20 秒的歌 / 20 步 = 生成 21.7s、总 40s；8 秒 / 8 步 = 43s（含加载）。显存占用峰值约 7GB。
+- 2026-10-24 已真机发出第一首（`messageId=1207806362`，19.97s / 48kHz 立体声 / mean -15.4dB）。
+
+**还没接的下一步**：ACE-Step 出来的是「某个嗓子」唱的歌，不是小鲸鱼自己的音色。要变成她的声音，得再加一道**零样本音色转换**（Seed-VC 之类，拿 `audio/ref/edge-*.wav` 当参考），然后把「生成 + 转换 + 发出去」包成一个 MCP 工具（`qq_sing`）让她自己会唱。这块还没做。
+
+回归：`npm run test:sing`（离线静态检查两端参数接线；`SING_LIVE=1 npm run test:sing` 才真生成一段 8 秒的）。
 
 ## 待发文件夹（qq_list_outbox / qq_save_message_image / qq_draw_image）
 
