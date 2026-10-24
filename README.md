@@ -750,7 +750,7 @@ node scripts/voice-convert.mjs --source audio/xxx.wav --target audio/ref/edge-xi
 
 - 先把 Ollama 的常驻模型逐个 `keep_alive:0` 卸掉；
 - 再停 GPT-SoVITS。**两条路都要走**：按端口（netstat 找 LISTENING 的 PID）能停「已经在服务」的，但如果它正处在**加载模型、还没监听端口**的那一两分钟，按端口是找不到的——那时它已经吃了 5GB 以上，不杀掉就会把 ACE-Step 挤成 `exit=3221225477`（0xC0000005 访问违例）。所以 `scripts/gptsovits-serve.py` 这个薄启动器会把**真正吃内存的那个 python 的 PID** 写进 `state/gptsovits-serve.pid`（桥接只认 10 分钟内的，防 PID 复用误杀）；
-- 同时落 `state/tts-hold.json`（15 分钟后自动失效），看门狗看到它就不会在这段时间把 TTS 抢着拉起来——否则唱到一半必定 `WinError 1455`。
+- 同时落 `state/tts-hold.json`（15 分钟后自动失效），看门狗看到它就不会在这段时间把 TTS 抢着拉起来——否则唱到一半必定 `WinError 1455`。实测：写死 8 分钟的 hold、把 TTS 停掉，150 秒里看门狗一次都没拉起；删掉 hold 后 3 分钟内自动回来（`9880=400`，`state/gptsovits-serve.pid` 里是新的 python PID）。**改了看门狗脚本要 `schtasks /end` + `/run` 重启它**，否则跑着的还是旧代码（今天就是这么发现 hold 一直没生效的）。
 - **别用 `taskkill /T` 杀那个 pwsh 包装脚本**：`/F` 之后 python 子进程会变成孤儿继续占着 5GB（实测），只能直接按 python 的 PID 停。
 
 **Seed-VC 装在哪、怎么装的**：源码 `https://gh-proxy.com/https://github.com/Plachtaa/seed-vc/archive/refs/heads/main.zip` → `../_seedvc/seed-vc-main`；venv `../_seedvc/env`（`uv venv --python 3.10`；`torch==2.4.0/torchvision==0.19.0/torchaudio==2.4.0` 走 `--index-url https://download.pytorch.org/whl/cu124`，再 `uv pip install hydra-core omegaconf transformers==4.46.3 librosa==0.10.2 pydub soundfile huggingface_hub einops scipy "numpy<2" pyyaml safetensors munch==4.0.0 matplotlib`）；权重约 1.5GB 从 `hf-mirror.com` 下到 `../_seedvc/seed-vc-main/checkpoints`。`_seedvc/` 也不随仓库发布。
