@@ -69,7 +69,13 @@ const consolePort = Number(val('console-port', cfg.consolePort)) || 3100;
 const consoleToken = String(
   val('console-token', cfg.consoleToken || process.env.QQ_CONSOLE_TOKEN || readConsoleTokenFile() || '')
 ).trim();
-const voiceDir = path.resolve(val('voice-dir', cfg.voice?.dir ? path.resolve(ROOT, cfg.voice.dir) : path.join(ROOT, 'audio')));
+const voiceDir = path.resolve(val('voice-dir',
+  (cfg.socialV2?.voice?.dir || cfg.voice?.dir)
+    ? path.resolve(ROOT, cfg.socialV2?.voice?.dir || cfg.voice.dir)
+    : path.join(ROOT, 'audio')));
+// 语音配置在 socialV2.voice 里（旧版才在顶层 voice）。ffmpeg/ffprobe 的路径也在这儿，
+// 探测时长要用它们——不然 PATH 里没有 ffprobe 时会被静默跳过时长校验。
+const voiceCfg = cfg.socialV2?.voice || cfg.voice || {};
 const revealToken = has('reveal-token');
 const quiet = has('q') || has('quiet');
 
@@ -299,7 +305,9 @@ async function cmdCheck() {
   const info = await inspectAudio(r.path, {
     maxBytes: num('max-bytes', undefined) ?? undefined,
     maxSeconds: num('max-seconds', undefined) ?? undefined,
-    ffprobePath: val('ffprobe', process.env.FFPROBE_PATH || 'ffprobe')
+    ffprobePath: val('ffprobe', process.env.FFPROBE_PATH || voiceCfg.ffprobePath || 'ffprobe'),
+    // 没有 ffprobe 条目也无所谓：它通常就和 ffmpeg 在同一目录（见 voice-core 的 resolveFfprobe）
+    ffmpegPath: val('ffmpeg', process.env.FFMPEG_PATH || voiceCfg.ffmpegPath || null)
   });
   console.log(`音频：${r.path}`);
   console.log(`  来源：${r.via}`);
@@ -335,7 +343,9 @@ async function cmdSend() {
   }
   const info = await inspectAudio(r.path, {
     maxBytes: num('max-bytes', undefined) ?? undefined,
-    maxSeconds: num('max-seconds', undefined) ?? undefined
+    maxSeconds: num('max-seconds', undefined) ?? undefined,
+    ffprobePath: val('ffprobe', process.env.FFPROBE_PATH || voiceCfg.ffprobePath || 'ffprobe'),
+    ffmpegPath: val('ffmpeg', process.env.FFMPEG_PATH || voiceCfg.ffmpegPath || null)
   });
   if (!info.ok) fail(info.error);
 

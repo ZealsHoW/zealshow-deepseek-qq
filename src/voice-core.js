@@ -159,20 +159,31 @@ export async function probeAudio(file, { ffprobePath = 'ffprobe', timeoutMs = 10
   const outFile = path.join(dir, `p-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.json`);
   const run = () => new Promise((resolve) => {
     let child;
+    let fd = null;
+    let settled = false;
+    const finish = (result) => {
+      if (settled) return;
+      settled = true;
+      if (fd !== null) { try { fs.closeSync(fd); } catch {} fd = null; }
+      resolve(result);
+    };
     try {
+      // 让 ffprobe 的 stdout **直接**落进这个文件句柄：既不经过 pipe（受限沙箱下 pipe 会 EPERM），
+      // 也不能用 `-o`（ffprobe 没有这个参数——旧实现写成 `-o outFile`，于是每次都退出码 1、
+      // 一个字节都不产出，时长校验就被静默跳过了）。
+      fd = fs.openSync(outFile, 'w');
       child = spawn(ffprobePath, [
         '-v', 'error',
-        '-show_entries', 'format=duration,format_name',
-        '-show_entries', 'stream=codec_name,codec_type,sample_rate,channels',
-        '-of', 'json', '-o', outFile, file
-      ], { windowsHide: true, stdio: 'ignore' });
+        '-show_entries', 'format=duration,format_name:stream=codec_name,codec_type,sample_rate,channels',
+        '-of', 'json', file
+      ], { windowsHide: true, stdio: ['ignore', fd, 'ignore'] });
     } catch (error) {
-      resolve({ code: -1, error: `ffprobe 启动失败：${error?.message ?? error}` });
+      finish({ code: -1, error: `ffprobe 启动失败：${error?.message ?? error}` });
       return;
     }
-    const timer = setTimeout(() => { try { child.kill(); } catch {} resolve({ code: -2, error: 'ffprobe 超时' }); }, timeoutMs);
-    child.on('error', (e) => { clearTimeout(timer); resolve({ code: -1, error: `ffprobe 不可用：${e.message}` }); });
-    child.on('close', (code) => { clearTimeout(timer); resolve({ code }); });
+    const timer = setTimeout(() => { try { child.kill(); } catch {} finish({ code: -2, error: 'ffprobe 超时' }); }, timeoutMs);
+    child.on('error', (e) => { clearTimeout(timer); finish({ code: -1, error: `ffprobe 不可用：${e.message}` }); });
+    child.on('close', (code) => { clearTimeout(timer); finish({ code }); });
   });
 
   try {
@@ -204,7 +215,9 @@ export async function probeAudio(file, { ffprobePath = 'ffprobe', timeoutMs = 10
 export async function inspectAudio(file, {
   maxBytes = DEFAULT_MAX_BYTES,
   maxSeconds = DEFAULT_MAX_SECONDS,
-  ffprobePath = process.env.FFPROBE_PATH || 'ffprobe'
+  ffprobePath = process.env.FFPROBE_PATH || 'ffprobe',
+  // 只有 ffmpeg 的路径是已知的也够用：ffprobe 就在它旁边（见 resolveFfprobe）
+  ffmpegPath = null
 } = {}) {
   const warnings = [];
   let st;
@@ -217,7 +230,7 @@ export async function inspectAudio(file, {
   if (SILK_EXTS.has(path.extname(file).toLowerCase())) {
     return { ok: true, size: st.size, duration: null, codec: 'silk', formatName: 'silk', warnings };
   }
-  const p = await probeAudio(file, { ffprobePath });
+  const p = await probeAudio(file, { ffprobePath: resolveFfprobe({ ffprobePath, ffmpegPath }) });
   if (!p.ok) {
     warnings.push(`无法探测时长（${p.reason}）：将不做时长校验，直接交给网关`);
     return { ok: true, size: st.size, duration: null, codec: '', formatName: '', warnings };
@@ -348,6 +361,39 @@ export function resolveFfmpeg({ ffmpegPath = null, envVar = 'FFMPEG_PATH' } = {}
   }
   // PATH 里找（不真正执行，交给 spawn 时再报错）；绝不再回退到不存在的候选路径。
   return 'ffmpeg';
+}
+
+/**
+ * 定位 ffprobe：显式参数 → 环境变量 → ffmpeg 旁边 → PATH。
+ *
+ * 为什么要「ffmpeg 旁边」这一步：官方 ffmpeg 压缩包里 fxprobe/ffmpeg 永远是同一目录，
+ * 而 PATH 里常常只有 ffmpeg 没有 ffprobe（本机就是：GPT-SoVITS 自带的那份 zip 里两个都在，
+ * 但没加进 PATH）。只按裸名找的旧实现在这里必然 ENOENT，后果是**跳过时长校验**——
+ * 不报错、只是少一道闸，所以一直没人发现。
+ */
+export function resolveFfprobe({
+  ffprobePath = null,
+  ffmpegPath = null,
+  envVar = 'FFPROBE_PATH',
+  ffmpegEnvVar = 'FFMPEG_PATH'
+} = {}) {
+  const candidates = [ffprobePath, process.env[envVar]].filter(Boolean);
+  for (const c of candidates) {
+    try {
+      if (fs.statSync(c).isFile()) return c;
+    } catch {}
+  }
+  const ffmpeg = resolveFfmpeg({ ffmpegPath, envVar: ffmpegEnvVar });
+  if (ffmpeg !== 'ffmpeg') {
+    const dir = path.dirname(ffmpeg);
+    for (const name of ['ffprobe.exe', 'ffprobe']) {
+      const p = path.join(dir, name);
+      try {
+        if (fs.statSync(p).isFile()) return p;
+      } catch {}
+    }
+  }
+  return 'ffprobe';
 }
 
 /**

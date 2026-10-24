@@ -258,6 +258,7 @@
       "defaultVolume": 1,
       "loudness": "normal",
       "ffmpegPath": "",
+      "ffprobePath": "",
       "autoReadback": true,
       "tts": {
         "enabled": true,
