@@ -674,6 +674,7 @@ node scripts/voice-audition.mjs --set audio/ref/edge-xiaoyi.wav --ref-text "主�
 
 - `refText` **必须和参考音频逐字一致**（GPT-SoVITS 靠它对齐音素）；`make-ref-voice.py` 的默认文本与 `config.json` 的 `refText` 是同一句，改文本就要两边一起改。
 - 桥接每次发语音都会重新读配置，切换后**不用重启**；音色服务按 `tts_infer.yaml` 加载权重，与参考音频无关。
+  > 2026-10-25 修正：这句在**直连引擎**上不成立。`voiceCfg()`（`src\bridge.js:2474`）读的是 main() 里那份内存里的 `cfg`，而 `cfg = loadConfig()` 全文件只有启动时那一次（`:2317`）——所以改了 `refAudio` / `refText` **必须重启桥接**才生效。重启别在 DSH 的后台作业里起（作业一旦被 kill 会连坐杀掉它启动的 bridge，症状是「日志停在某一行、端口 3100 没人听」）：先 `Stop-Process -Id <state\bridge.lock 里的 PID> -Force`，再 `schtasks /run /tn "\qq-bridge-watchdog"`（看门狗发现锁里的 PID 不在、端口没起，就会自己拉一个新的）。
 - 参考音频规格统一 32 kHz / 16 bit / 单声道（脚本里用 ffmpeg 转）。
 - 试听产物想直接发到 QQ：`node scripts/send-voice.mjs send audio/audition-edge-xiaoyi.wav private:<QQ号>`（注意 `socialV2.voice.maxPerMinute` 限流）。
 - 2026-10-24 已真机发出三个候选（xiaoyi / xiaoxiao / xiaobei，messageId 分别为 -1081032749 / 504873378 / -491824197），等主人挑一个再切默认。
@@ -733,6 +734,24 @@ filter: asetrate=32000*0.8909, aresample=32000, atempo=1.1225
 
 - **别拿整首歌的 F0 当目标**。拿 `audio/sing-test.wav` 量出来中位 F0 只有 147 Hz —— 那不是人声，是伴奏的贝斯/鼓把 `pyin` 的中位数拉下去了。要量人声就取**清唱段**，或者干脆只比频谱质心、靠耳朵定。
 - **降得越多不等于越好听**。降到 −3 半音时 ASR 把「主人」听成「主任」、`m1`（−1 半音）丢了开头三个字 —— 变调会同时改变共振峰，糊字是它的代价。所以每次都用 `audio/asr-check.py` 复核一遍（`funasr`，见「把她自己的声音克隆出来」那节的依赖），**先保吐字，再选音色**。
+
+**从一段长录音里挑参考片段**（2026-10-25，`sound\小鲸.wav` → `audio/ref/xiaojing-6s.wav`）：主人直接给一段录音说「就用这个当音色」时，别整段丢给 GPT-SoVITS（它要 3~10 秒、逐字文本、干净人声），也别凭听感随手切。两步，各有一个脚本：
+
+```powershell
+# 1) 句子级转写 + 按句边界切候选（产物 audio/cand/seg-*.wav 与 sentences.json）
+python scripts/pick-ref-segment.py --audio ../sound/小鲸.wav --min-seconds 4 --max-seconds 10
+
+# 2) 每个候选各合成同一句探针（台词默认固定，横向比才可比）
+npm run voice:probe -- --ref audio/cand/seg-01-33p00-39p00.wav `
+  --ref-text "这个可以买吗？我感觉跟我还挺像的，好像还有更大的好可爱。"
+```
+
+1. **句子级转写拿时间戳**：脚本里是 `funasr` 的 `paraformer-zh` + `fsmn-vad` + `ct-punc` 跑 `generate(input=..., sentence_timestamp=True)`，`r[0].sentence_info` 给每句 `{start, end, text}`（毫秒）。113.3 秒的录音切出 10 句、231 字。
+2. **在标点边界切候选**（4~10 秒、单句或不跨句），统一过清洗链 `highpass=f=70,acompressor=threshold=-18dB:ratio=2.5:attack=8:release=120,alimiter=limit=0.70,loudnorm=I=-17:TP=-3:LRA=9`，输出 32 kHz / 单声道 / pcm_s16le。
+3. **每个候选各合成同一句探针**（`voice:probe` 的默认台词是「主人，你听，这是我的声音。你觉得这样说话好听吗？」），然后两边都量中位 F0 与频谱质心。
+4. **选「探针最贴近源片段」的那版**，同时要求探针的 ASR 完整。实测：源句 33.09–38.94「这个可以买吗？我感觉跟我还挺像的，好像还有更大的好可爱。」源片段 F0 295 / 质心 1603，用它克隆出 297 / 1671 —— 差得最少；另一句「姐姐，原来你在这儿啊」音高起伏太大，克隆出来 F0 飙到 394，弃。
+
+顺带一条：**先确认底噪里没有音乐**。用 `-af lowpass=f=90,volumedetect` 量静音段（`silencedetect` 找出来的位置）的低频能量，-50 dB 这种量级说明没人声伴奏；要是几十赫兹就有东西，那是贝斯/鼓，克隆出来会带一层嗡声。
 
 回归：`npm run test:voice-tune`（离线，不碰 ffmpeg 与 TTS：只验变调数学、命名、滤镜顺序、`--pitch` 解析，以及 README / package.json 的接线）。
 

@@ -9,6 +9,7 @@ import { fileURLToPath } from 'node:url';
 import {
   parsePitchList, pitchFilter, warmFilter, variantName, tuneFilter,
 } from './voice-tune.mjs';
+import { parseArgs as parseProbeArgs, probeOutPath, DEFAULT_TEXT as DEFAULT_PROBE_TEXT } from './voice-probe.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..');
@@ -79,4 +80,29 @@ test('接线：README 与 package.json 都提到了这条命令', () => {
   assert.ok(README.includes('ref-m2'), 'README 没给出一版实测例子');
   assert.equal(PKG.scripts['test:voice-tune'], 'node scripts/test-voice-tune.mjs');
   assert.equal(PKG.scripts['voice:tune'], 'node scripts/voice-tune.mjs');
+});
+
+// ── 挑参考片段那条路（2026-10-25 主人丢来 113 秒录音说「就用这个当音色」时补的） ──
+test('voice-probe：--ref-text 必填（GPT-SoVITS 靠它对齐音素，猜错比不给更糟）', () => {
+  assert.throws(() => parseProbeArgs(['--ref', 'a.wav']), /--ref-text/);
+  assert.throws(() => parseProbeArgs(['--ref', 'a.wav', '--ref-text', '   ']), /不能是空白/);
+  assert.throws(() => parseProbeArgs(['--ref-text', 'x']), /缺少 --ref/);
+  assert.throws(() => parseProbeArgs(['--ref', 'a.wav', '--ref-text', 'x', '--wat']), /不认识的参数/);
+  assert.throws(() => parseProbeArgs(['--ref', 'a.wav', '--ref-text']), /要跟一个值/);
+});
+
+test('voice-probe：默认探针台词固定、产物落在 audio/cand/ 且按参考名命名', () => {
+  const o = parseProbeArgs(['--ref', 'audio/ref/xiaojing-6s.wav', '--ref-text', '逐字文本']);
+  assert.equal(o.text, DEFAULT_PROBE_TEXT, '探针台词要默认固定，横向比才可比');
+  assert.equal(probeOutPath('audio/ref/xiaojing-6s.wav'), path.join('audio', 'cand', 'probe-xiaojing-6s.wav'));
+  assert.equal(probeOutPath('x.wav', 'tmp/a.wav'), 'tmp/a.wav', '显式 --out 优先');
+});
+
+test('接线：挑参考片段的两步（切候选 / 合成探针）都写进了 README 与 package.json', () => {
+  assert.ok(README.includes('pick-ref-segment.py'), 'README 没写怎么从长录音里切候选');
+  assert.ok(README.includes('sentence_timestamp'), 'README 没解释句子级时间戳从哪来');
+  assert.ok(README.includes('voice:probe'), 'README 没写怎么合成探针');
+  assert.equal(PKG.scripts['voice:probe'], 'node scripts/voice-probe.mjs');
+  assert.ok(fs.existsSync(path.join(ROOT, 'scripts', 'pick-ref-segment.py')), '缺 scripts/pick-ref-segment.py');
+  assert.ok(fs.existsSync(path.join(ROOT, 'scripts', 'voice-probe.mjs')), '缺 scripts/voice-probe.mjs');
 });
