@@ -1074,6 +1074,38 @@ curl -s -X POST http://127.0.0.1:3100/api/socialV2/night-greet \
 2. **不要**对外部内容表做 `DELETE FROM memories_fts` / `INSERT INTO memories_fts(memories_fts) VALUES('delete-all')`：实测直接写成 `database disk image is malformed`（267 = `SQLITE_CORRUPT_VTAB`），随后 `memories` 的 UPDATE 触发器就炸。要重来就 `DROP TABLE memories_fts` + 重开（索引自愈那条测试就是这么模拟的）。
 3. 建索引/建表的 DDL 都在 `openStore()` 里跑，**开库即自愈**，不需要单独迁移脚本。
 
+### 记忆是共用的：跨会话检索与人名簿（2026-10-25）
+
+原来的行为是「记忆按会话硬隔离」：群聊里永远召不到私聊记忆，私聊之间也互不可见。主人的要求是**她得能突破会话限制**——别人问起「跟谁发生过什么」，她靠记忆答得上来，**但说不说由她自己决定**。所以拆成两层：
+
+| 场合 | 行为 |
+| --- | --- |
+| 提示词自动注入（`live.block()`） | **仍然按会话隔离**：群聊那块不会平白出现在私聊的提示词里（`layersForSession` 不变），避免「隔壁的私事」被无端带上台面 |
+| 她主动检索（`qq_memory_search`） | **默认查全库**（`recall({ allScopes: true })`），每条结果带来源：`（来自：小祀（私聊 private:2998647358））` |
+
+- 只想看某一边时传 `scope`：`private:QQ号` / `group:群号` 只看那一个会话，`self` 只看当前会话（回到旧行为）。不给 = 全库。
+- 跨会话结果里带 `scope` / `where` 两个字段，`crossScope: true` 是「这轮查的是全库」的标记，工具输出会写「（跨会话查的，带来源）」。
+- **隐私口径写进铁律**（`ENGINE_RULES` 的【记忆是共用的】）：当事人或主人问起可以讲；**别把 A 的私事主动转述给 B**——查到不等于该说，分寸她自己拿。这不是硬过滤，是有意的分寸留给她。
+
+**人名簿**（`state/memory-people.json`，`src/qqb/memory/people.mjs`）负责把 `private:123` 翻成名字，不然检索结果念出来像报错码：
+
+- 名字从两处来：① 网关好友/群列表（启动后 8 秒同步一次，之后每 6 小时一轮；**备注优先于昵称**）；② 私聊来消息时顺手记 `sender`（群里不记——key 是群号、sender 只是某个群员，会把群名写坏）。
+- `cleanName()` 不收空串、`未知`、纯 5–12 位数字（QQ 号当名字没信息量）；写盘 tmp+rename，文件坏了当空簿子用，**只 warn 不抛错**。
+- `label()` 输出 `小祀（私聊 private:2998647358）`；提示词里的【你认识的人】只列 `config.allow` 里那 5 个私聊 + 1 个群（全量好友有几百个，会把提示词撑爆，而且她本来也不该主动去找名单外的人）。
+- **它只是标签**：准入仍然只看 `config.allow`，人名簿不放行任何会话。
+- 换机器/换账号后名单变了：删掉 `state/memory-people.json` 等下一轮同步，或直接重启桥接（启动 8 秒后会重同步）。
+
+回归：`npm run test:qqb-memory`（`allScopes` 能跨 scope 召回、不传时仍隔离）、`npm run test:qqb-memory-live`（`recallAcrossScopes` 跨会话 + 默认 `block()` 仍隔离）、`npm run test:qqb-memory-people`（名字清洗、持久化、坏文件降级）、`npm run test:qqb-knowledge`（路由默认全库、`where` 来源、工具 `scope` 参数、人名簿进提示词）。
+
+排障口：线上默认走**直连引擎**，它的提示词以前没地方看（DSH 那条才有 `/api/socialV2/prompt`）。现在两者都能扒出来：
+
+```
+GET /api/socialV2/engine-prompt?key=private:3482501440&reason=replyCheck   # 直连引擎
+GET /api/socialV2/prompt?key=private:3482501440                            # DSH 唤醒
+```
+
+都带 `x-console-token`；`reason` 可填 `replyCheck` / `proactiveCheck` / `diaryRitual` 等唤醒原因，返回 `{ ok, key, reason, system, user }`。
+
 ### 日记 → 说说（每天到点自己写一条）
 
 `socialV2.diary.publish` 打开后，桥接每分钟看一眼表；到了点且**今天还没写过日记**，就唤醒一个会话，让她从两个库里挑今天最值得记的事，写成日记再发成一条说说：

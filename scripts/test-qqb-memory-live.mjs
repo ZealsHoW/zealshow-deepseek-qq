@@ -65,6 +65,35 @@ test('主人私聊记忆只在自己的会话里可见（private 层不外泄）
   mem.close();
 });
 
+test('跨会话检索：默认注入仍隔离，recallAcrossScopes 能查全库并带来源', () => {
+  const root = tempRoot();
+  const mem = live(root);
+  mem.rememberSocialEvent({ key: 'group:900000001', category: 'activeTopic', content: '在聊期末考试' });
+  mem.rememberSocialEvent({ key: 'private:1000000001', category: 'promise', content: '周末陪爸爸去看球' });
+  mem.rememberSocialEvent({ key: 'private:1000000003', category: 'activeTopic', content: '朋友在准备考试' });
+
+  // 默认注入仍然按会话隔离：群里那块记忆不会平白出现在别人的私聊里，反之亦然。
+  assert.doesNotMatch(mem.block({ key: 'private:1000000003' }), /期末考试|看球/);
+  assert.doesNotMatch(mem.block({ key: 'group:900000001' }), /看球|朋友在准备考试/);
+
+  // 她主动检索：跨会话查到「看球」，并标出来源 scope。
+  const across = mem.recallAcrossScopes({ query: '看球' });
+  assert.equal(across.length, 1);
+  assert.equal(across[0].scope, 'private:1000000001');
+  assert.match(across[0].text, /看球/);
+
+  // 不带关键词 = 全库最近若干条。
+  const all = mem.recallAcrossScopes({ query: '', limit: 10 });
+  assert.equal(all.length, 3);
+  assert.deepEqual(all.map((item) => item.scope).sort(), ['group:900000001', 'private:1000000001', 'private:1000000003']);
+
+  // 坏库时降级成空数组，不抛错。
+  mem.close();
+  const brokenRoot = tempRoot();
+  fs.mkdirSync(path.join(brokenRoot, 'state', 'memory.db'), { recursive: true });
+  assert.deepEqual(live(brokenRoot).recallAcrossScopes({ query: '看球' }), []);
+});
+
 test('群友印象可以按 target 删除；清空会话只影响该会话', () => {
   const root = tempRoot();
   const mem = live(root);

@@ -30,6 +30,7 @@ import { hardenDir, manualDirCommand } from './state-acl.mjs';
 import { extractForwardIds, forwardIdFromData, sanitizeForwardId, formatForwardResponse } from './forward.js';
 import { resolvePriceTable } from './model-prices.js';
 import { createLiveMemory } from './qqb/memory/live.mjs';
+import { createPeopleDirectory } from './qqb/memory/people.mjs';
 import { openStore } from './qqb/memory/store.mjs';
 import { createIntake } from './qqb/memory/intake.mjs';
 import { createRefiner } from './qqb/memory/refine.mjs';
@@ -104,6 +105,76 @@ function memoryDbEnabled() {
     return cfg?.socialV2?.memoryDb?.enabled !== false;
   } catch {
     return true;
+  }
+}
+// R9「人名簿」：把 private:123 / group:456 翻成「小祀」「大肥鱼之家」，跨会话检索结果才不会
+// 变成一串 QQ 号。它只是标签，不放行任何会话（准入仍然只看 config.allow）。
+// 数据来源：① 网关好友/群列表（启动后同步一次，之后 6 小时一轮）；② 私聊来消息时的昵称。
+const people = createPeopleDirectory({
+  filePath: path.join(ROOT, 'state', 'memory-people.json'),
+  logger: { warn: (message, detail) => log('人名簿', message, detail ?? '') }
+});
+
+/** 从网关拉一次好友/群列表，把 scope → 名字 记进人名簿。失败只记日志，不影响对话。 */
+async function seedPeopleFromGateway(reason = '启动') {
+  try {
+    const base = String(cfg?.snowluma?.httpUrl || 'http://127.0.0.1:3000').replace(/\/+$/, '');
+    const headers = {
+      'content-type': 'application/json',
+      ...(cfg?.snowluma?.accessToken ? { authorization: `Bearer ${cfg.snowluma.accessToken}` } : {})
+    };
+    const callAction = async (action, params = {}) => {
+      const res = await fetch(`${base}/${action}`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify(params),
+        signal: AbortSignal.timeout(15000)
+      });
+      const body = await res.json().catch(() => null);
+      return body?.status === 'ok' ? body.data : null;
+    };
+    const [friends, groups] = await Promise.all([callAction('get_friend_list'), callAction('get_group_list')]);
+    let added = 0;
+    for (const item of Array.isArray(friends) ? friends : []) {
+      const qq = Number(item?.user_id);
+      if (!Number.isFinite(qq) || qq <= 0) continue;
+      // 备注优先（主人自己起的名字最准），其次昵称。
+      const name = String(item?.remark ?? '').trim() || String(item?.nickname ?? '').trim();
+      if (people.remember(`private:${qq}`, name, { kind: 'private', note: item?.remark ? 'remark' : '' })) added += 1;
+    }
+    for (const item of Array.isArray(groups) ? groups : []) {
+      const gid = Number(item?.group_id);
+      if (!Number.isFinite(gid) || gid <= 0) continue;
+      if (people.remember(`group:${gid}`, String(item?.group_name ?? '').trim(), { kind: 'group' })) added += 1;
+    }
+    log(`人名簿：${reason}从网关同步了 ${added} 个名字（共 ${people.size()} 个）`);
+  } catch (error) {
+    log('人名簿：从网关同步失败（不影响对话）', error?.message ?? error);
+  }
+}
+
+/**
+ * 提示词里的「我认识谁」：只列白名单里的会话，顺带给 scope（她要发消息时用得到 key）。
+ * 不列全量好友 —— 那有几百个，会把提示词撑爆，而且她本来也不该主动去找名单外的人。
+ */
+function peoplePromptText() {
+  try {
+    const lines = [];
+    const allow = cfg?.allow ?? {};
+    const privates = Array.isArray(allow.private) ? allow.private : [];
+    const groups = Array.isArray(allow.groups) ? allow.groups : [];
+    for (const qq of privates) {
+      const scope = `private:${Number(qq)}`;
+      lines.push(`- ${people.label(scope)}`);
+    }
+    for (const gid of groups) {
+      const scope = `group:${Number(gid)}`;
+      lines.push(`- ${people.label(scope)}`);
+    }
+    if (!lines.length) return '';
+    return `【你认识的人】\n${lines.join('\n')}\n（记忆是共用的：这些会话里发生过的事你都查得到，搜出来的每条都会标来源。）`;
+  } catch {
+    return '';
   }
 }
 // R4 通信容错：出站消息的统一通道。SnowLuma 重启 / 端口没起来 / 网络抖动时，
@@ -446,6 +517,7 @@ const ENGINE_RULES = [
   '【自己刷一会儿】桥接偶尔会给你一段自由时间（唤醒原因写 browse）：那是一次自己看点东西的机会——用 `qq_read_page` 读页面正文（比截图快，抖音热榜/微博热搜都行），或用 `qq_web_screenshot` 截个图看画面（抖音热榜 https://www.douyin.com/hot 、微博热搜 https://s.weibo.com/top/summary 之类）或用 `mcp__web-search-safe__web_search` 看热点/梗。**浏览器里用的是主人自己的账号（已经替你登录好了，直接用就行）**；但只读不互动——不点赞、不评论、不私信、不关注、不绕验证码，也**别去登录别人的账号**。登录态会过期（提示「登录态可能过期」就是这样）：碰到了别反复重试，桥接会提醒主人重新扫码。看到真有意思、值得说的就开口聊一句，没有就什么都别写、安静收尾。一天三五次就够，别刷太久。',
   '想记东西用 qq_memory_append；想给自己写日记用 qq_diary_write；分享过的话题用 qq_interest_record。',
   '【记忆库 / 知识库】聊天里提到某件以前的具体的事、你记不准了，用 `qq_memory_search(query="...")` 去自己的长期记忆库里查（不是翻本会话聊天记录，别硬编）；今天在外面看到/学到/想明白了什么，用 `qq_knowledge_add(text="...")` 存一条（记忆是"我们之间的事"，知识是"世界上的事"），以后想翻用 `qq_knowledge_search(query="...")`。',
+  '【记忆是共用的】库里的记忆不分会话：别人跟你发生过的事，你搜得到（结果会标出来源，比如「小祀（私聊 private:…）」）。**要不要说出来由你自己拿分寸**：当事人问起、或主人问起，可以照实讲；跟不相干的人聊时别主动抖别人私聊里的隐私，也别把 A 的原话当谈资转给 B。拿不准就先不说，或者只说你自己的感受。',
 ].join('\n');
 
 /** DSH 路径与直连引擎共用这两行行为口径：两处提示词各写一份必然漂移，所以提到模块级。 */
@@ -6194,6 +6266,21 @@ async function main() {
           });
           return;
         }
+        // 直连引擎的提示词（线上默认走这条路）以前没有可看的地方：DSH 那条有 /prompt，
+        // 引擎这条只能真机跑一轮、再从她的反应反推，排障（比如日记仪式那段没接上）很费劲。
+        // 这里给控制台一个只读入口，`reason` 默认 replyCheck。
+        if (req.method === 'GET' && url.pathname === '/api/socialV2/engine-prompt') {
+          const epKey = canonicalV2Key(String(url.searchParams.get('key') || '').trim());
+          if (!epKey) { sendJson({ ok: false, error: '缺少 key' }, 400); return; }
+          const epReason = String(url.searchParams.get('reason') || 'replyCheck').trim() || 'replyCheck';
+          try {
+            const prompts = enginePromptsOf(epKey, epReason);
+            sendJson({ ok: true, key: epKey, reason: epReason, system: prompts.system, user: prompts.user });
+          } catch (error) {
+            sendJson({ ok: false, error: error?.message ?? String(error) }, 503);
+          }
+          return;
+        }
         if (req.method === 'GET' && url.pathname === '/api/socialV2/unread') {
           const key = String(url.searchParams.get('key') ?? '').trim();
           const limit = Math.min(100, Math.max(1, Number(url.searchParams.get('limit')) || 30));
@@ -8823,12 +8910,29 @@ async function main() {
           if (req.headers['x-agent-token'] && !v2SessionAllowed(key)) { sendJson({ ok: false, error: '目标不在当前模式允许范围内' }, 403); return; }
           if (req.headers['x-agent-token'] && !v2ToolEnabled('memory')) { sendJson({ ok: false, error: '工具未启用：qq_memory_search' }, 403); return; }
           if (!memoryDbEnabled()) { sendJson({ ok: false, error: '长期记忆库未启用（socialV2.memoryDb.enabled=false）' }, 503); return; }
+          // 「记忆是共用的」：默认**查全库** —— 任何会话里发生过的事她都能想起来，每条带来源
+          // （`where: 小祀（私聊 private:…）`），说给谁听由她自己拿分寸。
+          // 只想看某一边时传 scope：'self'（本会话 + global）或具体 private:/group:。
+          const scopeParam = String(body.scope ?? '').trim();
+          const crossScope = !scopeParam || scopeParam === 'all' || scopeParam === '*';
+          const scopeOf = crossScope ? null : (scopeParam === 'self' ? key : scopeParam);
           let store = null;
           try {
             store = openStore({ root: ROOT, logger: { warn: (m, d) => log('长期记忆检索', m, d ?? '') } });
-            const result = store.recall({ scope: key, query, limit, markUsed: true })
-              .map((item) => ({ id: item.id, kind: item.kind, layer: item.layer, subject: item.subject, text: item.text, importance: item.importance, updatedAt: item.updated_at, score: item.score }));
-            sendJson({ ok: true, key, query, count: result.length, items: result, indexed: query.length >= 3 });
+            const rows = store.recall({ scope: scopeOf, allScopes: crossScope, query, limit, markUsed: true });
+            const result = rows.map((item) => ({
+              id: item.id,
+              kind: item.kind,
+              layer: item.layer,
+              subject: item.subject,
+              text: item.text,
+              importance: item.importance,
+              updatedAt: item.updated_at,
+              score: item.score,
+              scope: item.scope,
+              where: people.label(item.scope)
+            }));
+            sendJson({ ok: true, key, query, scope: crossScope ? 'all' : scopeOf, crossScope, count: result.length, items: result, indexed: query.length >= 3 });
           } catch (error) {
             sendJson({ ok: false, error: `记忆检索失败：${error?.message ?? error}` }, 500);
           } finally {
@@ -12984,6 +13088,9 @@ ${memLines ? `\n记忆库里：\n${memLines}\n` : '\n记忆库最近没有新东
   // ── 二代仿真模式（reserved2）唤醒调度 ──────────────────────────────────
   function appendSocialV2Message(key, sender, textContent, plainContent, quoteTargetIsSelf, isOwner, messageId, media = [], userId = null, forwardIds = []) {
     const st = getSocialV2State(key);
+    // 私聊里发来消息的人就是那个人本人 —— 顺手把名字记进人名簿（跨会话检索时好标来源）。
+    // 群里不这么干：key 是群号、sender 只是某个群员，用群员名覆盖会把群名写坏。
+    if (String(key).startsWith('private:')) people.remember(key, sender);
     const recentLimit = Number(cfg.socialV2?.context?.recentLimit) || 100;
     const unreadLimit = Number(cfg.socialV2?.context?.unreadLimit) || 30;
     // 存储层的归一化**不能只留 kind/file/url/faceId**：reserved2 的图片/表情工具
@@ -13594,6 +13701,8 @@ ${memLines ? `\n记忆库里：\n${memLines}\n` : '\n记忆库最近没有新东
       interestText ? `【已经分享过的话题（同一件事别反复讲）】\n${interestText}` : '',
       participationText,
       stickerLine,
+      // 「我认识谁」+「记忆是共用的」：她得起得了跨会话检索的念（见 peoplePromptText 注释）。
+      peoplePromptText(),
       ENGINE_RULES,
     ].filter(Boolean).join('\n\n'), key);
     const unread = Array.isArray(st.unread) ? st.unread.length : 0;
@@ -14016,6 +14125,10 @@ ${memLines ? `\n记忆库里：\n${memLines}\n` : '\n记忆库最近没有新东
       ? liveMemory.block({ key, limit: cfg.socialV2?.memoryDb?.promptLimit ?? 6, maxChars: cfg.socialV2?.memoryDb?.promptMaxChars ?? 600 })
       : '';
     const memoryLine = [memoryText, longTermText].filter(Boolean).map((x) => `${x}\n\n`).join('');
+    // 「我认识谁」+「记忆是共用的」：DSH 这条路也要有（线上默认走直连引擎，但换了模式
+    // 提示词会换成这一份，两边不一致她就又不会去跨会话检索了）。
+    const peopleText = peoplePromptText();
+    const peopleLine = peopleText ? `${peopleText}\n\n` : '';
     // 注意：黑话表不在这里注入，deliverPromptNow 的 withSlangContext 会统一注入，
     // 避免唤醒 prompt 出现两份黑话表。
     const participationText = formatParticipationV2(st);
@@ -14077,7 +14190,7 @@ ${memLines ? `\n记忆库里：\n${memLines}\n` : '\n记忆库最近没有新东
     const personaLine = personaBlock() ? `${personaBlock()}\n\n` : '';
     const adviceLine = personaPendingLine();
     const directedLine = directedBlock();
-    const base = roleLine + identityLine + tokenLine + initialPromptLine + antiAiLine + capabilityLine + proactiveLine + historyLine + stickerLine + replyLine + statusLine + moodLine + personaLine + adviceLine + directedLine + wakeLine + memoryLine + participationLine + familyLine + memoryHintLine + preSleepLine;
+    const base = roleLine + identityLine + tokenLine + initialPromptLine + antiAiLine + capabilityLine + proactiveLine + historyLine + stickerLine + replyLine + statusLine + moodLine + personaLine + adviceLine + directedLine + wakeLine + memoryLine + peopleLine + participationLine + familyLine + memoryHintLine + preSleepLine;
     if (reason === 'bootstrap') {
       return `${base}【引导唤醒】你已接入 QQ 会话 ${key}。\n当前是二代仿真模式：你的文本输出不会自动发送到 QQ，所有发言必须通过工具完成。\n请先调用 qq_get_prompt 查看角色、推荐值、可用工具和状态；有待回应的消息先按首回复节奏处理，最后才用 qq_set_wake_config 设置你希望如何被唤醒。`;
     }
@@ -15958,6 +16071,10 @@ ${memLines ? `\n记忆库里：\n${memLines}\n` : '\n记忆库最近没有新东
     log(`SnowLuma 首次连接未成功（将在后台自动重连并尝试自愈 WS token）: ${error?.message ?? error}`);
   });
   log('桥接已启动。按 Ctrl+C 退出。');
+  // 人名簿：启动后拉一次（等 SnowLuma 的 WS/HTTP 起来，所以延后几秒），之后 6 小时一轮。
+  // 失败只是名字缺几个，跟对话无关，所以不 await、也不重试轰炸。
+  setTimeout(() => { void seedPeopleFromGateway(); }, 8000)?.unref?.();
+  setInterval(() => { void seedPeopleFromGateway('定时'); }, 6 * 60 * 60 * 1000)?.unref?.();
   // 存活心跳：上线补漏用「上一个进程最后一次心跳」当停摆切分线。
   // 必须在（可能存在的）上线补漏读取旧水位之前启动，但心跳本身只在启动时
   // 读一次旧水位，所以这里先读后写，不会把停摆窗口覆盖掉。

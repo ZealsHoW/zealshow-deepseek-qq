@@ -55,6 +55,28 @@ function createLiveMemory() {
   };
 }
 
+/**
+ * 人名簿（scope → 名字）同样是桩：夹具里不落盘，也测不到真实网关同步。
+ * 真行为由 scripts/test-qqb-memory-people.mjs 回归；这里只要「别让桥接 ReferenceError」。
+ */
+function createPeopleDirectory() {
+  return {
+    filePath: null,
+    load: () => {},
+    save: () => false,
+    remember: () => false,
+    get: () => null,
+    label: (scope) => {
+      const key = String(scope ?? '').trim();
+      if (!key) return '不认识的人';
+      return `${key.startsWith('group:') ? '群聊' : '私聊'} ${key}`;
+    },
+    nameOf: () => '',
+    entries: () => [],
+    size: () => 0,
+  };
+}
+
 // 摄入层同样是惰性桩：夹具里不能真去开库（同上，EPERM）。
 function openStore() {
   return null;
@@ -402,6 +424,7 @@ export async function bridgeHarness({ config = {}, savedState, files = {}, globa
     NodeApiClient: class { constructor() { return api; } },
     SnowLumaWebSocketClient: FakeBot, text: (s) => s,
     createLiveMemory,
+    createPeopleDirectory,
     openStore,
     createIntake,
     discoverDshLaunchToken: () => '', unwrap, createTurnCollector,

@@ -49,6 +49,38 @@ test('记忆库：分层与 scope 隔离（群聊里召不到私聊记忆）', (
   }
 });
 
+test('记忆库：allScopes 跨会话召回（她主动检索用），默认仍按 scope 隔离', () => {
+  const clock = clockAt('2026-10-21T03:00:00+08:00');
+  const store = openStore({ root: tmpdir('cross'), now: clock.now });
+  try {
+    store.remember({ layer: 'private', scope: 'private:1000000001', kind: 'fact', text: '爸爸喜欢喝无糖可乐' });
+    store.remember({ layer: 'group', scope: 'group:900000001', kind: 'topic', text: '大家在聊装修' });
+    store.remember({ layer: 'normal', scope: 'private:1000000003', kind: 'fact', text: '朋友在准备考试' });
+    store.remember({ layer: 'normal', scope: 'global', kind: 'preference', text: '她喜欢被人叫小鲸鱼' });
+
+    // 群里问起「可乐」：默认窗口里那条私聊记忆仍然不可见（提示词注入不跨会话）。
+    assert.deepEqual(store.recall({ scope: 'group:900000001', query: '可乐' }), []);
+
+    // 她主动跨会话检索：能查到爸爸私聊里的那条，并且带 scope/where 来源。
+    const across = store.recall({ scope: 'group:900000001', allScopes: true, query: '可乐' });
+    assert.equal(across.length, 1);
+    assert.equal(across[0].scope, 'private:1000000001');
+
+    const all = store.recall({ scope: 'group:900000001', allScopes: true, query: '' });
+    assert.equal(all.length, 4, 'allScopes 不受 scope 限制');
+    assert.deepEqual(all.map((item) => item.scope).sort(), ['global', 'group:900000001', 'private:1000000001', 'private:1000000003']);
+
+    // 只给 allScopes、不给 scope 也一样（= 全库）。
+    assert.equal(store.recall({ allScopes: true, query: '' }).length, 4);
+
+    // 最近记忆也支持跨会话（人名簿靠它列「我认识谁」时不会串门）。
+    assert.equal(store.recentMemories({ scope: 'group:900000001', allScopes: true }).length, 4);
+    assert.equal(store.recentMemories({ scope: 'group:900000001' }).length, 2, '不传 allScopes 仍是群 + global');
+  } finally {
+    store.close();
+  }
+});
+
 test('记忆库：重复事实合并（含空格/大小写归一），不同 scope/kind 不合并', () => {
   const clock = clockAt('2026-10-21T03:00:00+08:00');
   const store = openStore({ root: tmpdir('dedup'), now: clock.now });

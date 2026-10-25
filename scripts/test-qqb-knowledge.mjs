@@ -168,6 +168,28 @@ test('接线：知识/记忆检索的路由、MCP 工具、工具开关都在', 
   assert.ok(BRIDGE_SRC.includes('qq_memory_search / qq_memory_remove'), 'memory 能力表没补 qq_memory_search');
 });
 
+test('接线：记忆是共用的（跨会话检索 + 人名簿标注来源）', () => {
+  // 路由：默认查全库，显式传 scope 才收窄；每条带 people.label() 出来的来源。
+  assert.ok(BRIDGE_SRC.includes("const crossScope = !scopeParam || scopeParam === 'all' || scopeParam === '*'"));
+  assert.ok(BRIDGE_SRC.includes('allScopes: crossScope'), 'memory-search 要把 crossScope 传给 recall');
+  assert.ok(BRIDGE_SRC.includes('where: people.label(item.scope)'), '检索结果要标来源');
+  assert.ok(BRIDGE_SRC.includes("scopeParam === 'self' ? key : scopeParam"), "scope=self 要落回当前会话");
+  // 人名簿：提示词里列「我认识谁」、私聊来消息时顺手记名字。
+  assert.ok(BRIDGE_SRC.includes('function peoplePromptText('));
+  assert.ok(BRIDGE_SRC.includes('peoplePromptText(),'), '人名簿没进 buildEnginePrompts');
+  assert.ok(BRIDGE_SRC.includes("if (String(key).startsWith('private:')) people.remember(key, sender);"));
+  assert.ok(BRIDGE_SRC.includes('async function seedPeopleFromGateway('), '人名簿要从网关同步名字');
+  // MCP 工具：能指定 scope，并把来源念出来。
+  assert.ok(/scope: z\.string\(\)\.optional\(\)\.describe\(/.test(MCP_SRC), 'qq_memory_search 缺 scope 参数');
+  assert.ok(MCP_SRC.includes('（来自：${it.where}）'), '工具输出要带来源');
+  assert.ok(MCP_SRC.includes('data?.crossScope'), '跨会话查的结果要标一下');
+  // 铁律里要教她「记忆是共用的、说不说由自己定」。
+  assert.ok(BRIDGE_SRC.includes('【记忆是共用的】'));
+  // 排障口：DSH 那条有 /prompt，直连引擎那条也要能看到提示词（否则只能真机跑一轮反推）。
+  assert.ok(/url\.pathname === '\/api\/socialV2\/engine-prompt'/.test(BRIDGE_SRC), '缺 engine-prompt 调试路由');
+  assert.ok(BRIDGE_SRC.includes('enginePromptsOf(epKey, epReason)'), 'engine-prompt 要按 key/reason 取提示词');
+});
+
 test('接线：唤醒提示词里有知识库最近几条 + 检索指引', () => {
   assert.ok(BRIDGE_SRC.includes('function knowledgeRecentText('), 'knowledgeRecentText 缺失');
   assert.ok(BRIDGE_SRC.includes('store.knowledge.recent({ scope: key, limit })'));

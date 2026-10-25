@@ -2,8 +2,9 @@
 //
 // 三条铁律：
 //  1) 所有对外方法都不抛错。记忆库坏了只降级成「没有长期记忆」，绝不能拖垮桥接主循环。
-//  2) 分层隔离：会话 key 决定分层（private / normal / group），召回只取本层，
-//     私聊内容永远不会出现在群聊提示词里（除了显式写成 scope='global' 的层内记忆）。
+//  2) 默认分层隔离：会话 key 决定分层（private / normal / group），注入提示词的 block()只取本层，
+//     群聊提示词里不会平白冒出私聊内容。**但她主动检索时可以跨会话**（recallAcrossScopes）：
+//     别人那边发生过的事她都能想起来，只是要不要说出来由她自己拿分寸（主人 2026-10-25 的要求）。
 //  3) 写入走 store.remember()（自带去重合并 + 提炼配额），删除走 store.forget()（软删除，可追溯）。
 import path from 'node:path';
 import { KINDS, openStore } from './store.mjs';
@@ -283,6 +284,38 @@ export function createLiveMemory({
           source: row.source,
           updatedAt: row.updatedAt ?? row.updated_at ?? null,
           useCount: row.useCount ?? row.use_count ?? 0,
+        }));
+      }, []);
+    },
+
+    /**
+     * 跨会话召回：不限定 scope，整个库都查（结果带 scope，调用方再翻成人名）。
+     *
+     * 用途只有一个 —— 她自己主动检索（`qq_memory_search`）。提示词注入仍然走 `block()`
+     * 的分层视角，所以「她脑子里时刻装着全库」不会发生：想知道谁那边的事，就去查一次。
+     */
+    recallAcrossScopes({ query, limit = 12, kinds } = {}) {
+      return guard('recallAcrossScopes', () => {
+        const st = open();
+        if (!st) return [];
+        const rows = st.recall({
+          allScopes: true,
+          kinds: Array.isArray(kinds) && kinds.length ? kinds : null,
+          query,
+          limit,
+          markUsed: false,
+        });
+        return rows.map((row) => ({
+          id: row.id,
+          scope: row.scope,
+          kind: row.kind,
+          layer: row.layer,
+          subject: row.subject ?? null,
+          text: row.text,
+          score: row.score,
+          importance: row.importance,
+          source: row.source,
+          updatedAt: row.updated_at ?? null,
         }));
       }, []);
     },

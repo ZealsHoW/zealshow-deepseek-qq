@@ -3,7 +3,10 @@
 // 为什么是 SQLite：Node 内置 `node:sqlite`（本机 v24，无需三方依赖），单文件可拷可查可导出，
 // 备份/回滚跟着 state 一起走。设计取舍：
 //   · **分层**：private（只属于某个私聊对象）/ normal（一般对话）/ group（群聊公开）。
-//     召回时按 scope 过滤，群聊里永远召不到 private 记忆 —— 这是硬边界，不是提示词约束。
+//     默认召回按 scope 过滤（提示词注入永远是本会话视角，group 里不会平白出现 private 记忆）；
+//     但**她主动检索时**（`qq_memory_search` → `recall({ allScopes: true })`）可以查全库，
+//     结果带 scope 来源 —— 2026-10-25 主人的要求：跨会话的事她都得能想起来，
+//     「说给谁听 / 说不说」由她自己拿分寸，而不是被库直接挡住。
 //   · **重复事实合并**（不再长成一堆近义条目）：按 (layer|scope|kind|归一化文本) 的哈希去重，
 //     命中就把 use_count/importance/updated_at 合并，并在 merges 表留痕。
 //   · **节流**：`source='llm-extract'` 的写入要先过 budgets 配额（默认 30 条/小时/scope），
@@ -359,6 +362,8 @@ export function openStore(options = {}) {
   function recall(query = {}) {
     const ts = nowMs(now);
     const scope = query.scope ? String(query.scope) : null;
+    // 跨会话召回（只有「她自己主动查」这条路上才开）：不加 scope 条件 = 全库。
+    const allScopes = query.allScopes === true;
     const layers = query.layers ? query.layers.map(String) : null;
     const kinds = query.kinds ? query.kinds.map(String) : null;
     const limit = Number.isFinite(query.limit) ? Math.max(1, query.limit) : 10;
@@ -367,7 +372,7 @@ export function openStore(options = {}) {
 
     const where = ['deleted_at IS NULL', 'archived_at IS NULL', '(expires_at IS NULL OR expires_at > ?)'];
     const params = [ts];
-    if (scope) { where.push('(scope = ? OR scope = ?)'); params.push(scope, 'global'); }
+    if (scope && !allScopes) { where.push('(scope = ? OR scope = ?)'); params.push(scope, 'global'); }
     if (layers?.length) { where.push(`layer IN (${layers.map(() => '?').join(',')})`); params.push(...layers); }
     if (kinds?.length) { where.push(`kind IN (${kinds.map(() => '?').join(',')})`); params.push(...kinds); }
     // 有关键词走全文索引（走索引才叫「检索」，老实现是全表 LIKE 扫 500 行再打分）；
@@ -408,13 +413,14 @@ export function openStore(options = {}) {
   /** 最近的记忆（不分层过滤时按 scope 收敛：「我们最近在聊什么」比检索更常用）。 */
   function recentMemories(query = {}) {
     const scope = query.scope ? String(query.scope) : null;
+    const allScopes = query.allScopes === true;
     const layers = Array.isArray(query.layers) && query.layers.length ? query.layers.map(String) : null;
     const kinds = Array.isArray(query.kinds) && query.kinds.length ? query.kinds.map(String) : null;
     const limit = Math.max(1, Math.min(100, Number(query.limit) || 8));
     const ts = nowMs(now);
     const where = ['deleted_at IS NULL', 'archived_at IS NULL', '(expires_at IS NULL OR expires_at > ?)'];
     const params = [ts];
-    if (scope) { where.push('(scope = ? OR scope = ?)'); params.push(scope, 'global'); }
+    if (scope && !allScopes) { where.push('(scope = ? OR scope = ?)'); params.push(scope, 'global'); }
     if (layers) { where.push(`layer IN (${layers.map(() => '?').join(',')})`); params.push(...layers); }
     if (kinds) { where.push(`kind IN (${kinds.map(() => '?').join(',')})`); params.push(...kinds); }
     return db.prepare(`SELECT * FROM memories WHERE ${where.join(' AND ')} ORDER BY updated_at DESC LIMIT ?`)

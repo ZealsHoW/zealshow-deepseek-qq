@@ -82,6 +82,7 @@
     "test:qqb-core": "node scripts/test-qqb-core.mjs",
     "test:qqb-memory": "node scripts/test-qqb-memory.mjs",
     "test:qqb-memory-live": "node scripts/test-qqb-memory-live.mjs",
+    "test:qqb-memory-people": "node scripts/test-qqb-memory-people.mjs",
     "test:qqb-memory-intake": "node scripts/test-qqb-memory-intake.mjs",
     "test:qqb-net": "node scripts/test-qqb-net.mjs",
     "test:qqb-mood": "node scripts/test-qqb-mood.mjs",
