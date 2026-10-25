@@ -739,7 +739,7 @@ filter: asetrate=32000*0.8909, aresample=32000, atempo=1.1225
 
 ```powershell
 # 1) 句子级转写 + 按句边界切候选（产物 audio/cand/seg-*.wav 与 sentences.json）
-python scripts/pick-ref-segment.py --audio ../sound/小鲸.wav --min-seconds 4 --max-seconds 10
+python scripts/pick-ref-segment.py --audio ../sound/小鲸.wav --min-seconds 4 --max-seconds 10 --clean gentle
 
 # 2) 每个候选各合成同一句探针（台词默认固定，横向比才可比）
 npm run voice:probe -- --ref audio/cand/seg-01-33p00-39p00.wav `
@@ -747,7 +747,8 @@ npm run voice:probe -- --ref audio/cand/seg-01-33p00-39p00.wav `
 ```
 
 1. **句子级转写拿时间戳**：脚本里是 `funasr` 的 `paraformer-zh` + `fsmn-vad` + `ct-punc` 跑 `generate(input=..., sentence_timestamp=True)`，`r[0].sentence_info` 给每句 `{start, end, text}`（毫秒）。113.3 秒的录音切出 10 句、231 字。
-2. **在标点边界切候选**（4~10 秒、单句或不跨句），统一过清洗链 `highpass=f=70,acompressor=threshold=-18dB:ratio=2.5:attack=8:release=120,alimiter=limit=0.70,loudnorm=I=-17:TP=-3:LRA=9`，输出 32 kHz / 单声道 / pcm_s16le。
+2. **在标点边界切候选**（4~10 秒、单句或不跨句），输出 32 kHz / 单声道 / pcm_s16le。清洗链有 `--clean` 三档，**默认 `gentle`**（只 `highpass=f=70` + `afftdn=nr=6:nf=-55` 轻降噪 + 剪掉首尾静音），`off` 完全不处理（素材本身干净时首选），`legacy` 是带 `acompressor` + `alimiter` + `loudnorm` 的老链，只用来复现历史样本。
+   **为什么默认不带压缩**（2026-10-25 真机教训）：主人听完三条样音说「都有杂音，感觉有回声」。压缩+限幅+响度归一会把**句子之间的底噪和房间混响尾巴一起抬起来**，GPT-SoVITS 克隆时把这些也学进去，听感就成了回声。实测 `sound\小鲸.wav`：静音段 RMS 平均 −83.7 dB，但 p90 −46.3、峰值 −37.6，句间常驻底噪约 −31 dB（说话 p90 −10.6 dB），本来就只有约 20 dB 余量 —— 再压缩一层就非常明显了。`scripts/clone-voice.py` 那条路本来就不加任何滤镜（只重采样+单声道），所以「换音色」优先走 `voice:clone`，别自己手搓滤镜链。
 3. **每个候选各合成同一句探针**（`voice:probe` 的默认台词是「主人，你听，这是我的声音。你觉得这样说话好听吗？」），然后两边都量中位 F0 与频谱质心。
 4. **选「探针最贴近源片段」的那版**，同时要求探针的 ASR 完整。实测：源句 33.09–38.94「这个可以买吗？我感觉跟我还挺像的，好像还有更大的好可爱。」源片段 F0 295 / 质心 1603，用它克隆出 297 / 1671 —— 差得最少；另一句「姐姐，原来你在这儿啊」音高起伏太大，克隆出来 F0 飙到 394，弃。
 

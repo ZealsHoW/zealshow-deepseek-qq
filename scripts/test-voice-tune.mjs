@@ -106,3 +106,16 @@ test('接线：挑参考片段的两步（切候选 / 合成探针）都写进�
   assert.ok(fs.existsSync(path.join(ROOT, 'scripts', 'pick-ref-segment.py')), '缺 scripts/pick-ref-segment.py');
   assert.ok(fs.existsSync(path.join(ROOT, 'scripts', 'voice-probe.mjs')), '缺 scripts/voice-probe.mjs');
 });
+
+test('朴素：切参考片段的默认清洗链不许再带压缩/限幅/loudnorm（2026-10-25「回声」教训）', () => {
+  const py = fs.readFileSync(path.join(ROOT, 'scripts', 'pick-ref-segment.py'), 'utf8');
+  const gentleAt = py.indexOf("'gentle':");
+  const offAt = py.indexOf("'off':");
+  assert.ok(gentleAt > 0 && offAt > gentleAt, 'pick-ref-segment.py 里应该有 gentle / off 两档清洗链');
+  const gentle = py.slice(gentleAt, offAt);
+  for (const bad of ['acompressor', 'alimiter', 'loudnorm']) {
+    assert.ok(!gentle.includes(bad), `默认清洗链里不该有 ${bad}：它抬底噪和混响尾巴，克隆会学成回声`);
+  }
+  assert.ok(py.includes('--clean') || py.includes("add_argument('--clean'"), '缺 --clean 开关');
+  assert.ok(README.includes('--clean'), 'README 没写清洗链怎么选');
+});

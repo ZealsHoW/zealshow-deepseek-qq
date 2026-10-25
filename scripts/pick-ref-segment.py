@@ -29,13 +29,35 @@ import shutil
 import subprocess
 import sys
 
-# 清洗链：与 audio/ref 下那批 soft 参考一致（高通去隆隆声 → 轻压缩 → 限幅 → 统一响度）。
-CLEAN_CHAIN = (
-    'highpass=f=70,'
-    'acompressor=threshold=-18dB:ratio=2.5:attack=8:release=120,'
-    'alimiter=limit=0.70,'
-    'loudnorm=I=-17:TP=-3:LRA=9'
-)
+# 清洗链有讲究（2026-10-25 主人听完三条样音的评价：「都有杂音，感觉有回声」）。
+# 旧链是「高通 → 压缩 → 限幅 → loudnorm」，压缩和限幅把句子之间的底噪、房间混响
+# 尾巴一起抬了起来 —— 克隆时 GPT-SoVITS 会把这些也学进去，听感就是「回声 / 杂音」。
+# 所以默认改成 gentle：只去隆隆声 + 温和降噪 + 剪掉首尾静音，不做任何动态处理，
+# 也不动整体增益（参考音频响度不影响克隆结果，但动态处理会改变音色）。
+CLEAN_CHAINS = {
+    # 默认：保留原始动态，只做最小干预
+    'gentle': (
+        'highpass=f=70,'
+        'afftdn=nr=6:nf=-55,'
+        'silenceremove=start_periods=1:start_threshold=-45dB:start_silence=0.02,'
+        'areverse,silenceremove=start_periods=1:start_threshold=-45dB:start_silence=0.05,areverse'
+    ),
+    # 什么都不做（素材本身已经很干净时首选，少处理一层少一种失真）
+    'off': 'anull',
+    # 老链，只为了复现历史音色样本
+    'legacy': (
+        'highpass=f=70,'
+        'acompressor=threshold=-18dB:ratio=2.5:attack=8:release=120,'
+        'alimiter=limit=0.70,'
+        'loudnorm=I=-17:TP=-3:LRA=9'
+    ),
+}
+
+
+def clean_chain(name):
+    if name not in CLEAN_CHAINS:
+        sys.exit('不认识的清洗链：%s（可选 %s）' % (name, ' / '.join(CLEAN_CHAINS)))
+    return CLEAN_CHAINS[name]
 
 
 def load_config(root):
@@ -98,11 +120,11 @@ def safe_name(seconds):
     return ('%.2f' % seconds).replace('.', 'p')
 
 
-def slice_audio(ffmpeg, audio, start, end, out_path):
+def slice_audio(ffmpeg, audio, start, end, out_path, chain='gentle'):
     dur = max(0.1, end - start)
     cmd = [ffmpeg, '-hide_banner', '-loglevel', 'error', '-y',
            '-ss', '%.3f' % start, '-t', '%.3f' % dur, '-i', audio,
-           '-af', CLEAN_CHAIN, '-ar', '32000', '-ac', '1', '-c:a', 'pcm_s16le', out_path]
+           '-af', clean_chain(chain), '-ar', '32000', '-ac', '1', '-c:a', 'pcm_s16le', out_path]
     subprocess.run(cmd, check=True)
 
 
@@ -115,6 +137,8 @@ def main():
     ap.add_argument('--min-seconds', type=float, default=4.0, help='候选最短时长')
     ap.add_argument('--max-seconds', type=float, default=10.0, help='候选最长时长（GPT-SoVITS 最好别超过 10 秒）')
     ap.add_argument('--max-segments', type=int, default=8)
+    ap.add_argument('--clean', default='gentle', choices=list(CLEAN_CHAINS),
+                    help='清洗链：gentle（默认，只去隆隆声+轻降噪+剪静音）/ off（不处理）/ legacy（老链，带压缩和 loudnorm）')
     ap.add_argument('--no-slice', action='store_true', help='只打印句子，不切音频')
     args = ap.parse_args()
 
@@ -143,7 +167,7 @@ def main():
         if not args.no_slice:
             name = 'seg-%02d-%s-%s.wav' % (i, safe_name(s['start']), safe_name(s['end']))
             out = os.path.join(args.out_dir, name)
-            slice_audio(ffmpeg, audio, s['start'], s['end'], out)
+            slice_audio(ffmpeg, audio, s['start'], s['end'], out, args.clean)
             item['file'] = os.path.join(args.out_dir, name)
             item['bytes'] = os.path.getsize(out)
         manifest.append(item)

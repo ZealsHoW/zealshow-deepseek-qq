@@ -37,7 +37,7 @@ function usage(msg) {
   node scripts/clone-voice.mjs --audio <音频或视频> [--no-set] [--text "试听台词"]
                                 [--send <private:QQ号|group:群号>] [--min-sec 4] [--max-sec 10]
 
-  默认会把 config.json 的 refAudio + refText 一起切到新片段（桥接每次发语音都重读配置，不用重启）。
+  默认会把 config.json 的 refAudio + refText 一起切到新片段（改完**要重启桥接**：voiceCfg() 读的是内存里的配置）。
   --no-set   只切片段并打印结果，不动配置
   --send     切完配置后用新音色合成一句试听，并立刻发出去`);
   process.exit(2);
