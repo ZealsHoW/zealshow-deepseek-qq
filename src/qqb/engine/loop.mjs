@@ -293,6 +293,19 @@ export function createAgentLoop(options = {}) {
     const failedLimit = Math.max(1, Number(request.maxFailedToolCalls) || maxFailedToolCalls);
     let failedStreak = 0;
 
+    // 每轮开跑前刷新一次工具目录。旧行为只在建 engineRuntime 时 refresh 一次、缓存到进程结束，
+    // 于是常驻 MCP 服务（3210）里新加的工具**要重启桥接才进得了模型的眼睛** —— 2026-10-25 踩到：
+    // qq_memory_search / qq_knowledge_add / qq_knowledge_search 已经上线、提示词都在教她用，
+    // 但 3210 还是 10-24 起的旧进程，引擎目录里没有这三件，她只能把工具名当文字写出来。
+    // 刷新失败（服务在重启/探活超时）就沿用上一份目录，绝不让一轮对话因探活失败开不了。
+    if (useTools) {
+      try {
+        await toolbox.refresh();
+      } catch (err) {
+        warn('直连引擎：工具目录刷新失败，沿用上一份', err?.message ?? err);
+      }
+    }
+
     const tools = useTools
       ? toolbox.catalog().filter((spec) => (typeof catalogFilter === 'function' ? catalogFilter(spec, toolbox.find(spec?.function?.name)) !== false : true))
       : [];

@@ -307,6 +307,46 @@ test('回路：模型直接说话 → ok、一步结束、不需要工具', asyn
   }
 });
 
+test('回路：每轮开跑前重新拉一次工具目录（3210 新加的工具不用重启桥接）', async () => {
+  // 2026-10-25 的坑：qq_memory_search / knowledge_* 已经上线、提示词都在教她用，
+  // 但引擎目录是桥接启动时缓存的旧快照，模型压根看不到这三件。
+  const toolsA = [TOOL_STATUS];
+  const mcp = await fakeMcp({ toolsA, toolsB: [] });
+  const fakeModelSrv = await fakeModel([{ content: '嗯' }, { content: '嗯嗯' }]);
+  try {
+    const box = createToolbox({ baseUrl: mcp.baseUrl, token: TOKEN, endpoints: [{ server: 'a', path: '/a/mcp' }] });
+    await box.refresh();
+    const loop = createAgentLoop({ model: modelOf(fakeModelSrv), toolbox: box });
+    await loop.run({ system: 's', user: '第一轮' });
+    assert.equal(fakeModelSrv.calls[0].body.tools.length, 1, '第一轮只有 1 个工具');
+    toolsA.push(TOOL_SEND); // 常驻服务上新加一件，桥接没重启
+    await loop.run({ system: 's', user: '第二轮' });
+    assert.equal(fakeModelSrv.calls[1].body.tools.length, 2, '第二轮就该看到新工具');
+    assert.ok(fakeModelSrv.calls[1].body.tools.some((t) => t.function.name === 'qq_send_message'));
+  } finally {
+    await fakeModelSrv.close();
+    await mcp.close();
+  }
+});
+
+test('回路：工具目录刷新失败也不挡这一轮（沿用上一份目录）', async () => {
+  const mcp = await fakeMcp({ toolsA: [TOOL_STATUS], toolsB: [] });
+  const fakeModelSrv = await fakeModel([{ content: '照常说话' }]);
+  try {
+    const box = createToolbox({ baseUrl: mcp.baseUrl, token: TOKEN, endpoints: [{ server: 'a', path: '/a/mcp' }] });
+    await box.refresh();
+    box.refresh = async () => { throw new Error('3210 正在重启'); };
+    const loop = createAgentLoop({ model: modelOf(fakeModelSrv), toolbox: box });
+    const out = await loop.run({ system: 's', user: 'u' });
+    assert.equal(out.ok, true);
+    assert.equal(out.text, '照常说话');
+    assert.equal(fakeModelSrv.calls[0].body.tools.length, 1, '刷新失败要用缓冲里那份');
+  } finally {
+    await fakeModelSrv.close();
+    await mcp.close();
+  }
+});
+
 test('回路：模型要工具 → 引擎执行 → 把结果塞回去 → 模型再说话', async () => {
   const mcp = await fakeMcp({ toolsA: [TOOL_STATUS, TOOL_SEND], toolsB: [] });
   const fakeModelSrv = await fakeModel([
