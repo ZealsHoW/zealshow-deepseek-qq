@@ -354,6 +354,24 @@ npm run doctor -- --json       # 机器可读
 完整场景手册（症状 → 定位 → 修复 → 验证 → 回滚）见
 [docs/guides/PLUGIN_ENV_PLAYBOOK.md](docs/guides/PLUGIN_ENV_PLAYBOOK.md)。
 
+### 给 MCP 加了新工具？先确认 3210 上的进程是新的
+
+工具定义写在 `src/mcp-snowluma-safe.js` 里，但**真正对外提供工具的是常驻的 `src/mcp-http-host.js`（端口 3210）**。
+改完代码不重启它，`tools/list` 还是旧的 —— 2026-10-25 就踩过：`qq_memory_search` / `qq_knowledge_add` /
+`qq_knowledge_search` 已经上线、提示词都在教小鲸用，3210 却还是前一天起的进程，模型那边根本没有这三件，
+她只能把工具名当文字写出来（日志里看着像「说了没做」）。
+
+```powershell
+# 1) 看现在挂着哪些工具（snowluma 端应为 63 件，host 1 件，websearch 2 件）
+#    必须同时带 accept: application/json, text/event-stream 和 x-mcp-token
+# 2) 确认进程太旧就重启它（别在本会话的后台作业里直接 Start-Process，作业被 kill 会带走子进程树）
+Stop-Process -Id (netstat -ano | Select-String ':3210 .*LISTENING' | ForEach-Object { ($_ -split '\s+')[-1] }) -Force
+schtasks /run /tn "\qq-bridge-watchdog"     # 看门狗发现 3210 没在听，会自己 Start-McpHttpHost
+```
+
+`5a6c68a` 起，直连引擎**每轮开跑前都会重新拉一次工具目录**（失败就沿用上一份），所以 3210 换了新工具
+不用再重启桥接；但如果桥接进程本身起在这笔修复之前，它手里的目录仍是旧快照，那还是得重启一次桥接。
+
 ## 目录结构
 
 ```
