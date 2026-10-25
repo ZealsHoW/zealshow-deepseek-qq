@@ -77,6 +77,15 @@ function createPeopleDirectory() {
   };
 }
 
+/**
+ * 遗忘曲线取情绪：桩成 0（不参与权重），真行为由 test-qqb-memory-ebbinghaus.mjs 回归。
+ * bridge.js 在 memory-update 里会用它算 emotion，缺了就是整片 R 系列报
+ * 「emotionFromText is not defined」。
+ */
+function emotionFromText() {
+  return 0;
+}
+
 // 摄入层同样是惰性桩：夹具里不能真去开库（同上，EPERM）。
 function openStore() {
   return null;
@@ -425,6 +434,7 @@ export async function bridgeHarness({ config = {}, savedState, files = {}, globa
     SnowLumaWebSocketClient: FakeBot, text: (s) => s,
     createLiveMemory,
     createPeopleDirectory,
+    emotionFromText,
     openStore,
     createIntake,
     discoverDshLaunchToken: () => '', unwrap, createTurnCollector,

@@ -19,6 +19,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { canonicalScope, layerForKey } from './live.mjs';
+import { emotionFromText } from './ebbinghaus.mjs';
 
 export const VERSION = '0.1.0';
 
@@ -307,6 +308,7 @@ export function createIntake({
           subject: c.subject,
           text: c.text,
           importance: c.importance,
+          emotion: emotionFromText(c.text),
           confidence: 0.6,
           source: 'history-rule',
           evidence: c.evidence,

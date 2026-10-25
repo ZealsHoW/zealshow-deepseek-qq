@@ -1106,6 +1106,51 @@ GET /api/socialV2/prompt?key=private:3482501440                            # DSH
 
 都带 `x-console-token`；`reason` 可填 `replyCheck` / `proactiveCheck` / `diaryRitual` 等唤醒原因，返回 `{ ok, key, reason, system, user }`。
 
+### 记得住、忘得对、按意思找得回：遗忘曲线 + 向量索引（2026-10-25）
+
+主人的要求是两条合起来的效果：**记忆要像人一样会淡**（艾宾浩斯 + 情绪挂钩权重，淡的沉到底、重的摆最前），**又要按意思找得回来**（RAG 向量检索）。拆成三层，各管一件事：
+
+| 层 | 文件 | 干什么 |
+| --- | --- | --- |
+| 遗忘曲线 | `src/qqb/memory/ebbinghaus.mjs` | 纯函数：情绪估强度、算稳定度 S、算保留率 R、给出权重与清晰度分档 |
+| 向量索引 | `src/qqb/memory/embed.mjs` | `hash-v1`（同步、零依赖）永远在；本机 Ollama 有嵌入模型时再加语义向量 |
+| 混合检索 | `store.mjs` 的 `recall` / `knowledge.search` | 字面命中 + 向量那一路合成 relevance，再与权重合成总分 |
+
+**遗忘曲线**（`R = exp(-t/S)`，`S` 越大记得越久）：
+
+```
+S = base(kind) × (1 + 3·importance) × (1 + 4·emotion) × (1 + 0.6·ln(1 + useCount))   # 封顶 240 天
+effectiveImportance = importance + (1 - importance) × 0.35 × emotion
+weight = effectiveImportance × R
+```
+
+- `base(kind)`：承诺 4 天 > 事实 2.2 > 印象 2 > 偏好 1.8 > 话题 1.5 > 日记 1.4 > 事件 1.2。
+- `emotion`（0~1）写进 `memories.emotion` 列（schema v3）。来源两路取大：文本里的情绪词（`emotionFromText`），和当时心情偏离基线的程度（`bridge.js` 的 `emotionForMemory`）。
+- 同一件事再次被写到/被想起时，`emotion` 取 `MAX`（`mergeTouch`）——**同一件事提起来更动情，说明它在心里更重**。
+- 分档 `depth`：≥0.55 `vivid`（记得很清楚）/ ≥0.32 `clear`（记得）/ ≥0.15 `faint`（有点模糊）/ 其余 `deep`（只记得个大概）。
+- 提示词注入（`block()`）**按 weight 从重到轻排**，低于 `PROMPT_WEIGHT_FLOOR = 0.15` 且跟这轮没关系的不进提示词（沉底，但主动检索仍找得到）。
+- 「复习」= 被召回：`touchUse` 抬高 `use_count`、刷新 `last_used_at`，曲线从头再走。
+
+**RAG 向量索引**（`vectors(kind, ref_id, model, dim, vec, updated_at)`，schema v4）：
+
+- `hash-v1`（384 维，字符 unigram+bigram 哈希、L2 归一）**同步**算，所以提示词那条同步路径也有向量；写入时即落库，老库启动时 `backfillHashVectors()` 补齐。
+- `ollama:bge-m3`（1024 维，本机 `http://127.0.0.1:11434`）只在**异步检索**路径用（`live.search()`：她自己 `qq_memory_search` / 控制台搜索）。模型没装、服务没起、超时 4 秒 → **自动退回 hash-v1**，不报错、不挡对话。装法：`ollama pull bge-m3`（约 1.2 GB）；想换模型给 `QQB_EMBED_MODEL`，换服务地址给 `QQB_OLLAMA_URL`，`QQB_EMBED_MODEL=''` 可以彻底关掉语义通道。
+- 缺的语义向量由 `ensureSemanticVectors()` 按批补（每轮最多 2 批、每批 24 条）；启动 20 秒后与每小时还有一轮 `warmVectors()` 慢慢补完。
+- 打分（两种场景，权重反过来 —— 这里踩过坑）：**有检索词时相关度为主**，记忆 `score = 0.7·relevance + 0.15·weight + 0.1·usage + 0.05·emotion`、知识 `score = 0.7·relevance + 0.2·importance + 0.1·usage`，其中 `relevance = 0.55·余弦 + 0.45·bigram`（hash-v1 时是 `0.6·字面 + 0.4·bigram`）；**没有检索词时（提示词注入按分量挑）** 反过来，`score = 0.6·weight + 0.3·relevance + 0.1·usage`。最早把 `weight` 乘 0.55 放进检索打分，结果「搜什么都返回同一批重要度 0.95 的记忆」（2026-10-25 真机实测），才改成相关度优先。
+- **沾边门槛**：有检索词时，字面没命中、向量又不沾的不返回（否则「查什么都能查回一堆」比查不到更糟）。语义模型要么真有共享的**有信息量 bigram**，要么余弦 ≥`VECTOR_RELEVANCE_FLOOR = 0.6`。两个坑都实测过：①bge-m3 对两段无关的短中文也能给 0.4~0.55（「股票基金怎么买」×「你等会给我带个鸡蛋汉堡」0.44），所以「单靠余弦」这道门不能设 0.2/0.42；②bigram 不筛常用词时，「股票基金怎么买」会靠一个「怎么」召回「第二题怎么做」（`embed.mjs` 的 `COMMON_BIGRAMS`/`informativeBigrams` 就是为此加的）。
+- 因此**offline 时 hash-v1 只能认形近**（「唱歌唱得鼻子酸」能找到「那首歌唱得自己鼻子酸」），真正的换个说法得等 `bge-m3` 装上——这是设计上的诚实兜底，不是 bug。
+
+排障：
+
+```
+GET  /api/socialV2/memory-vectors          # 覆盖了多少条、有哪些模型、语义通道通不通
+POST /api/socialV2/memory-search           # 返回 model/semantic/embedded + 每条 weight/retention/depth
+```
+
+工具输出里每条会带「（记得很清楚）」这类清晰度，她也就能说「这个我记不太清了」。
+
+回归：`npm run test:qqb-memory-ebbinghaus`（S/R/depth 单调性与上限、情绪抬高权重、旧记忆更淡）、`npm run test:qqb-memory-rag`（hash 向量确定/归一、blob 往返、按形近找回、不沾边滤掉、pending 补建、语义缺席回落）；`test-qqb-memory-refine` 里断言了 `emotion` 列与 `vectors` 表（旧库打开会自动补）。
+
 ### 日记 → 说说（每天到点自己写一条）
 
 `socialV2.diary.publish` 打开后，桥接每分钟看一眼表；到了点且**今天还没写过日记**，就唤醒一个会话，让她从两个库里挑今天最值得记的事，写成日记再发成一条说说：

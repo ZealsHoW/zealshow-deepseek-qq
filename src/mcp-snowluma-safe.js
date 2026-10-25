@@ -1093,7 +1093,7 @@ server.tool(
 
 server.tool(
   'qq_memory_search',
-  '在**长期记忆库**里按关键词检索（不是本会话聊天记录，是提炼过的「关于我们的事」：谁答应过什么、聊到过什么、对谁的印象）。聊天里提到某件具体的事、想确认自己记没记错、要接上几天前的话题、或者要想起「跟另一个人发生过什么」时都用它。**记忆是共用的**：默认查全库，别的会话里发生过的事也能搜到，每条会标出来源（谁、私聊还是群）；要不要说出来由你自己拿分寸。库里带 FTS5 全文索引，中文 3 个字以上走索引，1~2 个字自动回落模糊匹配。（只读）',
+  '在**长期记忆库**里按关键词检索（不是本会话聊天记录，是提炼过的「关于我们的事」：谁答应过什么、聊到过什么、对谁的印象）。聊天里提到某件具体的事、想确认自己记没记错、要接上几天前的话题、或者要想起「跟另一个人发生过什么」时都用它。**记忆是共用的**：默认查全库，别的会话里发生过的事也能搜到，每条会标出来源（谁、私聊还是群）；要不要说出来由你自己拿分寸。库是「字面 + 向量」混合检索（按意思找得到，不只是按字面）；每条会标「记得有多清楚」和来源，越淡的越可能只记得个大概。（只读）',
   {
     key: z.string().describe('会话 key，格式 group:群号 或 private:QQ号'),
     token: z.string().describe('会话令牌（见唤醒提示中的【会话令牌】）'),
@@ -1110,7 +1110,11 @@ server.tool(
       });
       const items = Array.isArray(data?.items) ? data.items : [];
       if (!items.length) return { content: [{ type: 'text', text: `记忆库里没搜到跟「${query}」有关的事。` }] };
-      const lines = items.map((it, i) => `${i + 1}. [${it.kind}] ${it.text}${it.subject ? `（${it.subject}）` : ''}${it.where ? `（来自：${it.where}）` : ''}`);
+      const depthText = { vivid: '记得很清楚', clear: '记得', faint: '有点模糊', deep: '只记得个大概' };
+      const lines = items.map((it, i) => {
+        const how = depthText[it.depth] ? `（${depthText[it.depth]}）` : '';
+        return `${i + 1}. [${it.kind}] ${how}${it.text}${it.subject ? `（${it.subject}）` : ''}${it.where ? `（来自：${it.where}）` : ''}`;
+      });
       const scopeHint = data?.crossScope ? '（跨会话查的，带来源）' : '';
       return { content: [{ type: 'text', text: `记忆库里关于「${query}」的有 ${items.length} 条${scopeHint}：\n${lines.join('\n')}` }] };
     } catch (error) {

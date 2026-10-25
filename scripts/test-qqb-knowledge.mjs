@@ -151,8 +151,10 @@ test('接线：知识/记忆检索的路由、MCP 工具、工具开关都在', 
   }
   assert.ok(BRIDGE_SRC.includes("v2ToolEnabled('knowledge')"), '知识库路由要过 knowledge 开关');
   assert.ok(BRIDGE_SRC.includes("v2ToolEnabled('memory')"), '记忆检索要过 memory 开关');
-  assert.ok(BRIDGE_SRC.includes('store.knowledge.add('), '知识入库要落库');
-  assert.ok(BRIDGE_SRC.includes('store.knowledge.search('), '知识检索要落库');
+  // 知识也走 liveMemory（同一份 store + 同一套向量缓存），不再每次另开连接。
+  assert.ok(BRIDGE_SRC.includes('liveMemory.knowledgeAdd('), '知识入库要落库');
+  assert.ok(BRIDGE_SRC.includes("liveMemory.search({ kind: 'knowledge', query, limit, scope: key })"), '知识检索要走 liveMemory.search（RAG 混合检索）');
+  assert.ok(BRIDGE_SRC.includes("liveMemory.search({ kind: 'memory', query, limit, scope: scopeOf })"), '记忆检索要走 liveMemory.search（RAG 混合检索）');
 
   for (const tool of ['qq_memory_search', 'qq_knowledge_add', 'qq_knowledge_search']) {
     assert.ok(MCP_SRC.includes(`'${tool}'`), `${tool} 没注册`);
@@ -171,7 +173,7 @@ test('接线：知识/记忆检索的路由、MCP 工具、工具开关都在', 
 test('接线：记忆是共用的（跨会话检索 + 人名簿标注来源）', () => {
   // 路由：默认查全库，显式传 scope 才收窄；每条带 people.label() 出来的来源。
   assert.ok(BRIDGE_SRC.includes("const crossScope = !scopeParam || scopeParam === 'all' || scopeParam === '*'"));
-  assert.ok(BRIDGE_SRC.includes('allScopes: crossScope'), 'memory-search 要把 crossScope 传给 recall');
+  assert.ok(BRIDGE_SRC.includes('liveMemory.search({ kind: \'memory\', query, limit, scope: scopeOf })'), 'memory-search 要把收窄后的 scope 交给 liveMemory.search');
   assert.ok(BRIDGE_SRC.includes('where: people.label(item.scope)'), '检索结果要标来源');
   assert.ok(BRIDGE_SRC.includes("scopeParam === 'self' ? key : scopeParam"), "scope=self 要落回当前会话");
   // 人名簿：提示词里列「我认识谁」、私聊来消息时顺手记名字。

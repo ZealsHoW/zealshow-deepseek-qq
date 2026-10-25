@@ -463,8 +463,11 @@ test('迁移：v1 旧库打开后补上 archived_at，旧记忆一条不丢', ()
   try {
     const row = check.prepare('SELECT value FROM schema_meta WHERE key = ?').get('schema_version');
     const columns = check.prepare('PRAGMA table_info(memories)').all().map((r) => String(r.name));
-    assert.equal(String(row.value), '2', '版本标记要升到 2，否则每次打开都再补一次列');
+    assert.ok(Number(row.value) >= 2, `版本标记要升到 2+（现在是 ${row.value}），否则每次打开都再补一次列`);
     assert.ok(columns.includes('archived_at'));
+    assert.ok(columns.includes('emotion'), 'schema v3 起 memories 要有 emotion 列');
+    const vecTable = check.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'vectors'").get();
+    assert.ok(vecTable, 'schema v4 起要有 vectors 表（RAG 向量索引）');
   } finally {
     check.close();
     fs.rmSync(root, { recursive: true, force: true });

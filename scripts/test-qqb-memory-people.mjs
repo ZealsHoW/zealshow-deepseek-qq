@@ -59,6 +59,24 @@ test('人名簿：group: 开头的 key 自动算群，备注不会丢', () => {
   assert.equal(people.get('private:704183420').name, '谢哥哥');
 });
 
+test('人名簿：会话类型词不算名字；网关备注不会被消息里的昵称盖掉', () => {
+  const people = createPeopleDirectory({ now: () => 1790000000000 });
+  // 2026-10-25 真机：owner 那条被消息链路写成了「私聊」，把网关的昵称顶掉了。
+  for (const bad of ['私聊', '群聊', '群', 'QQ用户', '联系人']) {
+    assert.equal(people.remember('private:3482501440', bad), false, `${bad} 不是名字`);
+  }
+  assert.equal(people.size(), 0);
+
+  assert.equal(people.remember('private:3482501440', 'ZealsHoW', { note: 'remark' }), true);
+  assert.equal(people.get('private:3482501440').note, 'remark');
+  // 私聊来消息时只传昵称：不能把网关备注（remark）反盖回去。
+  assert.equal(people.remember('private:3482501440', '某个昵称'), false);
+  assert.equal(people.get('private:3482501440').name, 'ZealsHoW');
+  // 备注自己更新（又同步到一次 remark）仍然允许。
+  assert.equal(people.remember('private:3482501440', '爸爸', { note: 'remark' }), true);
+  assert.equal(people.get('private:3482501440').name, '爸爸');
+});
+
 test('人名簿：落盘后重新打开还在；目录不存在会自动建', () => {
   const filePath = tempFile();
   const first = createPeopleDirectory({ filePath, now: () => 1790000000000 });

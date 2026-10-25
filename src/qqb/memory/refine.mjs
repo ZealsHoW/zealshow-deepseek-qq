@@ -23,6 +23,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { canonicalScope, layerForKey } from './live.mjs';
 import { listHistoryKeys, readHistorySince } from './intake.mjs';
+import { emotionFromText } from './ebbinghaus.mjs';
 
 export const VERSION = '0.1.1';
 
@@ -450,6 +451,7 @@ export function createRefiner({
           subject: fact.subject,
           text: fact.text,
           importance: fact.importance,
+          emotion: emotionFromText(fact.text),
           confidence: fact.confidence,
           source: 'llm-extract',
           evidence: fact.evidence,

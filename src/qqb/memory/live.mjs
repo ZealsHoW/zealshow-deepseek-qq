@@ -8,8 +8,10 @@
 //  3) 写入走 store.remember()（自带去重合并 + 提炼配额），删除走 store.forget()（软删除，可追溯）。
 import path from 'node:path';
 import { KINDS, openStore } from './store.mjs';
+import { HASH_MODEL, createEmbedder, hashVector } from './embed.mjs';
+import { PROMPT_WEIGHT_FLOOR, emotionFromText } from './ebbinghaus.mjs';
 
-export const VERSION = '0.1.0';
+export const VERSION = '0.3.0';
 
 /** social-v2 的类别 → 记忆库类型。 */
 const CATEGORY_TO_KIND = Object.freeze({
@@ -86,6 +88,9 @@ export function createLiveMemory({
   extractWindowMs = 3600000,
   minScore = 0.35,
   warnIntervalMs = 60000,
+  ollamaUrl,
+  ollamaModel,
+  embedTimeoutMs = 4000,
 } = {}) {
   if (!root) throw new Error('createLiveMemory 需要 root');
   const rootDir = path.resolve(String(root));
@@ -93,6 +98,14 @@ export function createLiveMemory({
   let store = null;
   let failure = null;
   let lastWarnAt = 0;
+  // 向量通道：hash-v1 永远在（同步）；ollama 的语义向量有就更好、没有也不挡路。
+  const embedder = createEmbedder({
+    ollamaUrl: ollamaUrl ?? process.env.QQB_OLLAMA_URL ?? 'http://127.0.0.1:11434',
+    ollamaModel: ollamaModel === undefined ? (process.env.QQB_EMBED_MODEL ?? 'bge-m3') : ollamaModel,
+    timeoutMs: embedTimeoutMs,
+    logger,
+  });
+  let semanticFailedAt = 0;
 
   function warn(message, detail) {
     const ts = now();
@@ -141,6 +154,32 @@ export function createLiveMemory({
     return KINDS.includes(cat) ? cat : 'fact';
   }
 
+  /**
+   * 把某个库还缺的语义向量补上（多批、有限批）。Ollama 缺席时是空转，绝不抛。
+   * 补完才查，否则「刚写进去的记忆搜不到」会让人以为向量没生效。
+   */
+  async function ensureSemanticVectors(kind, st, { batches = 2, batchSize = 24 } = {}) {
+    if (!embedder.semantic) return { embedded: 0 };
+    let embedded = 0;
+    try {
+      for (let round = 0; round < batches; round += 1) {
+        const pending = st.vectors.pending({ kind, model: embedder.semantic.id, limit: batchSize });
+        if (!pending.length) break;
+        const vectors = await embedder.semantic.embed(pending.map((row) => String(row.text ?? '')));
+        for (let i = 0; i < pending.length; i += 1) {
+          if (vectors[i]?.length) {
+            st.vectors.set(kind, pending[i].id, embedder.semantic.id, vectors[i]);
+            embedded += 1;
+          }
+        }
+        if (pending.length < batchSize) break;
+      }
+    } catch (err) {
+      warn('语义向量补建失败（这批先走 hash-v1）', { kind, error: String(err?.message ?? err) });
+    }
+    return { embedded };
+  }
+
   return {
     version: VERSION,
     path: dbFile,
@@ -159,7 +198,7 @@ export function createLiveMemory({
      * 把一条 social-v2 记忆镜像进长期库。
      * 返回 { action: inserted|merged|revived|rejected, ... }；库不可用时返回 null。
      */
-    rememberSocialEvent({ key, category, content, extra, source = 'bridge-social', importance } = {}) {
+    rememberSocialEvent({ key, category, content, extra, source = 'bridge-social', importance, emotion } = {}) {
       return guard('rememberSocialEvent', () => {
         const st = open();
         if (!st) return null;
@@ -169,12 +208,15 @@ export function createLiveMemory({
         const owner = ownerQQ();
         const layer = layerForKey(key, owner);
         const subject = String(extra?.target ?? '').trim() || null;
+        // 情绪：调用方给（当前心情 + 文本信号）优先，没给就按文本里的情绪字眼估一个。
+        const moodWeight = Number.isFinite(emotion) ? Math.min(1, Math.max(0, emotion)) : emotionFromText(text);
         return st.remember({
           layer,
           scope: canonicalScope(key),
           kind,
           subject,
           text,
+          emotion: moodWeight,
           importance: Number.isFinite(importance) ? importance : (KIND_IMPORTANCE[kind] ?? 0.5),
           confidence: 0.7,
           source,
@@ -238,16 +280,29 @@ export function createLiveMemory({
         const st = open();
         if (!st) return '';
         const owner = ownerQQ();
+        const queryText = String(query ?? '').trim();
         const rows = st.recall({
           scope: canonicalScope(key),
           layers: layersForSession(key, owner),
-          query,
-          limit,
-          minScore,
+          query: queryText,
+          limit: Math.max(limit * 4, 24),
+          minScore: 0,
+          // 同步路径只有 hash-v1（提示词组装是同步的，不能等 Ollama）。
+          vector: queryText ? hashVector(queryText) : null,
+          vectorModel: HASH_MODEL,
         });
         if (!rows.length) return '';
-        const head = '【记得的事】以下是你跨会话记住的（不是刚发生的新消息，别当成对方刚说的）：';
-        const lines = rows.map((row) => {
+        // 重量级的分往前站（主人 2026-10-25：「权重高的放越醒目的位置」）：
+        // weight 是「重要度 × 遗忘曲线保留率」，vivid 的先说、faint 的垫后；
+        // deep（快忘了）平时不自己冒进提示词，除非这次的话正好沾边——
+        // 字面命中或余弦够近，那说明「她这会儿真想起来了」。
+        const relevant = (row) => (row.match ?? 0) >= 0.6 || (row.vector ?? 0) >= 0.35;
+        const strong = rows.filter((row) => row.weight >= PROMPT_WEIGHT_FLOOR || relevant(row));
+        const picked = (strong.length ? strong : rows)
+          .sort((a, b) => b.weight - a.weight || b.score - a.score)
+          .slice(0, limit);
+        const head = '【记得的事】以下是你跨会话记住的（越靠前记得越清楚，越靠后越模糊；不是刚发生的新消息，别当成对方刚说的）：';
+        const lines = picked.map((row) => {
           const label = KIND_LABEL[row.kind] ?? row.kind;
           const subject = row.subject ? `${clip(row.subject, 16)}：` : '';
           return `- （${label}）${subject}${clip(row.text, lineChars)}`;
@@ -265,13 +320,17 @@ export function createLiveMemory({
         const st = open();
         if (!st) return [];
         const owner = ownerQQ();
+        const queryText = String(query ?? '').trim();
         const rows = st.recall({
           scope: canonicalScope(key),
           layers: layersForSession(key, owner),
           kinds: Array.isArray(kinds) && kinds.length ? kinds : null,
-          query,
+          query: queryText,
           limit,
+          minScore: 0,
           markUsed: false,
+          vector: queryText ? hashVector(queryText) : null,
+          vectorModel: HASH_MODEL,
         });
         return rows.map((row) => ({
           id: row.id,
@@ -284,6 +343,12 @@ export function createLiveMemory({
           source: row.source,
           updatedAt: row.updatedAt ?? row.updated_at ?? null,
           useCount: row.useCount ?? row.use_count ?? 0,
+          // 遗忘曲线把「此刻还记得多清楚」摊开给调用方（控制台/排障看得到深浅）。
+          weight: row.weight,
+          retention: row.retention,
+          depth: row.depth,
+          emotion: row.emotion,
+          vector: row.vector ?? null,
         }));
       }, []);
     },
@@ -298,12 +363,16 @@ export function createLiveMemory({
       return guard('recallAcrossScopes', () => {
         const st = open();
         if (!st) return [];
+        const queryText = String(query ?? '').trim();
         const rows = st.recall({
           allScopes: true,
           kinds: Array.isArray(kinds) && kinds.length ? kinds : null,
-          query,
+          query: queryText,
           limit,
+          minScore: 0,
           markUsed: false,
+          vector: queryText ? hashVector(queryText) : null,
+          vectorModel: HASH_MODEL,
         });
         return rows.map((row) => ({
           id: row.id,
@@ -316,8 +385,113 @@ export function createLiveMemory({
           importance: row.importance,
           source: row.source,
           updatedAt: row.updated_at ?? null,
+          weight: row.weight,
+          retention: row.retention,
+          depth: row.depth,
+          emotion: row.emotion,
+          vector: row.vector ?? null,
         }));
       }, []);
+    },
+
+    /**
+     * 统一的检索入口（异步，RAG）：记忆与知识都走这里。
+     * 优先用本机 Ollama 的语义向量；模型没装/服务没起/超时 → 退回 hash-v1，结果照样给。
+     * 它不参与提示词拼装（那条路是同步的），只给「她自己主动查」和控制台排障用。
+     */
+    async search({ kind = 'memory', query, limit = 12, kinds, scope = null, markUsed = true } = {}) {
+      const st = open();
+      if (!st) return { results: [], model: HASH_MODEL, semantic: false, embedded: 0 };
+      const text = String(query ?? '').trim();
+      let model = HASH_MODEL;
+      let vector = text ? hashVector(text) : null;
+      let semantic = false;
+      let embedded = 0;
+      if (embedder.semantic && text) {
+        try {
+          if (await embedder.semanticReady()) {
+            embedded = (await ensureSemanticVectors(kind, st, { batches: 2 })).embedded;
+            const [vec] = await embedder.semantic.embed([text]);
+            if (vec?.length) {
+              vector = vec;
+              model = embedder.semantic.id;
+              semantic = true;
+            }
+          }
+        } catch (err) {
+          const ts = now();
+          if (ts - semanticFailedAt > warnIntervalMs) {
+            semanticFailedAt = ts;
+            warn('语义向量不可用，本次退回 hash-v1', { error: String(err?.message ?? err) });
+          }
+        }
+      }
+      if (kind === 'knowledge') {
+        const rows = st.knowledge.search({ query: text, limit, scope, markUsed, vector, vectorModel: model });
+        return { results: rows, model, semantic, embedded };
+      }
+      const rows = st.recall({
+        ...(scope ? { scope } : { allScopes: true }),
+        kinds: Array.isArray(kinds) && kinds.length ? kinds : null,
+        query: text,
+        limit,
+        minScore: 0,
+        markUsed,
+        vector,
+        vectorModel: model,
+      });
+      return { results: rows, model, semantic, embedded };
+    },
+
+    /** 写一条知识。走同一份 store，哈希向量与内存缓存立刻一致（另开连接的写会让 cache 变旧）。 */
+    knowledgeAdd(entry = {}) {
+      return guard('knowledgeAdd', () => {
+        const st = open();
+        if (!st) return { action: 'rejected', reason: '知识库不可用' };
+        return st.knowledge.add(entry);
+      }, { action: 'rejected', reason: '知识库不可用' });
+    },
+
+    /** 知识库概况（条数/最老/最新），给健康检查用。 */
+    knowledgeStats() {
+      return guard('knowledgeStats', () => {
+        const st = open();
+        return st ? st.knowledge.stats() : null;
+      }, null);
+    },
+
+    /** 向量索引状态：覆盖了多少、有哪些模型、语义通道通不通。 */
+    vectors() {
+      return guard('vectors', () => {
+        const st = open();
+        const base = st ? st.vectors.stats() : { models: [], coverage: { memory: 0, knowledge: 0 } };
+        return { ...base, hash: HASH_MODEL, semantic: embedder.semantic?.id ?? null };
+      }, { models: [], coverage: { memory: 0, knowledge: 0 }, hash: HASH_MODEL, semantic: null });
+    },
+
+    /** 启动/定时预热：本机 Ollama 有嵌入模型时，把缺的语义向量多补几批（不阻塞任何事）。 */
+    async warmVectors({ batches = 10, batchSize = 32 } = {}) {
+      const out = { ready: false, model: embedder.semantic?.id ?? null, memory: 0, knowledge: 0 };
+      const st = open();
+      if (!st) return out;
+      try {
+        out.ready = await embedder.semanticReady();
+        if (!out.ready) return out;
+        out.memory = (await ensureSemanticVectors('memory', st, { batches, batchSize })).embedded;
+        out.knowledge = (await ensureSemanticVectors('knowledge', st, { batches, batchSize })).embedded;
+      } catch (err) {
+        warn('语义向量预热失败（不影响检索）', { error: String(err?.message ?? err) });
+      }
+      return out;
+    },
+
+    /** 语义通道探一下（控制台健康检查/排障用）。 */
+    async embedderReady() {
+      try {
+        return { semantic: Boolean(embedder.semantic), ready: await embedder.semanticReady(), model: embedder.semantic?.id ?? null };
+      } catch {
+        return { semantic: Boolean(embedder.semantic), ready: false, model: embedder.semantic?.id ?? null };
+      }
     },
 
     /** 库的统计信息，给健康检查与 /api/status 用。 */

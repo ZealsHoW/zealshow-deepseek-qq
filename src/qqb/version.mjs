@@ -60,14 +60,14 @@ export const MODULES = {
     note: 'R3 实测探针：OneBot 网关 / 桥接控制台 / 常驻 MCP / Hindsight / state 可写 / 记忆库可打开 / 发送队列积压 / 情绪状态（R2）/ 人设演化与干预（R1b+R5）/ 定向投递待办（R8）/ 媒体能力与失败率（R6）/ 模型直连配置（F）；0.1.9 起 checkBridge 读管理端 presetHealth.broken：DSH 报「装配失败」的 preset 让这个探针报 degraded（此前只认 dshReady，preset 坏了 30 多个小时它一直报 ok——就是那个假绿灯）',
   },
   'memory/store': {
-    version: '0.1.1',
+    version: '0.3.0',
     files: ['src/qqb/memory/store.mjs'],
-    note: 'R1 记忆库：SQLite 分层记忆（private/normal/group）、重复事实合并、提炼配额、人设演变审计（R1b）。0.1.1 起 schema v2：新增 archived_at 与 archiveOld()（旧记忆定期归档，不进召回、可导出、被再次提起时自动复活）',
+    note: 'R1 记忆库：SQLite 分层记忆（private/normal/group）、重复事实合并、提炼配额、人设演变审计（R1b）。0.1.1 起 schema v2：新增 archived_at 与 archiveOld()；0.2.0 起 schema v3：emotion 列 + 艾宾浩斯遗忘曲线（weight/retention/depth）；0.3.0 起 schema v4：vectors 表 + hash-v1/bge-m3 向量、字面+向量混合检索',
   },
   'memory/live': {
-    version: '0.1.0',
+    version: '0.3.0',
     files: ['src/qqb/memory/live.mjs'],
-    note: 'R1 接线层：会话 key→分层、桥接写入镜像、唤醒提示注入块（跨会话召回）',
+    note: 'R1 接线层：会话 key→分层、桥接写入镜像、唤醒提示注入块（跨会话召回）。0.3.0 起提示词按遗忘权重从重到轻排（重的在前、淡的沉底），search()/warmVectors() 走语义向量',
   },
   'memory/intake': {
     version: '0.1.0',

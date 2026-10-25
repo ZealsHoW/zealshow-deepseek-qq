@@ -30,6 +30,7 @@ import { hardenDir, manualDirCommand } from './state-acl.mjs';
 import { extractForwardIds, forwardIdFromData, sanitizeForwardId, formatForwardResponse } from './forward.js';
 import { resolvePriceTable } from './model-prices.js';
 import { createLiveMemory } from './qqb/memory/live.mjs';
+import { emotionFromText } from './qqb/memory/ebbinghaus.mjs';
 import { createPeopleDirectory } from './qqb/memory/people.mjs';
 import { openStore } from './qqb/memory/store.mjs';
 import { createIntake } from './qqb/memory/intake.mjs';
@@ -336,6 +337,22 @@ function moodSetDim(name, value, reason) {
   } catch (error) {
     return { ok: false, error: String(error?.message ?? error) };
   }
+}
+/**
+ * 一条记忆写进库时的情绪强度（0~1）：取「此刻心情偏离平静」与「文本里的情绪字眼」的较大者。
+ * 它只在编码那一刻用一次 —— 当时越动情，这条事在遗忘曲线上留得越久（见 qqb/memory/ebbinghaus.mjs）。
+ */
+function emotionForMemory(text) {
+  const fromText = emotionFromText(text);
+  const snap = moodSnapshot();
+  if (!snap || !snap.dims) return fromText;
+  const d = snap.dims;
+  const delta = Math.max(
+    Math.abs(Number(d.mood ?? 0.62) - 0.62),
+    Math.abs(Number(d.irritation ?? 0.05) - 0.05),
+    Math.abs(Number(d.social ?? 0.55) - 0.55) * 0.8,
+  );
+  return Math.min(1, Math.max(fromText, delta * 2));
 }
 // ── R1b 人设演变 / R5 干预通道（阶段 D）──────────────────────────────────────
 // 人格卡不是写死的模板：她自己长出来的「近况/习惯/承诺」会以受管区块写回 roles/小鲸鱼.md，
@@ -8733,7 +8750,7 @@ async function main() {
           const st = getSocialV2State(key);
           appendMemoryV2(st, category, content, extra);
           // R1：同一条记忆镜像进长期库（去重合并、分层隔离都在库里做）。失败只记日志，不影响返回。
-          if (memoryDbEnabled()) liveMemory.rememberSocialEvent({ key, category, content, extra });
+          if (memoryDbEnabled()) liveMemory.rememberSocialEvent({ key, category, content, extra, emotion: emotionForMemory(content) });
           sendJson({ ok: true, key, category, content, memory: formatMemoryV2(st) });
           return;
         }
@@ -8808,10 +8825,10 @@ async function main() {
               liveMemory.forgetSocialEvent({ key, category, extra: { target: oldTargetName } });
               const traits = newContent !== undefined ? String(newContent).trim() : '';
               const kept = traits || (Array.isArray(st.memberImpressions?.[newTargetName]?.traits) ? st.memberImpressions[newTargetName].traits.join('、') : '');
-              if (kept) liveMemory.rememberSocialEvent({ key, category, content: kept, extra: { target: newTargetName } });
+              if (kept) liveMemory.rememberSocialEvent({ key, category, content: kept, extra: { target: newTargetName }, emotion: emotionForMemory(kept) });
             } else {
               if (oldContent && oldContent !== newContent) liveMemory.forgetSocialEvent({ key, category, content: oldContent });
-              if (newContent) liveMemory.rememberSocialEvent({ key, category, content: newContent, extra: cleanNewExtra });
+              if (newContent) liveMemory.rememberSocialEvent({ key, category, content: newContent, extra: cleanNewExtra, emotion: emotionForMemory(newContent) });
             }
           }
           saveSocialV2State();
@@ -8916,27 +8933,34 @@ async function main() {
           const scopeParam = String(body.scope ?? '').trim();
           const crossScope = !scopeParam || scopeParam === 'all' || scopeParam === '*';
           const scopeOf = crossScope ? null : (scopeParam === 'self' ? key : scopeParam);
-          let store = null;
+          // RAG：字面（FTS/LIKE）+ 向量余弦混合排序。本机 Ollama 装了嵌入模型就用真语义向量，
+          // 没有/超时就退回 hash-v1（见 qqb/memory/embed.mjs）—— 这条路是异步的，
+          // 正是因为它能等模型；提示词注入那条同步路径只走 hash-v1。
           try {
-            store = openStore({ root: ROOT, logger: { warn: (m, d) => log('长期记忆检索', m, d ?? '') } });
-            const rows = store.recall({ scope: scopeOf, allScopes: crossScope, query, limit, markUsed: true });
-            const result = rows.map((item) => ({
+            const found = await liveMemory.search({ kind: 'memory', query, limit, scope: scopeOf });
+            const result = found.results.map((item) => ({
               id: item.id,
               kind: item.kind,
               layer: item.layer,
               subject: item.subject,
               text: item.text,
               importance: item.importance,
-              updatedAt: item.updated_at,
+              updatedAt: item.updated_at ?? item.updatedAt,
               score: item.score,
+              weight: item.weight,
+              retention: item.retention,
+              depth: item.depth,
+              vector: item.vector ?? null,
               scope: item.scope,
               where: people.label(item.scope)
             }));
-            sendJson({ ok: true, key, query, scope: crossScope ? 'all' : scopeOf, crossScope, count: result.length, items: result, indexed: query.length >= 3 });
+            sendJson({
+              ok: true, key, query, scope: crossScope ? 'all' : scopeOf, crossScope,
+              count: result.length, items: result, indexed: query.length >= 3,
+              model: found.model, semantic: found.semantic, embedded: found.embedded
+            });
           } catch (error) {
             sendJson({ ok: false, error: `记忆检索失败：${error?.message ?? error}` }, 500);
-          } finally {
-            try { store?.close?.(); } catch { /* 已关就算了 */ }
           }
           return;
         }
@@ -8954,12 +8978,10 @@ async function main() {
           if (req.headers['x-agent-token'] && !v2SessionAllowed(key)) { sendJson({ ok: false, error: '目标不在当前模式允许范围内' }, 403); return; }
           if (req.headers['x-agent-token'] && !v2ToolEnabled('knowledge')) { sendJson({ ok: false, error: '工具未启用：qq_knowledge_add' }, 403); return; }
           if (!memoryDbEnabled()) { sendJson({ ok: false, error: '知识库未启用（socialV2.memoryDb.enabled=false）' }, 503); return; }
-          let store = null;
           try {
-            store = openStore({ root: ROOT, logger: { warn: (m, d) => log('知识库', m, d ?? '') } });
             // 知识不分层，但按会话 scope 记来源：群聊里看到的进群 scope，私聊里的进私聊 scope，
             // 检索时 scope + global 一起看，避免「这条知识是谁告诉你的」被写死成某人。
-            const written = store.knowledge.add({
+            const written = liveMemory.knowledgeAdd({
               scope: key,
               text,
               title: title || null,
@@ -8968,11 +8990,9 @@ async function main() {
               tags: Array.isArray(body.tags) ? body.tags : (body.tags ? String(body.tags) : undefined),
               importance: Number(body.importance),
             });
-            sendJson({ ok: true, key, ...written, stats: store.knowledge.stats() });
+            sendJson({ ok: true, key, ...written, stats: liveMemory.knowledgeStats() });
           } catch (error) {
             sendJson({ ok: false, error: `知识入库失败：${error?.message ?? error}` }, 500);
-          } finally {
-            try { store?.close?.(); } catch { /* 已关就算了 */ }
           }
           return;
         }
@@ -8986,16 +9006,23 @@ async function main() {
           if (req.headers['x-agent-token'] && !v2SessionAllowed(key)) { sendJson({ ok: false, error: '目标不在当前模式允许范围内' }, 403); return; }
           if (req.headers['x-agent-token'] && !v2ToolEnabled('knowledge')) { sendJson({ ok: false, error: '工具未启用：qq_knowledge_search' }, 403); return; }
           if (!memoryDbEnabled()) { sendJson({ ok: false, error: '知识库未启用（socialV2.memoryDb.enabled=false）' }, 503); return; }
-          let store = null;
+          // RAG：知识检索同样走「字面 + 向量」混合（与记忆共用一套 embedder，见 qqb/memory/embed.mjs）。
           try {
-            store = openStore({ root: ROOT, logger: { warn: (m, d) => log('知识库检索', m, d ?? '') } });
-            const items = store.knowledge.search({ scope: key, query, limit, markUsed: true });
-            sendJson({ ok: true, key, query, count: items.length, items, indexed: query.length >= 3 });
+            const found = await liveMemory.search({ kind: 'knowledge', query, limit, scope: key });
+            sendJson({
+              ok: true, key, query, count: found.results.length, items: found.results,
+              indexed: query.length >= 3,
+              model: found.model, semantic: found.semantic, embedded: found.embedded,
+            });
           } catch (error) {
             sendJson({ ok: false, error: `知识检索失败：${error?.message ?? error}` }, 500);
-          } finally {
-            try { store?.close?.(); } catch { /* 已关就算了 */ }
           }
+          return;
+        }
+        // ── 向量索引状态（RAG 排障）：覆盖多少、用的哪个模型、语义通道通不通 ────────────
+        if (req.method === 'GET' && url.pathname === '/api/socialV2/memory-vectors') {
+          const ready = await liveMemory.embedderReady();
+          sendJson({ ok: true, ...liveMemory.vectors(), embedder: ready });
           return;
         }
         // ── 二代黑话学习（reserved2）：AI 查询/提交黑话候选 ─────────────────
@@ -16075,6 +16102,16 @@ ${memLines ? `\n记忆库里：\n${memLines}\n` : '\n记忆库最近没有新东
   // 失败只是名字缺几个，跟对话无关，所以不 await、也不重试轰炸。
   setTimeout(() => { void seedPeopleFromGateway(); }, 8000)?.unref?.();
   setInterval(() => { void seedPeopleFromGateway('定时'); }, 6 * 60 * 60 * 1000)?.unref?.();
+  // RAG：本机 Ollama 有嵌入模型就把缺的语义向量分几批补上（没有就空转，日志说一声）。
+  // 放在启动后 20 秒：不跟 WS 建连/人名簿抢带宽，也不阻塞任何对话。
+  const warmMemoryVectors = (reason) => {
+    void liveMemory.warmVectors().then((r) => {
+      if (!r.ready) return;
+      log('向量', `${reason}：语义通道 ${r.model} 就绪，补建 memory ${r.memory} 条 / knowledge ${r.knowledge} 条`);
+    }).catch((error) => log('向量', '语义向量预热失败（不影响检索）', String(error?.message ?? error)));
+  };
+  setTimeout(() => warmMemoryVectors('启动'), 20000)?.unref?.();
+  setInterval(() => warmMemoryVectors('定时'), 60 * 60 * 1000)?.unref?.();
   // 存活心跳：上线补漏用「上一个进程最后一次心跳」当停摆切分线。
   // 必须在（可能存在的）上线补漏读取旧水位之前启动，但心跳本身只在启动时
   // 读一次旧水位，所以这里先读后写，不会把停摆窗口覆盖掉。

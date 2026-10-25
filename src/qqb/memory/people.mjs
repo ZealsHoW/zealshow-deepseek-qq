@@ -12,12 +12,15 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 const UNKNOWN_LABEL = '不认识的人';
+// 会话类型词不是名字。2026-10-25 真机上 owner 那条被写成了「私聊」：
+// 消息链路在某些系统事件里会把 sender 传成会话类型，写进来就把网关同步的备注/昵称顶掉了。
+const PLACEHOLDER_NAMES = new Set([UNKNOWN_LABEL, '未知', '私聊', '群聊', '群', 'QQ用户', '联系人']);
 
 function cleanName(name) {
   const text = String(name ?? '').trim();
   // 空、纯数字（QQ 号当名字没有信息量）、以及调用方兜底的「未知」都不收。
   if (!text) return '';
-  if (text === '未知' || text === UNKNOWN_LABEL) return '';
+  if (PLACEHOLDER_NAMES.has(text)) return '';
   if (/^[0-9]{5,12}$/.test(text)) return '';
   return text.slice(0, 40);
 }
@@ -80,6 +83,8 @@ export function createPeopleDirectory({ filePath = null, logger = null, now = ()
     load();
     const previous = map[key];
     if (previous && previous.name === clean) return false;
+    // 网关同步来的备注（note:'remark'）最准，不许被消息链路里的昵称反盖回去。
+    if (previous?.note === 'remark' && extra?.note !== 'remark') return false;
     map[key] = {
       name: clean,
       kind: extra?.kind === 'group' || key.startsWith('group:') ? 'group' : 'private',
