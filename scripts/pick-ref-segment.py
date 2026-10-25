@@ -60,6 +60,26 @@ def clean_chain(name):
     return CLEAN_CHAINS[name]
 
 
+def pitch_filter(semitones, sample_rate=32000):
+    """参考音频升/降调：改采样率再拉回时长，音高平移 N 个半音、时长不变。
+
+    2026-10-25：主人听完小鲸 A/B 两版说「B 的方向」（B = 参考升 1 个半音，F0 307 → 334）。
+    参考音频的音高会原封不动带进克隆结果，所以「音色偏暗/偏飘」时挪参考比自己通嗓快。
+    注意：一次别超过 ±2 个半音 —— 变调同时改共振峰，降多了吐字会糊（实测 −3 就把
+    「主人」听成「主任」），这是削音色不是修音色。
+
+    坑：`asetrate` 用的是**输入**的采样率。原始录音常是 44.1 kHz，如果直接写
+    `asetrate=32000*R`，ffmpeg 会把 44.1k 的样点当成 33.9k 播 → 整段变慢 1.3 倍、
+    音高也掉下去（2026-10-25 实测：想要 +1 半音，结果 F0 294 → 226、6.55s 变 9.0s）。
+    所以先在前面补一次 `aresample=32000`，把速率对齐再变调。
+    """
+    if not semitones:
+        return ''
+    ratio = 2 ** (float(semitones) / 12.0)
+    return ('aresample=%d,asetrate=%d*%.6f,aresample=%d,atempo=%.6f,'
+            % (sample_rate, sample_rate, ratio, sample_rate, 1.0 / ratio))
+
+
 def load_config(root):
     path = os.path.join(root, 'config.json')
     if not os.path.exists(path):
@@ -120,11 +140,12 @@ def safe_name(seconds):
     return ('%.2f' % seconds).replace('.', 'p')
 
 
-def slice_audio(ffmpeg, audio, start, end, out_path, chain='gentle'):
+def slice_audio(ffmpeg, audio, start, end, out_path, chain='gentle', pitch=0.0):
     dur = max(0.1, end - start)
+    af = pitch_filter(pitch) + clean_chain(chain)
     cmd = [ffmpeg, '-hide_banner', '-loglevel', 'error', '-y',
            '-ss', '%.3f' % start, '-t', '%.3f' % dur, '-i', audio,
-           '-af', clean_chain(chain), '-ar', '32000', '-ac', '1', '-c:a', 'pcm_s16le', out_path]
+           '-af', af, '-ar', '32000', '-ac', '1', '-c:a', 'pcm_s16le', out_path]
     subprocess.run(cmd, check=True)
 
 
@@ -140,6 +161,8 @@ def main():
     ap.add_argument('--clean', default='gentle', choices=list(CLEAN_CHAINS),
                     help='清洗链：gentle（默认，只去隆隆声+轻降噪+剪静音）/ off（不处理）/ legacy（老链，带压缩和 loudnorm）')
     ap.add_argument('--no-slice', action='store_true', help='只打印句子，不切音频')
+    ap.add_argument('--pitch', type=float, default=0.0,
+                    help='对切出来的候选升/降调几个半音（默认 0；±1~2 之内，降多了吐字会糊）')
     args = ap.parse_args()
 
     audio = args.audio if os.path.isabs(args.audio) else os.path.abspath(args.audio)
@@ -164,10 +187,13 @@ def main():
     manifest = []
     for i, s in enumerate(cands, 1):
         item = {'index': i, 'start': s['start'], 'end': s['end'], 'text': s['text']}
+        if args.pitch:
+            item['pitch'] = args.pitch
         if not args.no_slice:
-            name = 'seg-%02d-%s-%s.wav' % (i, safe_name(s['start']), safe_name(s['end']))
+            suffix = ('-p%s' % ('%.1f' % args.pitch).replace('.0', '').replace('-', 'm')) if args.pitch else ''
+            name = 'seg-%02d-%s-%s%s.wav' % (i, safe_name(s['start']), safe_name(s['end']), suffix)
             out = os.path.join(args.out_dir, name)
-            slice_audio(ffmpeg, audio, s['start'], s['end'], out, args.clean)
+            slice_audio(ffmpeg, audio, s['start'], s['end'], out, args.clean, args.pitch)
             item['file'] = os.path.join(args.out_dir, name)
             item['bytes'] = os.path.getsize(out)
         manifest.append(item)

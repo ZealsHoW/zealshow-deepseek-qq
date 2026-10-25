@@ -119,3 +119,15 @@ test('朴素：切参考片段的默认清洗链不许再带压缩/限幅/loudno
   assert.ok(py.includes('--clean') || py.includes("add_argument('--clean'"), '缺 --clean 开关');
   assert.ok(README.includes('--clean'), 'README 没写清洗链怎么选');
 });
+
+test('朴素：--pitch 变调必须先对齐采样率（44.1k 素材直接 asetrate 会变慢+反掉）', () => {
+  const py = fs.readFileSync(path.join(ROOT, 'scripts', 'pick-ref-segment.py'), 'utf8');
+  assert.ok(py.includes('def pitch_filter('), '缺 pitch_filter()');
+  const m = py.match(/return \('(aresample=[^']+)'/);
+  assert.ok(m, 'pitch_filter 的返回值应当是「先 aresample 对齐采样率再 asetrate」的滤镜串');
+  assert.ok(m[1].indexOf('aresample=') === 0, 'pitch_filter 必须先 aresample 对齐输入采样率');
+  assert.ok(m[1].indexOf('asetrate=') > 0, 'asetrate 要排在 aresample 之后');
+  assert.ok(py.includes('asetrate=%d*%.6f'), 'asetrate 要用传入的采样率而不是写死 32000*R');
+  assert.ok(py.includes("'--pitch'"), '缺 --pitch 开关');
+  assert.ok(README.includes('--pitch'), 'README 没写 --pitch');
+});
