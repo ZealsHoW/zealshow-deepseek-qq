@@ -11,7 +11,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 
-export const SONG_MOODS = ['happy', 'soothe', 'sleep', 'birthday', 'miss', 'playful', 'cheer', 'sorry'];
+export const SONG_MOODS = ['happy', 'soothe', 'sleep', 'birthday', 'miss', 'playful', 'cheer', 'sorry', 'sad'];
 export const MOOD_LABELS = {
   happy: '开心',
   soothe: '安慰',
@@ -20,7 +20,8 @@ export const MOOD_LABELS = {
   miss: '想他',
   playful: '调皮',
   cheer: '打气',
-  sorry: '道歉'
+  sorry: '道歉',
+  sad: '伤感'
 };
 
 function cleanMoods(input) {

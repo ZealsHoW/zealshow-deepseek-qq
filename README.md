@@ -963,7 +963,7 @@ node scripts/voice-convert.mjs --source audio/xxx.wav --target audio/ref/edge-xi
   "bytes": 4930000, "lyrics": "月亮挂在窗边\n…", "createdAt": 1793000000000, "useCount": 0, "lastUsedAt": 0 }
 ```
 
-`moods` 是情景标签：`happy` 开心 / `soothe` 安慰 / `sleep` 哄睡 / `birthday` 生日 / `miss` 想他 / `playful` 调皮 / `cheer` 打气 / `sorry` 道歉（中文表在 `src/qqb/song-library.mjs` 的 `MOOD_LABELS`）。
+`moods` 是情景标签：`happy` 开心 / `soothe` 安慰 / `sleep` 哄睡 / `birthday` 生日 / `miss` 想他 / `playful` 调皮 / `cheer` 打气 / `sorry` 道歉 / `sad` 伤感（中文表在 `src/qqb/song-library.mjs` 的 `MOOD_LABELS`）。
 
 **怎么预生成**：`node scripts/premake-songs.mjs`（清单在文件顶部 `SONGS`，6 首不同情景、歌词自己写）。可 `--only happy-day,sleep-lullaby`、`--force` 重做、`--list` 看现状、`--min-free 4000` 放宽内存门槛（默认 5500 MB）。**它会先看可用内存，不够就停下**，不硬上——歌是慢慢攒的，不是把人机器卡死换来的。
 
@@ -982,6 +982,24 @@ node scripts/voice-convert.mjs --source audio/xxx.wav --target audio/ref/edge-xi
 - **偶发 `exit=3221225477`（0xC0000005 访问违例）**：diffusion 跑完、后处理阶段崩，重试一次就过（这台 16GB 机器 `available` 常年在 0MB 附近）。脚本会把最后 6 行日志写进 `detail`，看到它重试即可；连续崩就先把 Ollama 模型卸掉再唱。
 
 回归：`npm run test:sing`（ACE-Step 层）、`npm run test:voice-convert`（Seed-VC 层，`VOICE_CONVERT_LIVE=1` 才真跑一次）、`npm run test:sing-tool`（`qq_sing` 的路由/工具开关/hold 文件/PID 文件）；`SING_LIVE=1 npm run test:sing` 会真生成一段 8 秒的。
+
+### 她想唱某首现成的歌（翻唱，2026-10-27）
+
+曲库里那 24 首全是**原创**词曲（`premake-songs.mjs` 顶部清单，含伤感那 6 首：`sad-rain` 雨停之前 / `sad-old-phone` 旧手机 / `sad-third-winter` 第三个冬天 / `sad-leave-first` 先说离开的人 / `sad-city-night` 城市睡着了 / `sad-empty-seat` 空座位）。现成的流行歌词是别人的版权作品，**仓库里不存、也不替主人补全**——想听哪首，把歌词给进来：
+
+```powershell
+# 1) 把歌词存成一个 txt，一行一句（也可以直接叫个名字，脚本会去 state/lyrics/ 找）
+#    例如 state/lyrics/雨爱.txt
+# 2) 唱，并且用她的音色，唱完发到私聊
+node scripts/sing-cover.mjs state/lyrics/雨爱.txt --send private:3482501440
+# 3) 或者唱完收进曲库，以后 qq_sing_send 直接点
+node scripts/sing-cover.mjs 雨爱 --mood sad --add
+```
+
+- 参数：`--tags`（默认伤感女声慢歌，想换风格改它）、`--duration 30`（8~60）、`--steps 26`、`--title 名字`、`--mood sad`、`--add`、`--no-vc`（不换音色）、`--out`。
+- ACE-Step 只会按给你的词**重新作曲**（不会复刻原曲的旋律/编曲），所以听感是「她用这个风格唱这些词」，不是原版伴奏里的人声替换。
+- 歌词上限 1200 字（接口限制），太长就分两段唱。唱一首约 2~3 分钟（含 110 秒左右的换音色），内存不够先跑 `scripts/mem-free.ps1`。
+- 她自己也能现唱：主人在聊天里把歌词贴给她，她用 `qq_sing`（`lyrics` 直接传）就行，不用经过这个脚本。
 
 ## 待发文件夹（qq_list_outbox / qq_save_message_image / qq_draw_image）
 

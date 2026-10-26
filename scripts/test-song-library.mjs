@@ -148,4 +148,21 @@ ok(/--json/.test(premakeSrc), '让 sing.mjs 回 JSON 才好判断成功');
 ok(/payload\?\.file \|\| outRel/.test(premakeSrc), '--vc 时入库要记转换后的文件（JSON 的 file），不是 --out');
 ok(/fs\.existsSync\(finalAbs\)/.test(premakeSrc), '按最终文件判断成功，别拿原声文件存在就当成了');
 
+console.log('\n曲库：伤感那批 + 翻唱脚本');
+
+// 2026-10-27：主人要「#雨爱》《最后一页》那种伤感女歌手」。
+// 伤感 batch 是原创的（现成流行歌的词是别人的版权作品，仓库不存），
+// 真想唱某首现成的歌走 sing-cover.mjs——歌词由主人给。
+ok(MOOD_LABELS.sad === '伤感', '曲库认得 sad 这个情景');
+ok(/moods: \['sad'/.test(premakeSrc), '伤感那几首打了 sad 标签');
+ok((premakeSrc.match(/\n  \{\n    id: '/g) ?? []).length >= 20, '曲目清单已经攒到 20 首以上');
+
+const coverSrc = path.join(root, 'scripts', 'sing-cover.mjs');
+ok(fs.existsSync(coverSrc), '有翻唱脚本 scripts/sing-cover.mjs');
+const coverCode = fs.existsSync(coverSrc) ? fs.readFileSync(coverSrc, 'utf8') : '';
+ok(/--lyrics-file/.test(coverCode), '翻唱走 --lyrics-file 传歌词，不在代码里存词');
+ok(/state', 'lyrics'/.test(coverCode) || /state\/lyrics/.test(coverCode), '也认 state/lyrics/ 下的 txt');
+ok(/--send/.test(coverCode) && /--add/.test(coverCode), '能直接发出去，也能收进曲库');
+ok(/createSongLibrary/.test(coverCode), '收进曲库用的是同一套 song-library');
+
 console.log(`\n结果：${passed} 通过 0 失败`);

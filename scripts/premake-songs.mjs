@@ -312,6 +312,104 @@ const SONGS = [
       '以后也这样吧',
       '你往前走 我跟着'
     ].join('\n')
+  },
+  // 2026-10-27 追加：主人说「伤感女歌手那种也行」。这些是**原创**词曲，不是翻唱；
+  // 想让她唱某首现成的歌，用 scripts/sing-cover.mjs（歌词自己给，见 README）。
+  {
+    id: 'sad-rain',
+    title: '雨停之前',
+    moods: ['sad', 'miss'],
+    tags: 'mandopop ballad, sad female vocal, piano, strings, slow, emotional',
+    duration: 26,
+    steps: 24,
+    lyrics: [
+      '雨下到第三天',
+      '窗台上的水一直往下淌',
+      '你说过雨停了就来',
+      '我数着每一滴',
+      '伞还在门后站着',
+      '它比我先学会等'
+    ].join('\n')
+  },
+  {
+    id: 'sad-old-phone',
+    title: '旧手机',
+    moods: ['sad', 'miss'],
+    tags: 'mandopop ballad, breathy female vocal, soft piano, slow, melancholic',
+    duration: 24,
+    steps: 24,
+    lyrics: [
+      '旧手机还在充电',
+      '里面存着没删的语音',
+      '我不敢点开第二条',
+      '怕听见那天的你',
+      '原来最舍不得的',
+      '是还能重放的从前'
+    ].join('\n')
+  },
+  {
+    id: 'sad-third-winter',
+    title: '第三个冬天',
+    moods: ['sad', 'soothe'],
+    tags: 'mandopop ballad, sad female vocal, cello, strings, slow, wintry',
+    duration: 28,
+    steps: 24,
+    lyrics: [
+      '第三个冬天',
+      '我还是会多买一杯热的',
+      '走到路口才想起来',
+      '没有人接过去了',
+      '手插回口袋里',
+      '假装只是忘了'
+    ].join('\n')
+  },
+  {
+    id: 'sad-leave-first',
+    title: '先说离开的人',
+    moods: ['sad'],
+    tags: 'mandopop ballad, emotional female vocal, acoustic guitar, slow, raw',
+    duration: 26,
+    steps: 24,
+    lyrics: [
+      '先说离开的人',
+      '总是走得最轻',
+      '门带上那一下',
+      '把整间屋子都掏空了',
+      '我后来学到',
+      '不哭也算一种告别'
+    ].join('\n')
+  },
+  {
+    id: 'sad-city-night',
+    title: '城市睡着了',
+    moods: ['sad', 'sleep'],
+    tags: 'mandopop ballad, airy female vocal, ambient pad, slow, night',
+    duration: 26,
+    steps: 22,
+    lyrics: [
+      '城市睡着了',
+      '只有我这盏灯还醒着',
+      '楼下的便利店',
+      '亮得像一句没说完的话',
+      '我想我不难过',
+      '我只是还没睡'
+    ].join('\n')
+  },
+  {
+    id: 'sad-empty-seat',
+    title: '空座位',
+    moods: ['sad', 'miss'],
+    tags: 'mandopop ballad, sad female vocal, piano, cello, slow, cinematic',
+    duration: 28,
+    steps: 24,
+    lyrics: [
+      '电影开场以后',
+      '旁边那个位置一直空着',
+      '我把爆米花分成两份',
+      '一份放到凉了',
+      '散场灯亮起来',
+      '我才发现我一直在等'
+    ].join('\n')
   }
 ];
 
