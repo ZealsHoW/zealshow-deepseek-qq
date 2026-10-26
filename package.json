@@ -99,6 +99,7 @@
     "test:qqb-memory-ebbinghaus": "node scripts/test-qqb-memory-ebbinghaus.mjs",
     "test:qqb-memory-rag": "node scripts/test-qqb-memory-rag.mjs",
     "test:tts-lifecycle": "node scripts/test-tts-lifecycle.mjs",
+    "test:night-quiet": "node scripts/test-night-quiet.mjs",
     "test:qqb-knowledge": "node scripts/test-qqb-knowledge.mjs",
     "test:plugin": "node scripts/test-qq-mode-plugin.mjs",
     "test:setup-idempotent": "node scripts/test-setup-dsh-idempotent.mjs",

@@ -14059,6 +14059,65 @@ ${memLines ? `\n记忆库里：\n${memLines}\n` : '\n记忆库最近没有新东
 
   const nightSleep = { active: false, startAt: 0, wakeAt: 0, notified: new Map(), goodnights: new Map(), timer: null, checkTimer: null, greetFallbackTimer: null };
 
+  /**
+   * 她睡着的时候，看门狗那套没必要开着（主人 2026-10-26 要求）：
+   * 看门狗每 60 秒查一遍服务、每 5 分钟弹一个采集窗口，睡着的时候纯属空转。
+   * 所以进入晚安休眠就把这几个计划任务停用，醒了再启用。
+   *
+   * 风险与兜底：看门狗停用期间，万一桥接自己挂了，就没人叫醒她 —— 于是睡下的同时建一个
+   * **一次性**计划任务 `\qq-bridge-night-wake`（到点跑 scripts/night-wake.ps1：重新启用任务 +
+   * 桥接没在跑就拉起看门狗）。它带 `/z`，跑完自己删除；正常醒来时桥接也会把它删掉。
+   */
+  const SLEEP_QUIET_TASKS = ['\\qq-bridge-watchdog', '\\qq-bridge-memory-collector', '\\qq-bridge-daily-backup'];
+  const NIGHT_WAKE_TASK = '\\qq-bridge-night-wake';
+
+  function runCmd(file, args, what) {
+    try {
+      execFileSync(file, args, { encoding: 'utf8', windowsHide: true, timeout: 30000 });
+      return true;
+    } catch (error) {
+      log(`[night] ${what}失败：${error?.message ?? error}`);
+      return false;
+    }
+  }
+
+  function runSchtasks(args, what) {
+    return runCmd('schtasks', args, what);
+  }
+
+  function setSleepQuietTasks(disabled, why) {
+    let changed = 0;
+    for (const name of SLEEP_QUIET_TASKS) {
+      if (runSchtasks(['/change', '/tn', name, disabled ? '/disable' : '/enable'], `${disabled ? '停用' : '启用'} ${name} `)) changed += 1;
+    }
+    log(`[night] 看门狗等计划任务已${disabled ? '停用' : '启用'}（${changed}/${SLEEP_QUIET_TASKS.length}，${why}）`);
+    return changed;
+  }
+
+  function scheduleNightWakeTask(wakeAt) {
+    const script = path.join(ROOT, 'scripts', 'night-wake.ps1');
+    if (!fs.existsSync(script)) { log('[night] 找不到 scripts/night-wake.ps1，醒来兜底任务没建（不挡睡觉）'); return false; }
+    const d = new Date(wakeAt);
+    const pad = (n) => String(n).padStart(2, '0');
+    if (script.includes(' ')) { log('[night] 脚本路径里有空格，醒来兜底任务没建（命令拼接不好转义）'); return false; }
+    // schtasks /create 在「/sc once + /sd」这套参数上会吐出坏 XML（EndBoundary，2026-10-26 实测 A/C 两版日期格式都失败），
+    // 所以改用 PowerShell 的计划任务 cmdlet —— 日期交给 [datetime] 解析，不用跟 schtasks 的本地化格式较劲。
+    const at = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:00`;
+    const ps = [
+      `$a = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument '-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File ${script}';`,
+      `$t = New-ScheduledTaskTrigger -Once -At ([datetime]'${at}');`,
+      `$s = New-ScheduledTaskSettingsSet -StartWhenAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries;`,
+      `Register-ScheduledTask -TaskName '${NIGHT_WAKE_TASK.replace(/^\\/, '')}' -Action $a -Trigger $t -Settings $s -Force | Out-Null`
+    ].join(' ');
+    const ok = runCmd('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', ps], '创建醒来兜底任务');
+    if (ok) log(`[night] 醒来兜底任务已建：${at}`);
+    return ok;
+  }
+
+  function clearNightWakeTask() {
+    runSchtasks(['/delete', '/tn', NIGHT_WAKE_TASK, '/f'], '删除醒来兜底任务');
+  }
+
   function persistNightSleep() {
     try {
       atomicWriteJson(NIGHT_SLEEP_FILE, nightSleep.active
@@ -14104,6 +14163,9 @@ ${memLines ? `\n记忆库里：\n${memLines}\n` : '\n记忆库最近没有新东
     nightSleep.notified.clear();
     nightSleep.goodnights.clear();
     persistNightSleep();
+    // 醒了：看门狗该回来了，醒来兜底任务也可以撤了。
+    setSleepQuietTasks(false, '睡醒了');
+    clearNightWakeTask();
     // R2：睡够了她才有力气——醒了先回血（时间衰减也会补，这里给一次确定的「休息」）。
     noteMood('rest');
     log(`[night] 晚安休眠结束（${why}，睡了 ${(sleptMs / 3600000).toFixed(1)} 小时），开始唤醒会话`);
@@ -14154,6 +14216,9 @@ ${memLines ? `\n记忆库里：\n${memLines}\n` : '\n记忆库最近没有新东
     nightSleep.notified.clear();
     persistNightSleep();
     armNightWakeTimer();
+    // 睡着的时候看门狗不用转（省内存、也没必要每 5 分钟弹一次窗口）；醒来兜底任务照着建。
+    setSleepQuietTasks(true, '进入晚安休眠');
+    scheduleNightWakeTask(nightSleep.wakeAt);
     noteMood('late_night'); // R2：熬夜是要还的（精力与心情都掉一点）
     log(`[night] 开始晚安休眠 ${h.toFixed(1)} 小时（来源 ${source}），预计 ${new Date(nightSleep.wakeAt).toLocaleString()} 醒`);
     return nightSleepStatus();
@@ -14168,6 +14233,9 @@ ${memLines ? `\n记忆库里：\n${memLines}\n` : '\n记忆库最近没有新东
     nightSleep.notified.clear();
     nightSleep.goodnights.clear();
     persistNightSleep();
+    // 提前取消（主人叫她起来）：看门狗立刻恢复，兜底任务撤掉。
+    setSleepQuietTasks(false, '取消晚安休眠');
+    clearNightWakeTask();
     log(`[night] 取消晚安休眠（${reason}）`);
     return nightSleepStatus();
   }
@@ -14283,6 +14351,9 @@ ${memLines ? `\n记忆库里：\n${memLines}\n` : '\n记忆库最近没有新东
     nightSleep.startAt = Number(data.startAt) || Date.now();
     nightSleep.wakeAt = wakeAt;
     armNightWakeTimer();
+    // 桥接中途重启也要把「睡着=看门狗停用」这件事重新落实（任务状态不跟着进程走）。
+    setSleepQuietTasks(true, '恢复晚安休眠');
+    scheduleNightWakeTask(wakeAt);
     log(`[night] 恢复晚安休眠，预计 ${new Date(wakeAt).toLocaleString()} 醒`);
   }
 
