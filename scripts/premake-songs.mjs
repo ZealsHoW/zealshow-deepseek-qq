@@ -189,12 +189,16 @@ function sing(song) {
       for (let i = lines.length - 1; i >= 0; i--) {
         try { payload = JSON.parse(lines[i]); break; } catch { /* 继续往前找 */ }
       }
-      if (code !== 0 || !payload?.file || !fs.existsSync(outAbs)) {
+      // --vc 时 sing.mjs 的 JSON 里给的是"换完音色"的那个文件（vc_v2_*.wav），
+      // 不是 --out 那个原始产物；入库要记转换后的（2026-10-27 实测踩到：只记 outRel 会让曲库发原声）。
+      const finalRel = String(payload?.file || outRel).split(path.sep).join('/');
+      const finalAbs = path.resolve(root, finalRel);
+      if (code !== 0 || !payload?.file || !fs.existsSync(finalAbs)) {
         const tail = (stderr.trim().split(/\r?\n/).pop() || stdout.trim().split(/\r?\n/).pop() || '').slice(0, 300);
         resolve({ ok: false, ms, error: `exit=${code}：${tail}` });
         return;
       }
-      resolve({ ok: true, ms, payload, outRel, bytes: fs.statSync(outAbs).size });
+      resolve({ ok: true, ms, payload, outRel: finalRel, bytes: fs.statSync(finalAbs).size });
     });
   });
 }

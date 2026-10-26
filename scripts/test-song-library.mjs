@@ -128,5 +128,9 @@ ok(/moods: \['happy'/.test(premakeSrc) && /moods: \['sleep'\]/.test(premakeSrc),
 ok(/--min-free/.test(premakeSrc) && /free < args\.minFree/.test(premakeSrc), '内存不够就停下，不硬上');
 ok(/library\.add\(\{/.test(premakeSrc), '生成完写进曲库');
 ok(/--json/.test(premakeSrc), '让 sing.mjs 回 JSON 才好判断成功');
+// 2026-10-27 实测的坑：--vc 时 --out 那个是原声，换完音色的文件在 JSON 的 file 里；
+// 只记 outRel 会让曲库发出去的是 ACE-Step 的原声，不是她的嗓子。
+ok(/payload\?\.file \|\| outRel/.test(premakeSrc), '--vc 时入库要记转换后的文件（JSON 的 file），不是 --out');
+ok(/fs\.existsSync\(finalAbs\)/.test(premakeSrc), '按最终文件判断成功，别拿原声文件存在就当成了');
 
 console.log(`\n结果：${passed} 通过 0 失败`);
