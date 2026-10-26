@@ -945,6 +945,33 @@ node scripts/voice-convert.mjs --source audio/xxx.wav --target audio/ref/edge-xi
 - **`ModuleNotFoundError: No module named 'munch'`**：`requirements.txt` 之外的隐式依赖，装 `munch==4.0.0` 即可。
 - 2026-10-24 已真机验证：`audio/sing-test.wav` → `audio/vc_v2_sing-test_edge-xiaoyi_1.0_30_0.7.wav`（22.1kHz 单声道，30 步 46.7 秒），发出 `messageId=-1809630381`。
 - **端到端（`qq_sing` 真发）**：同一台机器上走接口跑了四次——第一次暴露「发出去时把 `audio/xxx.wav` 当库内子目录」的 bug（返回 500，但歌已经生成好了）；修掉后 `HTTP 200 / messageId=1015680856`，但 `verified` 读错了字段（顶层没有 `verified`，硬证据在 `verification.confirmed`）；再修后 `verified: true / messageId=1413453481`；最后验的是「按 PID 停 TTS」那条路（先刷新 `state/gptsovits-serve.pid` 的时间戳强制走 PID 分支，跑起来 20 秒后那个 python 就没了、`9880=000`、`state/tts-hold.json` 在位）→ `verified: true / messageId=1715772539`。单次耗时 108~260 秒（生成 + 30 步换音色 + 发送）。
+
+### 预生成曲库：先唱好存着，情景到了秒发（2026-10-26 夜）
+
+现场生成一首要 1~5 分钟、吃 7~10 GB，等人点歌再唱，她只能回「等我几分钟」然后干等；13:44 那次更糟——内存不够，整机假死 16 分钟，歌和那一轮回复一起报废。所以改成**两条路**：
+
+| 路径 | 什么时候用 | 耗时 | 代价 |
+|---|---|---|---|
+| `qq_sing_send`（曲库） | 想立刻听到歌声 | **秒发** | 歌是提前备好的，歌词/风格固定 |
+| `qq_sing`（现场生成） | 点名要唱新歌词 | 1~5 分钟 | 7~10 GB 内存，聊天会被拖住 |
+
+**曲库长什么样**：清单 `state/song-library.json`，音频 `audio/songs/<id>.wav`（`audio/` 在 `.gitignore` 里，不入库）。每条：
+
+```json
+{ "id": "sleep-lullaby", "title": "月亮挂在窗边", "file": "audio/songs/sleep-lullaby.wav",
+  "moods": ["sleep"], "tags": "lullaby, soft female vocal, piano", "durationSec": 26,
+  "bytes": 4930000, "lyrics": "月亮挂在窗边\n…", "createdAt": 1793000000000, "useCount": 0, "lastUsedAt": 0 }
+```
+
+`moods` 是情景标签：`happy` 开心 / `soothe` 安慰 / `sleep` 哄睡 / `birthday` 生日 / `miss` 想他 / `playful` 调皮 / `cheer` 打气 / `sorry` 道歉（中文表在 `src/qqb/song-library.mjs` 的 `MOOD_LABELS`）。
+
+**怎么预生成**：`node scripts/premake-songs.mjs`（清单在文件顶部 `SONGS`，6 首不同情景、歌词自己写）。可 `--only happy-day,sleep-lullaby`、`--force` 重做、`--list` 看现状、`--min-free 4000` 放宽内存门槛（默认 5500 MB）。**它会先看可用内存，不够就停下**，不硬上——歌是慢慢攒的，不是把人机器卡死换来的。
+
+实测（2026-10-26 23:50，停掉 TTS + Hindsight 后可用 ~9.8 GB）：**每首约 40 秒**，6 首全成，音频 4.0~4.7 MB/首（22~26 秒，24 kHz 左右）。所以「预先唱几条」在 16 GB 机器上是可行的，前提是**先把内存腾出来**（见上面「内存基线」那条）。
+
+**她怎么用**：`socialV2.tools.sing` 打开后，工具列表里除了 `qq_sing` 还会多一个 `qq_sing_send`（`key` / `token` 必填，可选 `moods: [...]`、`id`）。返回 `ok=true` 就是**已经发出去了**（带 `messageId`，能读回确认），所以不用再说「等我几分钟」。曲库空的时候回 409 并让她改用 `qq_sing`。
+
+**排障**：`GET /api/socialV2/song-library`（带 `x-console-token`）看曲库清单 + `playable`（清单有、文件也在的条数）+ 每首用过几次。桥接每次调用前都会 `reload()` 清单，所以预生成脚本写完不用重启桥接。回归：`npm run test:song-library`。
 - **偶发 `exit=3221225477`（0xC0000005 访问违例）**：diffusion 跑完、后处理阶段崩，重试一次就过（这台 16GB 机器 `available` 常年在 0MB 附近）。脚本会把最后 6 行日志写进 `detail`，看到它重试即可；连续崩就先把 Ollama 模型卸掉再唱。
 
 回归：`npm run test:sing`（ACE-Step 层）、`npm run test:voice-convert`（Seed-VC 层，`VOICE_CONVERT_LIVE=1` 才真跑一次）、`npm run test:sing-tool`（`qq_sing` 的路由/工具开关/hold 文件/PID 文件）；`SING_LIVE=1 npm run test:sing` 会真生成一段 8 秒的。

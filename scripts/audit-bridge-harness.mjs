@@ -78,6 +78,26 @@ function createPeopleDirectory() {
 }
 
 /**
+ * 曲库同样是桩：夹具里不预生成歌，测不到真实挑歌/发送。
+ * 真行为由 scripts/test-song-library.mjs 回归；这里只要「别让桥接 ReferenceError」。
+ * 注意 bridge.js 一加顶层 import，这里不同步就是整片 R 系列报 ReferenceError（2026-10-25/26 各踩过一次）。
+ */
+function createSongLibrary() {
+  return {
+    filePath: null,
+    entries: () => [],
+    get: () => null,
+    count: () => 0,
+    add: () => { throw new Error('audit-stub：夹具里不写曲库'); },
+    remove: () => false,
+    pick: () => null,
+    markUsed: () => false,
+    stats: () => ({ count: 0, moods: {}, labels: {}, totalSeconds: 0, lastGeneratedAt: null, filePath: null, audioDir: null }),
+    reload: () => 0,
+  };
+}
+
+/**
  * 遗忘曲线取情绪：桩成 0（不参与权重），真行为由 test-qqb-memory-ebbinghaus.mjs 回归。
  * bridge.js 在 memory-update 里会用它算 emotion，缺了就是整片 R 系列报
  * 「emotionFromText is not defined」。
@@ -434,6 +454,7 @@ export async function bridgeHarness({ config = {}, savedState, files = {}, globa
     SnowLumaWebSocketClient: FakeBot, text: (s) => s,
     createLiveMemory,
     createPeopleDirectory,
+    createSongLibrary,
     emotionFromText,
     openStore,
     createIntake,

@@ -32,6 +32,9 @@ import { resolvePriceTable } from './model-prices.js';
 import { createLiveMemory } from './qqb/memory/live.mjs';
 import { emotionFromText } from './qqb/memory/ebbinghaus.mjs';
 import { createPeopleDirectory } from './qqb/memory/people.mjs';
+// R10「曲库」：ACE-Step 现场唱要 1~5 分钟、吃 7~10 GB，等人点歌再生成只能干等。
+// 所以有空先唱好几条存着（scripts/premake-songs.mjs），到时候按情景秒发（qq_sing_send）。
+import { createSongLibrary } from './qqb/song-library.mjs';
 import { openStore } from './qqb/memory/store.mjs';
 import { createIntake } from './qqb/memory/intake.mjs';
 import { createRefiner } from './qqb/memory/refine.mjs';
@@ -117,6 +120,23 @@ const people = createPeopleDirectory({
   filePath: path.join(ROOT, 'state', 'memory-people.json'),
   logger: { warn: (message, detail) => log('人名簿', message, detail ?? '') }
 });
+// 预生成曲库（audio/songs/*.wav + state/song-library.json）。只读清单，音频缺失的那条会被跳过。
+const songLibrary = createSongLibrary({
+  filePath: path.join(ROOT, 'state', 'song-library.json'),
+  audioDir: path.join(ROOT, 'audio', 'songs'),
+  logger: { warn: (message) => log('曲库', message) }
+});
+
+/** 曲库里能真发出去的那几首（清单有、文件在）。清单里存的是相对仓库根的路径。 */
+function songLibraryPlayable() {
+  return songLibrary.entries().filter((song) => {
+    try {
+      return Boolean(song.file) && fs.existsSync(path.resolve(ROOT, song.file));
+    } catch {
+      return false;
+    }
+  });
+}
 
 /** 从网关拉一次好友/群列表，把 scope → 名字 记进人名簿。失败只记日志，不影响对话。 */
 async function seedPeopleFromGateway(reason = '启动') {
@@ -9228,6 +9248,88 @@ async function main() {
         if (req.method === 'GET' && url.pathname === '/api/socialV2/memory-vectors') {
           const ready = await liveMemory.embedderReady();
           sendJson({ ok: true, ...liveMemory.vectors(), embedder: ready });
+          return;
+        }
+        // ── 预生成曲库（R10）：先唱好存着，到时候按情景秒发 ──────────────────────────
+        if (req.method === 'GET' && url.pathname === '/api/socialV2/song-library') {
+          // 曲库是 scripts/premake-songs.mjs 在另一个进程里写的，桥接不重启也要看到新歌。
+          songLibrary.reload();
+          const playable = songLibraryPlayable();
+          sendJson({
+            ok: true,
+            ...songLibrary.stats(),
+            playable: playable.length,
+            songs: playable.map((song) => ({
+              id: song.id,
+              title: song.title,
+              moods: song.moods ?? [],
+              durationSec: song.durationSec,
+              useCount: song.useCount ?? 0,
+              lastUsedAt: song.lastUsedAt || null
+            }))
+          });
+          return;
+        }
+        // 发一首预生成的歌：给 id 就发那首，给 moods 就按情景挑一首（秒发，不用等生成）。
+        if (req.method === 'POST' && url.pathname === '/api/socialV2/song-library/send') {
+          const body = await readBody();
+          const token = String(body.token ?? req.headers['x-agent-token'] ?? '').trim();
+          const key = String(body.key ?? body.target ?? '').trim();
+          const voice = voiceCfg();
+          if (!voice.enabled) { sendJson({ ok: false, error: '语音功能已关闭' }, 403); return; }
+          if (!key) { sendJson({ ok: false, error: 'key 不能为空（格式 group:群号 或 private:QQ号）' }, 400); return; }
+          if (currentMode !== 'reserved2') { sendJson({ ok: false, error: '该接口仅 reserved2 模式可用' }, 403); return; }
+          if (!token) { sendJson({ ok: false, error: 'reserved2 模式调用必须携带 agent token' }, 403); return; }
+          if (!agentTokenOk(key, token)) { sendJson({ ok: false, error: 'agent token 无效' }, 403); return; }
+          if (!v2ToolEnabled('sing')) { sendJson({ ok: false, error: '工具未启用：qq_sing' }, 403); return; }
+          if (!v2SessionAllowed(key)) { sendJson({ ok: false, error: '目标不在当前模式允许范围内' }, 403); return; }
+          if (shouldBlockSilentReply(key)) { sendJson({ ok: false, error: '静默模式已开启，当前不允许发送' }, 403); return; }
+          const gate = await tierGuardV2(key, 'qq_sing');
+          if (!gate.ok) { sendJson({ ok: false, error: gate.error, tier: gate.tier, requester: gate.requester }, 403); return; }
+          songLibrary.reload();
+          const playable = songLibraryPlayable();
+          if (!playable.length) {
+            sendJson({ ok: false, error: '曲库还空着（还没预生成过）。要么先用 qq_sing 现场唱一首，要么让我跑 scripts/premake-songs.mjs 先存几首。', songs: 0 }, 409);
+            return;
+          }
+          const wantId = String(body.id ?? '').trim();
+          const wantMoods = Array.isArray(body.moods) ? body.moods : String(body.moods ?? body.mood ?? '').split(/[,，\s]+/).filter(Boolean);
+          const chosen = wantId
+            ? playable.find((song) => song.id === wantId) ?? null
+            : songLibrary.pick({ moods: wantMoods, excludeRecent: 3 });
+          if (!chosen) {
+            sendJson({
+              ok: false,
+              error: wantId ? `曲库里没有「${wantId}」这首` : '按这个情景没挑到，换一个 mood 试试',
+              available: playable.map((song) => ({ id: song.id, moods: song.moods, title: song.title }))
+            }, 404);
+            return;
+          }
+          const relFile = String(chosen.file).split(path.sep).join('/');
+          const absFile = path.resolve(ROOT, chosen.file);
+          if (!fs.existsSync(absFile)) {
+            sendJson({ ok: false, error: `这首歌的文件不见了：${relFile}` }, 500);
+            return;
+          }
+          try {
+            const startedAt = Date.now();
+            const sent = await sendVoiceForV2(key, relFile, { label: '唱了首歌', verify: true });
+            songLibrary.markUsed(chosen.id);
+            log('曲库', `已发出 ${chosen.id}（${chosen.title}）→ ${key}，messageId=${sent?.messageId ?? '?'}，用时 ${Date.now() - startedAt}ms`);
+            sendJson({
+              ok: true,
+              id: chosen.id,
+              title: chosen.title,
+              moods: chosen.moods ?? [],
+              file: relFile,
+              messageId: sent?.messageId ?? null,
+              verified: sent?.verification?.confirmed === true,
+              ms: Date.now() - startedAt
+            });
+          } catch (error) {
+            log('曲库', `发不出去 ${chosen.id}：${error?.message ?? error}`);
+            sendJson({ ok: false, error: `发送失败：${error?.message ?? error}`, id: chosen.id }, 500);
+          }
           return;
         }
         // ── 二代黑话学习（reserved2）：AI 查询/提交黑话候选 ─────────────────
