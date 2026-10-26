@@ -2278,7 +2278,7 @@ if (cfg.socialV2?.voice?.enabled !== false && cfg.socialV2?.tools?.sendVoice !==
 if (cfg.socialV2?.voice?.enabled !== false && cfg.socialV2?.tools?.sing !== false) {
   server.tool(
     'qq_sing',
-    '唱一首歌并发到指定会话（本机 ACE-Step 生成曲子 + Seed-VC 换成你自己的音色）。只有 lyrics 是必填：把你想要的歌词按行写进去（每行一句、押韵更好听）。可选 tags 描述风格（如 "chinese pop, female vocal, gentle, acoustic guitar"）、duration 决定时长（秒，8~60，默认 20）、vc 决定要不要换成你自己的音色（默认 true；改成 false 就是别的女声在唱）。注意：① 生成一次要 1~3 分钟，很吃显存——bridge 会自动先停掉真人音色服务、卸载 Ollama 模型，这几分钟里你可能没法用语音说话，属正常；② 返回 ok=true 且 verified=true 才表示歌真的发到 QQ 了；③ 这是「表演」型动作，别频繁用，一次最多一首；④ 歌词要自己写（原创或即兴），不要照抄完整受版权保护的歌词。',
+    '唱一首歌并发到指定会话（本机 ACE-Step 生成曲子 + Seed-VC 换成你自己的音色）。只有 lyrics 是必填：把你想要的歌词按行写进去（每行一句、押韵更好听）。可选 tags 描述风格（如 "chinese pop, female vocal, gentle, acoustic guitar"）、duration 决定时长（秒，8~60，默认 20）、vc 决定要不要换成你自己的音色（默认 true；改成 false 就是别的女声在唱）。**2026-10-26 起是后台任务**：调用会立刻返回 ok=true、queued=true 和 jobId，歌在后台生成（约 1~5 分钟），做好会自动作为语音发到这个会话——所以调用成功后先回一句「等我几分钟，唱好就发给你」，然后继续聊别的，**不要原地等、也不要再调一次**。若返回 busy=true，说明上一首还在做，就告诉对方「上一首还在做，等它唱完再来一首」。注意：① 生成很吃内存/显存——bridge 会先停掉真人音色服务、卸载 Ollama 模型，这几分钟里你可能没法用语音说话，属正常；② 真发成功的证据是桥接日志里的「已发出 messageId=…」，工具返回的 queued 只代表排上了；③ 这是「表演」型动作，别频繁用，一次最多一首；④ 歌词要自己写（原创或即兴），不要照抄完整受版权保护的歌词。',
     {
       key: z.string().describe('会话 key，格式 group:群号 或 private:QQ号'),
       token: z.string().describe('会话令牌（见唤醒提示中的【会话令牌】）'),
@@ -2302,11 +2302,21 @@ if (cfg.socialV2?.voice?.enabled !== false && cfg.socialV2?.tools?.sing !== fals
             vc: vc !== false
           }),
           headers: { 'x-agent-token': token },
-          timeoutMs: 600000
+          // 路由现在立刻回 202（生成在后台跑），所以这里不用再等 10 分钟；给 30 秒只是
+          // 防止桥接本身假死时把这一轮又拖住（13:44 那次就是等 16 分钟等到超时的）。
+          timeoutMs: 30000
         });
+        if (data?.queued) {
+          return {
+            content: [{
+              type: 'text',
+              text: `已排上（jobId=${data.jobId}，空闲内存 ${data.freeMb} MB）。歌在后台生成，大约 1~5 分钟，做好会**自动**作为语音发到这个会话——现在先回对方一句「等我几分钟，唱好就发给你」，然后该聊什么聊什么；不要在这里等，也不要再调一次。`
+            }]
+          };
+        }
         return { content: [{ type: 'text', text: serializeModelData(data) }] };
       } catch (error) {
-        return { content: [{ type: 'text', text: `唱歌失败：${error?.message ?? error}` }], isError: true };
+        return { content: [{ type: 'text', text: `唱歌没排上：${error?.message ?? error}` }], isError: true };
       }
     }
   );

@@ -38,19 +38,41 @@ ok(/tierGuardV2\(key, 'qq_sing'\)/.test(bridgeSrc), '梯队在 qq_sing 这把钥
 ok(/agentTokenOk\(key, token\)/.test(bridgeSrc), '沿用 agent token 校验');
 ok(/shouldBlockSilentReply\(key\)/.test(bridgeSrc), '静默模式一样挡');
 ok(/state\/tts-hold|'tts-hold\.json'/.test(bridgeSrc), '唱歌期间落 hold 文件（让看门狗别抢内存）');
-ok(/releaseResourcesForSinging\(voice\)/.test(bridgeSrc), '生成前先腾资源（卸 Ollama + 停 TTS）');
-ok(/sendVoiceForV2\(key, voiceName/.test(bridgeSrc), '生成完走语音发送（不是直接甩文件）');
+ok(/releaseResourcesForSinging\(voiceCfg\(\)\)/.test(bridgeSrc), '后台任务开始前先腾资源（卸 Ollama + 停 TTS）');
+ok(/sendVoiceForV2\(job\.key, voiceName/.test(bridgeSrc), '后台生成完走语音发送（不是直接甩文件）');
 ok(/path\.basename\(String\(result\.file\)\)/.test(bridgeSrc), '发送前把路径收成文件名（否则会被拼成 audio/audio/…）');
-ok(/verified: sent\?\.verification\?\.confirmed === true/.test(bridgeSrc), '返回体带 verified（取 verification.confirmed，只有真发成功才算数）');
+ok(/job\.verified = sent\?\.verification\?\.confirmed === true/.test(bridgeSrc), '状态里记 verified（取 verification.confirmed，只有真发成功才算数）');
 ok(/'--json'/.test(bridgeSrc), '调脚本时带 --json（解析最后一行拿产物路径）');
+
+console.log('## 后台任务：路由立刻回、生成在后台跑（2026-10-26）');
+// 背景：13:44 那次同步等生成，把整机压到假死 16 分钟，回复一起超时报废。
+// 现在必须：① 立刻 202 + queued；② 生成放在 runSingJobInBackground 里、响应之后跑；
+// ③ 后台函数绝不能再写响应（写了也白发）；④ 同一时刻只允许一首；⑤ 有状态查询。
+ok(/async function runSingJobInBackground\(job\)/.test(bridgeSrc), '后台 runner 在');
+ok(/void runSingJobInBackground\(job\);/.test(bridgeSrc), '响应之后启动 runner（不 await）');
+{
+  // 把 runner 函数体切出来，确认里面没有 sendJson —— 响应早发了，再写只会在已结束的 res 上抛错。
+  const start = bridgeSrc.indexOf('async function runSingJobInBackground(job) {');
+  const end = bridgeSrc.indexOf('if (req.method === \'POST\' && url.pathname === \'/api/socialV2/sing\')', start);
+  const body = start >= 0 && end > start ? bridgeSrc.slice(start, end) : '';
+  ok(body.length > 0 && !/sendJson\(/.test(body), 'runner 里不碰 sendJson（响应早已发出）');
+  ok(/sendVoiceForV2\(job\.key/.test(body), 'runner 用 job.key 发回原会话（不依赖已结束的请求变量）');
+}
+ok(/queued: true/.test(bridgeSrc) && /202\)/.test(bridgeSrc), '接口回 202 + queued:true');
+ok(/jobId: `sing-\$\{Date\.now\(\)\}`/.test(bridgeSrc), '每次生成有 jobId');
+ok(/busy: true/.test(bridgeSrc) && /409\)/.test(bridgeSrc), '同一时刻只允许一首（第二首回 409 busy）');
+ok(/req\.method === 'GET' && url\.pathname === '\/api\/socialV2\/sing'/.test(bridgeSrc), 'GET 同一路径查进度/上一首结果');
+ok(/freeMb < 4500/.test(bridgeSrc), '内存护栏：不够就不排（13:44 的教训）');
+ok(/singJobStatus\(\)/.test(bridgeSrc), '状态由 singJobStatus 统一出');
 
 console.log('## MCP 工具 qq_sing');
 ok(/qq_sing: 'sing'/.test(mcpSrc), 'TOOL_CONFIG_FLAGS 登记了 qq_sing → sing');
 ok(/server\.tool\(\s*'qq_sing'/.test(mcpSrc), '工具注册了');
 ok(/tools\?\.sing !== false/.test(mcpSrc), '注册期开关读 socialV2.tools.sing');
 ok(/agentApi\('\/api\/socialV2\/sing'/.test(mcpSrc), '打到桥接的 sing 接口');
-ok(/timeoutMs: 600000/.test(mcpSrc), '超时给足 10 分钟（一次要 1~3 分钟）');
-ok(/verified=true/.test(mcpSrc), '描述里写明 verified=true 才算真发');
+ok(/timeoutMs: 30000/.test(mcpSrc), '超时降到 30 秒（路由立刻回，不再等生成）');
+ok(/后台任务/.test(mcpSrc) && /不要原地等、也不要再调一次/.test(mcpSrc), '描述里写明是后台任务、别原地等也别重复调');
+ok(/data\?\.queued/.test(mcpSrc), '工具把 queued 翻译成「等我几分钟」的指引');
 
 console.log('## 默认值：重动作默认关');
 ok(/sendVoice: false,[\s\S]{0,400}?sing: false,/.test(bridgeSrc), 'bridge 默认表 sing: false');

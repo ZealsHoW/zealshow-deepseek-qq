@@ -2965,6 +2965,46 @@ async function main() {
     return { path: made.path, name: path.basename(made.path), engine: made.engine, voice: made.voice, bytes: made.bytes, pruned, fallbackReason: made.fallbackReason ?? null };
   }
 
+  // ── 唱歌后台任务的状态（2026-10-26）──────────────────────────────────
+  // 为什么改成后台：ACE-Step 要 7~10 GB，这台机一共 16 GB。13:44 她点了 qq_sing，
+  // 生成把整机压到假死 16 分钟（SnowLuma 心跳都断了），最后 10 分钟超时，歌没出来，
+  // 那一轮回复也跟着废掉。现在路由立刻回 202 + jobId，生成在后台跑，唱完自动补发；
+  // 同一时刻只允许一首（ACE-Step 抢不到第二份内存，并行只会两首一起失败）。
+  let singJob = {
+    running: false,
+    jobId: null,
+    key: null,
+    startedAt: 0,
+    finishedAt: 0,
+    ok: null,
+    file: null,
+    messageId: null,
+    verified: null,
+    error: null,
+    freeMb: null
+  };
+  function singJobStatus() {
+    const elapsedMs = singJob.running
+      ? Date.now() - singJob.startedAt
+      : (singJob.finishedAt && singJob.startedAt ? singJob.finishedAt - singJob.startedAt : 0);
+    return {
+      running: singJob.running,
+      jobId: singJob.jobId,
+      key: singJob.key,
+      elapsedMs,
+      freeMb: singJob.freeMb,
+      startedAt: singJob.startedAt || null,
+      finishedAt: singJob.finishedAt || null,
+      // 叫 lastOk 而不是 ok：路由外面还要用 ok:true 表示「这次查询成功」，
+      // 两者撞名会让状态查询永远回 ok:null（2026-10-26 实测踩到）。
+      lastOk: singJob.ok,
+      file: singJob.file,
+      messageId: singJob.messageId,
+      verified: singJob.verified,
+      error: singJob.error
+    };
+  }
+
   /**
    * AI 通道入口：解析引用 → 限流 → 发送 → 记账 → 回读校验。
    * 返回 { messageId, detail, verified, readback }。
@@ -7627,6 +7667,74 @@ async function main() {
           }
         }
 
+        // 唱歌任务状态（排障用）：正在唱什么、卡了多久、上一首成功没有。
+        if (req.method === 'GET' && url.pathname === '/api/socialV2/sing') {
+          const status = singJobStatus();
+          sendJson({
+            ok: true,
+            ...status,
+            note: status.running
+              ? '正在后台生成，唱完会自动发到那个会话'
+              : (status.jobId ? '上一首已经结束（成功与否看 ok / error）' : '这次启动后还没唱过')
+          });
+          return;
+        }
+
+        // 后台生成一首歌：写 hold → 腾资源 → 跑 sing.mjs → sendVoiceForV2 → 清理。
+        // 2026-10-26：这个函数在 HTTP 响应**之后**继续跑，所以它绝不能再碰 res / sendJson
+        // （发了也白发），结果只写日志 + 落 singJob 状态，等下一个人 GET 查。
+        async function runSingJobInBackground(job) {
+          const holdFile = path.join(STATE_DIR, 'tts-hold.json');
+          try {
+            fs.mkdirSync(STATE_DIR, { recursive: true });
+            // 15 分钟后自动失效：万一桥接中途崩了，看门狗不会一直被这个文件挡住。
+            fs.writeFileSync(holdFile, JSON.stringify({ until: Date.now() + 15 * 60 * 1000, by: 'qq_sing', jobId: job.jobId }));
+            log('唱歌', `jobId=${job.jobId} 开始生成：${job.lyrics.length} 字 / ${job.duration}s / steps ${job.steps} / vc=${job.withVc}（空闲 ${job.freeMb} MB）`);
+            await releaseResourcesForSinging(voiceCfg());
+            const outRel = path.join('audio', `sing-${Date.now()}.wav`);
+            const argv = [
+              path.join(ROOT, 'scripts', 'sing.mjs'),
+              '--lyrics', job.lyrics,
+              '--duration', String(job.duration),
+              '--steps', String(job.steps),
+              '--out', outRel,
+              '--json'
+            ];
+            if (job.tags) argv.push('--tags', job.tags);
+            if (job.withVc) argv.push('--vc');
+            const run = await runNodeScript(argv, { timeoutMs: 10 * 60 * 1000 });
+            const result = lastJsonLine(run.out);
+            if (run.code !== 0 || !result?.ok) {
+              const detail = String(run.out).trim().split(/\r?\n/).slice(-6).join('\n');
+              throw new Error(`生成失败（exit=${run.code}）：${detail.replace(/\s+/g, ' ').slice(0, 300)}`);
+            }
+            job.file = result.file;
+            log('唱歌', `jobId=${job.jobId} 生成完成：${result.file}，准备发送`);
+            // 发送链路只认语音库内的**文件名**：它自己会做 safeJoin，传 'audio/xxx.wav' 会被拼成
+            // audio/audio/xxx.wav 然后报「语音库里找不到」。脚本给的是相对仓库根的路径，这里取 basename。
+            const voiceName = path.basename(String(result.file));
+            const sent = await sendVoiceForV2(job.key, voiceName, { label: '唱了首歌', verify: true });
+            job.messageId = sent?.messageId ?? sent?.data?.message_id ?? null;
+            // 硬证据看 get_msg 回读：sendVoiceForV2 把结果放在 verification.confirmed（顶层没有 verified）
+            job.verified = sent?.verification?.confirmed === true;
+            job.ok = true;
+            log('唱歌', `jobId=${job.jobId} 已发出：messageId=${job.messageId ?? '?'}，回读${job.verified ? '确认是语音' : '未确认'}`);
+            appendActivity(`${job.key} [sing] 唱好了 ${voiceName}（${job.verified ? '已回读确认' : '未回读确认'}）`);
+          } catch (error) {
+            job.ok = false;
+            job.error = String(error?.message ?? error).slice(0, 400);
+            log('唱歌', `jobId=${job.jobId} 失败：${job.error}`);
+            appendActivity(`${job.key} [sing] 唱歌失败：${job.error}`.slice(0, 300));
+          } finally {
+            job.running = false;
+            job.finishedAt = Date.now();
+            try { fs.rmSync(holdFile, { force: true }); } catch { /* 删不掉就等它自己过期 */ }
+            // 把最后结果留在状态里，GET /api/socialV2/sing 看得到。
+            singJob = { ...job };
+            log('唱歌', `jobId=${job.jobId} 结束（${job.ok ? '成功' : '失败'}，用时 ${Math.round((job.finishedAt - job.startedAt) / 1000)}s）`);
+          }
+        }
+
         if (req.method === 'POST' && url.pathname === '/api/socialV2/sing') {
           const body = await readBody();
           const token = String(body.token ?? req.headers['x-agent-token'] ?? '').trim();
@@ -7649,48 +7757,58 @@ async function main() {
           const duration = Math.min(Math.max(Number(body.duration) || 20, 8), 60);
           const steps = Math.min(Math.max(Number(body.steps) || 20, 8), 40);
           const withVc = body.vc !== false;
-          const holdFile = path.join(STATE_DIR, 'tts-hold.json');
-          try {
-            fs.mkdirSync(STATE_DIR, { recursive: true });
-            // 15 分钟后自动失效：万一桥接中途崩了，看门狗不会一直被这个文件挡住。
-            fs.writeFileSync(holdFile, JSON.stringify({ until: Date.now() + 15 * 60 * 1000, by: 'qq_sing' }));
-            await releaseResourcesForSinging(voice);
-            const outRel = path.join('audio', `sing-${Date.now()}.wav`);
-            const argv = [
-              path.join(ROOT, 'scripts', 'sing.mjs'),
-              '--lyrics', lyrics,
-              '--duration', String(duration),
-              '--steps', String(steps),
-              '--out', outRel,
-              '--json'
-            ];
-            if (tags) argv.push('--tags', tags);
-            if (withVc) argv.push('--vc');
-            const run = await runNodeScript(argv, { timeoutMs: 10 * 60 * 1000 });
-            const result = lastJsonLine(run.out);
-            if (run.code !== 0 || !result?.ok) {
-              const detail = String(run.out).trim().split(/\r?\n/).slice(-6).join('\n');
-              sendJson({ ok: false, error: `唱歌失败（exit=${run.code}）`, detail }, 500);
-              return;
-            }
-            // 发送链路只认语音库内的**文件名**：它自己会做 safeJoin，传 'audio/xxx.wav' 会被拼成
-            // audio/audio/xxx.wav 然后报「语音库里找不到」。脚本给的是相对仓库根的路径，这里取 basename。
-            const voiceName = path.basename(String(result.file));
-            const sent = await sendVoiceForV2(key, voiceName, { label: '唱了首歌', verify: true });
-            sendJson({
-              ok: true,
-              file: result.file,
-              messageId: sent?.messageId ?? sent?.data?.message_id ?? null,
-              // 硬证据看 get_msg 回读：sendVoiceForV2 把结果放在 verification.confirmed（顶层没有 verified）
-              verified: sent?.verification?.confirmed === true,
-              readback: sent?.readback ?? null,
-              usedVc: withVc
-            });
-          } catch (error) {
-            sendJson({ ok: false, error: error?.message ?? String(error) }, 500);
-          } finally {
-            try { fs.rmSync(holdFile, { force: true }); } catch { /* 删不掉就等它自己过期 */ }
+          // 2026-10-26 的坑：13:44 她点了 qq_sing，ACE-Step 要 7~10 GB，这台机只有 16 GB ——
+          // 先是把 GPT-SoVITS 杀掉腾地方，接着自己加载把整机压到假死（SnowLuma 心跳断了 16 分钟），
+          // 最后 10 分钟超时，一句没唱出来，那一轮回复也一起报废。内存不够时宁可不唱。
+          const freeMb = Math.round(os.freemem() / 1048576);
+          if (freeMb < 4500) {
+            log('唱歌', `内存不够，先不唱（空闲 ${freeMb} MB < 4500 MB）`);
+            sendJson({ ok: false, freeMb, error: `现在内存不够唱歌（空闲 ${freeMb} MB，至少要 4500 MB）。硬上会把整台机器卡死——过一会儿再唱，或者先关掉别的程序。` }, 503);
+            return;
           }
+          // 同一时刻只允许一首：ACE-Step 一次就要 7~10 GB，并发只会两首一起失败。
+          if (singJob.running) {
+            const runningMs = Date.now() - singJob.startedAt;
+            sendJson({
+              ok: false,
+              busy: true,
+              jobId: singJob.jobId,
+              elapsedMs: runningMs,
+              freeMb,
+              error: `上一首还在后台生成（已 ${Math.round(runningMs / 1000)} 秒）。ACE-Step 一次只吃得下这一首，等它唱完再点。`
+            }, 409);
+            return;
+          }
+          const job = {
+            running: true,
+            jobId: `sing-${Date.now()}`,
+            key,
+            lyrics,
+            tags,
+            duration,
+            steps,
+            withVc,
+            freeMb,
+            startedAt: Date.now(),
+            finishedAt: 0,
+            ok: null,
+            file: null,
+            messageId: null,
+            verified: null,
+            error: null
+          };
+          singJob = job;
+          log('唱歌', `排队：jobId=${job.jobId}，${lyrics.length} 字 / ${duration}s / vc=${withVc}（空闲 ${freeMb} MB），后台生成，唱完自动发到 ${key}`);
+          // 先回 202 再跑：MCP 调用方和这一轮对话都不再等生成（13:44 那次就是等死的）。
+          sendJson({
+            ok: true,
+            queued: true,
+            jobId: job.jobId,
+            freeMb,
+            etaSeconds: [40, 300],
+            note: '歌在后台做（大约 1~5 分钟），唱好会自动发到这个会话，不用再调一次；这期间可以先聊别的。'
+          }, 202);
+          void runSingJobInBackground(job);
           return;
         }
 

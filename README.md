@@ -249,6 +249,8 @@ npm start          # 或双击 start.bat（守护模式：崩溃自动重启，�
 - **⚠️ 别在 DSH 的终端里起桥接**：那样桥接属于 DSH 自己的 Windows 作业对象，DSH 一重启（换端口、升级、崩溃）桥接会被连坐杀掉——表现为 DSH 可用但 QQ 完全没反应、`state/bridge.log` 停在 `⚠️ DSH 不可用（重启中？）`、`curl http://127.0.0.1:3100/health` 不通。正确做法是走计划任务（活在 DSH 之外）：`schtasks /run /tn "\qq-bridge-watchdog"`，它会按序拉起 SnowLuma → 常驻 MCP 服务 → 桥接，并自动把 `config.json` 里的 DSH 端口同步成当前端口。
 - **⚠️ 看门狗的探活不许用 WMI**：这台机器上 `Get-CimInstance Win32_Process` 与 `Get-NetTCPConnection` 会**卡死**（实测 20 秒都不回，而 `Restart-Service Winmgmt` 要管理员权限、拿不到）。看门狗一旦卡进去就整段停摆——症状是「bridge / GPT-SoVITS 死了没人拉、`_keepalive.log` 停在最后一条正常记录上」，看起来像什么都没发生（2026-10-24 就是这样白停了一段，11:49 被我停掉的 TTS 服务一直没人拉回来）。现在 `qq-bridge-keepalive.ps1` 的探活只走 `netstat.exe -ano -p TCP` + `Get-Process`：bridge 用 `state/bridge.lock` 里的 PID 认、SnowLuma 用「可执行文件路径是 `$snowDir\node.exe`」认、DSH 端口按进程名 `DeepSeek Harness` 认、端口探活一律 `Test-PortListening`。给它加新探活时照这个来，回归是 `npm run test:keepalive-probes`（代码里再出现那几个 cmdlet 就直接判失败）。临时诊断也一样，别在会话里直接调 `Get-NetTCPConnection`——要知道端口通不通就 `curl.exe -s -o NUL -w "%{http_code}" --max-time 3`。
 - **关机/断网期间漏掉的消息会自动补进未读**：桥接每次连上 QQ 后，会回看白名单会话最近的历史消息（`socialV2.catchUp.count` 默认 20 条、`maxAgeHours` 默认 24 小时、`graceMs` 默认 2 分钟），只补「上一个进程最后一次心跳之后」的消息，并按 `messageId` 去重；补入后会触发一次 `offlineReview` 唤醒，让 agent 把真正需要回应的补上。桥接每分钟写一次心跳（`state/last-alive.json`），所以重启/开机都不会把很久以前已经被处理过的旧消息再翻出来。
+- **打游戏要腾内存：双击 `scripts/game-off.cmd` 全停**（停三个计划任务 → 按端口停 SnowLuma / bridge / MCP / Ollama / GPT-SoVITS → 停 uv 起的 python → 关 DSH），想恢复双击 `scripts/game-on.cmd`。**只杀进程不停任务是没用的**：看门狗每 60 秒一轮、缺什么拉什么（`while ($true) { … Start-Sleep -Seconds $IntervalSeconds }`）；而且它的 `Start-Dsh` 当初没加 `-WindowStyle Hidden`，于是 30~60 秒弹一个运行框——2026-10-26 就是这么一路查到这个根因的（`_keepalive.log` 里连着三条 `启动 DSH`、7 个进程并存）。
+- **每天 23:00 自动睡觉**：计划任务 `\qq-bridge-night-sleep` 跑 `scripts/night-sleep-2300.ps1` → `POST /api/socialV2/night-sleep {"action":"start","hours":7}`（读 `state/console-token`），结果追加到 `state/night-sleep-schedule.log`；醒来时给 `rest` 事件（精力 +0.25）。手工睡/醒用同一个路由（`GET` 看 `active/wakeAt/remainingMinutes`）。注意顺序：先 `night-sleep` 再让 `game-off` 停任务，否则 23:00 不会触发。
 - 修改 `config.json` / `roles/` / `state/current-role.json` 后重启桥接生效；修改 `dsh/agent-presets/`（改完要跑 `node scripts/build-agent-preset-patches.mjs` 重新生成 bundle patch）或 MCP 配置后重启 DSH 生效
 
 日志示例：
@@ -876,7 +878,16 @@ node scripts/voice-convert.mjs --source audio/xxx.wav --target audio/ref/edge-xi
 | `--similarity` / `--intelligibility` | 像不像她 / 咬字清不清楚，默认都 0.7 |
 | `--send` | 转完直接发出去 |
 
-**给她的工具**：`socialV2.tools.sing` 打开后，她就有 `qq_sing` 这个 MCP 工具（`key` / `token` / `lyrics` 必填，可选 `tags` / `duration` / `vc` / `steps`），自己写歌词、自己决定唱什么，唱完自己发到当前会话（返回 `verified=true` 才算真发出）。**默认关**——单次 1~3 分钟、独占显存，属于重动作，要显式开。
+**给她的工具**：`socialV2.tools.sing` 打开后，她就有 `qq_sing` 这个 MCP 工具（`key` / `token` / `lyrics` 必填，可选 `tags` / `duration` / `vc` / `steps`），自己写歌词、自己决定唱什么。**默认关**——单次 1~3 分钟、独占内存，属于重动作，要显式开。
+
+**2026-10-26 起是后台任务（为什么必须改）**：13:44 她点了《阳光彩虹小白马》，旧路由是同步等生成，结果把整台机压到假死 16 分钟（SnowLuma 心跳断了 16 分钟都没收到事件包），10 分钟生成超时，歌一句没出来，**那一轮回复也跟着 `fetch failed` 报废**——`state/tool-calls.jsonl` 里留着 `qq_sing ok:false ms:984326`。现在：
+
+- `POST /api/socialV2/sing` **立刻回 202 + `{queued:true, jobId}`**，生成放进 `runSingJobInBackground(job)`、在响应之后跑；那个函数**绝不能再碰 res / sendJson**（响应早发了，再写只会在已结束的响应上抛错），结果只写日志 + 落 `singJob` 状态；
+- 后台唱好后自己 `sendVoiceForV2(job.key, …)` 发回原会话。`_bridge-run.log` 里能按 jobId 串起全过程：`排队：…` → `jobId=… 开始生成…` → `生成完成` → `jobId=… 已发出：messageId=…`（失败则是 `jobId=… 失败：…` 和 `jobId=… 结束（失败，用时 …s）`）；
+- **同一时刻只允许一首**：第二首回 `409 {busy:true, elapsedMs}`。ACE-Step 一次就要 7~10 GB，并发只会两首一起失败；
+- `GET /api/socialV2/sing` 查进度/上一首结果：`{running, jobId, elapsedMs, lastOk, messageId, verified, error}`（`lastOk` 不叫 `ok`，避免和「这次查询成功」的 `ok:true` 撞名）；
+- **内存护栏**：空闲内存 < 4500 MB 直接 `503`「现在内存不够唱歌…」，宁可不唱也不把机器拖死。这道检查在**排队之前**，所以不会出现「先停掉 TTS 再发现内存不够」；
+- MCP 侧超时从 10 分钟降到 30 秒；返回 queued 时工具会告诉模型「先回一句等我几分钟，唱好会自动发来，别原地等、也别再调一次」。
 
 **唱歌前怎么腾显存**（这台机器 16GB 内存 + 8GB 显存，ACE-Step 和 TTS 不能共存）：
 
