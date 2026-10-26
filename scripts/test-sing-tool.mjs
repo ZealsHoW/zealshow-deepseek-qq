@@ -62,7 +62,10 @@ ok(/queued: true/.test(bridgeSrc) && /202\)/.test(bridgeSrc), '接口回 202 + q
 ok(/jobId: `sing-\$\{Date\.now\(\)\}`/.test(bridgeSrc), '每次生成有 jobId');
 ok(/busy: true/.test(bridgeSrc) && /409\)/.test(bridgeSrc), '同一时刻只允许一首（第二首回 409 busy）');
 ok(/req\.method === 'GET' && url\.pathname === '\/api\/socialV2\/sing'/.test(bridgeSrc), 'GET 同一路径查进度/上一首结果');
-ok(/freeMb < 4500/.test(bridgeSrc), '内存护栏：不够就不排（13:44 的教训）');
+ok(/usableMb < 4500/.test(bridgeSrc), '内存护栏：不够就不排（13:44 的教训）');
+// 2026-10-26 深夜修正：唱歌前本来就会停掉 GPT-SoVITS（提交 5.4 GB），不能只按 os.freemem() 判死。
+ok(/const gsvAlive = await ttsHealth\(/.test(bridgeSrc), '内存护栏：把「唱歌前会先停掉的音色服务」算成可回收');
+ok(/const reclaimMb = gsvAlive \? 5000 : 0;/.test(bridgeSrc), '可回收额度 = 音色服务活着时 5000 MB');
 ok(/singJobStatus\(\)/.test(bridgeSrc), '状态由 singJobStatus 统一出');
 {
   // 失败不能没下文：她上一句常是「等我几分钟」，卡住了得给会话一句交代。

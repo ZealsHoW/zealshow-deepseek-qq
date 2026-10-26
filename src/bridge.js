@@ -7841,11 +7841,18 @@ async function main() {
           // 先是把 GPT-SoVITS 杀掉腾地方，接着自己加载把整机压到假死（SnowLuma 心跳断了 16 分钟），
           // 最后 10 分钟超时，一句没唱出来，那一轮回复也一起报废。内存不够时宁可不唱。
           const freeMb = Math.round(os.freemem() / 1048576);
-          if (freeMb < 4500) {
-            log('唱歌', `内存不够，先不唱（空闲 ${freeMb} MB < 4500 MB）`);
-            sendJson({ ok: false, freeMb, error: `现在内存不够唱歌（空闲 ${freeMb} MB，至少要 4500 MB）。硬上会把整台机器卡死——过一会儿再唱，或者先关掉别的程序。` }, 503);
+          // 但「唱歌前本来就会杀掉」的常驻不该当拦路理由：runSingJobInBackground 会先
+          // releaseResourcesForSinging()（停 GPT-SoVITS —— 实测提交 5.4 GB、把 Ollama 模型 keep_alive:0 卸掉）。
+          // 2026-10-26 深夜实测：只按 os.freemem() 判，会把「其实来得及腾出来」的请求也挡掉。
+          const gsvAlive = await ttsHealth({ baseUrl: String(voiceCfg().tts?.gptsovits?.baseUrl ?? 'http://127.0.0.1:9880') });
+          const reclaimMb = gsvAlive ? 5000 : 0;
+          const usableMb = freeMb + reclaimMb;
+          if (usableMb < 4500) {
+            log('唱歌', `内存不够，先不唱（空闲 ${freeMb} MB + 可回收 ${reclaimMb} MB = ${usableMb} MB < 4500 MB）`);
+            sendJson({ ok: false, freeMb, reclaimMb, usableMb, error: `现在内存不够唱歌（空闲 ${freeMb} MB，先停掉音色服务也才 ${usableMb} MB，至少 4500 MB）。硬上会把整台机器卡死——过一会儿再唱，或者先关掉别的程序。` }, 503);
             return;
           }
+          if (gsvAlive) log('唱歌', `排队前会先停掉音色服务腾出约 ${reclaimMb} MB（当前空闲 ${freeMb} MB）`);
           // 同一时刻只允许一首：ACE-Step 一次就要 7~10 GB，并发只会两首一起失败。
           if (singJob.running) {
             const runningMs = Date.now() - singJob.startedAt;
