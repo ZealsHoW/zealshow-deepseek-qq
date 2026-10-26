@@ -7725,6 +7725,13 @@ async function main() {
             job.error = String(error?.message ?? error).slice(0, 400);
             log('唱歌', `jobId=${job.jobId} 失败：${job.error}`);
             appendActivity(`${job.key} [sing] 唱歌失败：${job.error}`.slice(0, 300));
+            // 失败也要给会话一个交代：她上一句可能刚说过「等我几分钟」，不能就这样没有下文。
+            // sendToQQ 自带沉默期/补发队列/令牌拦截，所以这里只管把话交过去。
+            try {
+              await sendToQQ(job.key, '唱到一半卡住了，没唱成。等我缓过来再给你唱，好吗？');
+            } catch (notifyError) {
+              log('唱歌', `jobId=${job.jobId} 失败通知也没发出去：${notifyError?.message ?? notifyError}`);
+            }
           } finally {
             job.running = false;
             job.finishedAt = Date.now();

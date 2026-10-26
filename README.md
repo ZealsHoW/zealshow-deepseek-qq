@@ -887,7 +887,8 @@ node scripts/voice-convert.mjs --source audio/xxx.wav --target audio/ref/edge-xi
 - **同一时刻只允许一首**：第二首回 `409 {busy:true, elapsedMs}`。ACE-Step 一次就要 7~10 GB，并发只会两首一起失败；
 - `GET /api/socialV2/sing` 查进度/上一首结果：`{running, jobId, elapsedMs, lastOk, messageId, verified, error}`（`lastOk` 不叫 `ok`，避免和「这次查询成功」的 `ok:true` 撞名）；
 - **内存护栏**：空闲内存 < 4500 MB 直接 `503`「现在内存不够唱歌…」，宁可不唱也不把机器拖死。这道检查在**排队之前**，所以不会出现「先停掉 TTS 再发现内存不够」；
-- MCP 侧超时从 10 分钟降到 30 秒；返回 queued 时工具会告诉模型「先回一句等我几分钟，唱好会自动发来，别原地等、也别再调一次」。
+- MCP 侧超时从 10 分钟降到 30 秒；返回 queued 时工具会告诉模型「先回一句等我几分钟，唱好会自动发来，别原地等、也别再调一次」；
+- **失败也要有下文**：生成失败/超时时，runner 的 `catch` 里会往原会话补一句「唱到一半卡住了，没唱成…」（走 `sendToQQ`，自带沉默期与补发队列；通知自己失败只写日志，不盖掉原始错误）。否则她刚说完「等我几分钟」就永远没有下文。
 
 **唱歌前怎么腾显存**（这台机器 16GB 内存 + 8GB 显存，ACE-Step 和 TTS 不能共存）：
 

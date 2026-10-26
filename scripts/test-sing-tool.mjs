@@ -64,6 +64,15 @@ ok(/busy: true/.test(bridgeSrc) && /409\)/.test(bridgeSrc), '同一时刻只允�
 ok(/req\.method === 'GET' && url\.pathname === '\/api\/socialV2\/sing'/.test(bridgeSrc), 'GET 同一路径查进度/上一首结果');
 ok(/freeMb < 4500/.test(bridgeSrc), '内存护栏：不够就不排（13:44 的教训）');
 ok(/singJobStatus\(\)/.test(bridgeSrc), '状态由 singJobStatus 统一出');
+{
+  // 失败不能没下文：她上一句常是「等我几分钟」，卡住了得给会话一句交代。
+  // 通知本身也必须包在 try 里 —— 通知失败不能再把原始错误盖掉。
+  const start = bridgeSrc.indexOf('async function runSingJobInBackground(job) {');
+  const end = bridgeSrc.indexOf('if (req.method === \'POST\' && url.pathname === \'/api/socialV2/sing\'', start);
+  const body = start >= 0 && end > start ? bridgeSrc.slice(start, end) : '';
+  ok(/await sendToQQ\(job\.key/.test(body), '失败时往原会话补一句文字（不让人干等）');
+  ok(/catch \(notifyError\)/.test(body), '失败通知自己失败也不会盖掉原始错误');
+}
 
 console.log('## MCP 工具 qq_sing');
 ok(/qq_sing: 'sing'/.test(mcpSrc), 'TOOL_CONFIG_FLAGS 登记了 qq_sing → sing');
