@@ -1,4 +1,4 @@
-# 小鲸鱼的真人音色服务启动器（GPT-SoVITS api_v2.py）
+﻿# 小鲸鱼的真人音色服务启动器（GPT-SoVITS api_v2.py）
 #
 # 用法：
 #   pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/gptsovits-serve.ps1

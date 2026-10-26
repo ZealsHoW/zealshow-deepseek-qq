@@ -57,6 +57,12 @@ export function gptsovitsSettings(raw = {}, { root = process.cwd() } = {}) {
     repetitionPenalty: num(r.repetitionPenalty, 1.35),
     timeoutMs: num(r.timeoutMs, DEFAULT_GPTSOVITS_TIMEOUT_MS),
     healthTimeoutMs: num(r.healthTimeoutMs, DEFAULT_HEALTH_TIMEOUT_MS),
+    /**
+     * 没在用就关掉服务（分钟）。服务常驻要 **提交 8.3 GB** 内存（实测 2026-10-26：PID 13556，
+     * WorkingSet 531 MB / Private 8283 MB），这台机一共 16 GB，闲着也占着就没人敢开游戏了。
+     * 0 / 负数 = 不自动关（一直保活，第一次发语音最快）。
+     */
+    idleStopMinutes: num(r.idleStopMinutes, 10),
     /** 服务不可用时是否回落到 SAPI（默认回落；关掉就「要么 GPT-SoVITS，要么这条语音不发」）。 */
     fallback: r.fallback !== false
   };

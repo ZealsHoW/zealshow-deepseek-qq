@@ -1,4 +1,4 @@
-# 打游戏前：把 QQ 机器人整套后台关掉，并停用会自动拉起的计划任务。
+﻿# 打游戏前：把 QQ 机器人整套后台关掉，并停用会自动拉起的计划任务。
 # 用法：双击 game-off.cmd（或 pwsh -File scripts\game-off.ps1）
 $ErrorActionPreference = 'SilentlyContinue'
 $tasks = @('\qq-bridge-watchdog', '\qq-bridge-memory-collector', '\qq-bridge-daily-backup')

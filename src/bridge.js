@@ -45,6 +45,8 @@ import { readWatch, shouldNotifyWatch, markWatchNotified, buildWatchNotice } fro
 // 本机 TTS（Windows 自带 SAPI/OneCore）：qq_send_voice 传 text 就能当场合成一条语音。
 // 实现与安全边界（文字只走临时文件、绝不拼命令行）见 src/qqb/tts.mjs。
 import { synthesizeVoice, ttsAvailable } from './qqb/tts.mjs';
+// 音色服务的生命周期：用时拉起、闲够久就关掉（它常驻要提交 8.3 GB，见 tts-lifecycle.mjs 文件头）。
+import { createTtsLifecycle, ttsHealth } from './qqb/tts-lifecycle.mjs';
 import { createMemoryLogWriter, memoryLogPath } from './qqb/memory-log.mjs';
 import { autoIncludeBudget, autoIncludeProblems, autoIncludeSettings, describeAutoIncludeRule, matchAutoInclude } from './qqb/allow-rules.mjs';
 import { createEvolve } from './qqb/persona/evolve.mjs';
@@ -2592,6 +2594,39 @@ async function main() {
     };
   }
 
+  /**
+   * 音色服务（GPT-SoVITS）的生命周期调度：要用才拉起、闲够久就关掉。
+   *
+   * 2026-10-26：那个服务一旦加载模型就提交 8.3 GB 内存（PID 13556：WorkingSet 531 MB /
+   * Private 8283 MB），这台机一共 16 GB —— 常驻着就没人敢开游戏，ACE-Step 也永远够不到
+   * 它要的 7~10 GB。所以改成「用时拉起、闲时关掉」，阈值配在
+   * `socialV2.voice.tts.gptsovits.idleStopMinutes`（默认 10 分钟，0 = 不自动关）。
+   * 实现见 src/qqb/tts-lifecycle.mjs（关掉期间靠 state/tts-hold.json 让看门狗别抢着拉起）。
+   */
+  let ttsLifeCache = null;
+  function ttsLife() {
+    const g = voiceCfg().tts.gptsovits ?? {};
+    const baseUrl = String(g.baseUrl ?? 'http://127.0.0.1:9880').trim().replace(/\/+$/, '') || 'http://127.0.0.1:9880';
+    const port = Number(/:(\d{2,5})/.exec(baseUrl)?.[1]) || 9880;
+    const idleMinutes = Number.isFinite(Number(g.idleStopMinutes)) ? Number(g.idleStopMinutes) : 10;
+    const cacheKey = `${baseUrl}|${idleMinutes}`;
+    if (!ttsLifeCache || ttsLifeCache.key !== cacheKey) {
+      ttsLifeCache = {
+        key: cacheKey,
+        api: createTtsLifecycle({
+          root: ROOT,
+          stateDir: STATE_DIR,
+          bridgeDir: ROOT,
+          baseUrl,
+          port,
+          idleMinutes,
+          logger: { info: (message) => log('语音', message), warn: (message) => log('语音', message) }
+        })
+      };
+    }
+    return ttsLifeCache.api;
+  }
+
   function voiceLibrary() {
     const dir = voiceCfg().dir;
     const files = listAudioFiles(dir);
@@ -2948,6 +2983,16 @@ async function main() {
     const outPath = path.join(vc.dir, `tts-${stamp}-${Math.random().toString(36).slice(2, 6)}.wav`);
     // engine / gptsovits 一路带下去：sapi 走原路，gptsovits 优先用本机 GPT-SoVITS 服务、
     // 不可用时回落 SAPI（回落原因会写进日志与返回值）。
+    // 2026-10-26：那个服务闲够了会被关掉（它常驻提交 8.3 GB）。要用之前先拉起来 ——
+    // 冷启动一次约 26 秒；拉不起来就照常往下走，由 synthesizeVoice 回落机器音，不让一条语音整个失败。
+    if (gsvPrimary) {
+      try {
+        const wake = await ttsLife().ensureRunning();
+        if (!wake.ok) log(`[voice] 音色服务没起来：${wake.error}（这次可能回落机器音）`);
+      } catch (error) {
+        log(`[voice] 音色服务拉起异常：${error?.message ?? error}`);
+      }
+    }
     const made = await synthesizeVoice({
       text: raw,
       outPath,
@@ -2959,6 +3004,8 @@ async function main() {
       root: ROOT
     });
     const pruned = pruneTtsLibrary(vc.dir, t.keepFiles);
+    // 真用上了真人音色才记「用过」：闲时关服务靠的就是这个时间戳。
+    if (made.engine === 'gptsovits') ttsLife().noteUsage();
     const fallbackNote = made.fallbackReason ? `，回落 ${made.engine}（原因：${made.fallbackReason}）` : '';
     log(`[voice] 本机合成语音 ${path.basename(made.path)}（${made.voice || '默认声音'} / ${made.engine}，${made.bytes} 字节${fallbackNote}${pruned ? `，清理旧产物 ${pruned} 个` : ''}）`);
     if (made.fallbackReason) appendActivity(`${path.basename(made.path)} [voice] GPT-SoVITS 未用上，已回落 ${made.engine}：${made.fallbackReason}`);
@@ -7680,6 +7727,32 @@ async function main() {
           return;
         }
 
+        // 音色服务的状态/手动控制（2026-10-26）：
+        //   GET  → 服务活着没有、闲了多久、要不要关（排障 + 控制台看）
+        //   POST → {action:'start'|'stop'}：start 当场拉起来并预热一次；stop 立刻停掉腾内存
+        // 设计上平时不用手动：发语音前会自动拉起，闲够 idleStopMinutes 会自动关。
+        if (url.pathname === '/api/socialV2/tts-service' && (req.method === 'GET' || req.method === 'POST')) {
+          const api = ttsLife();
+          const base = { ...api.stats(), engine: voiceCfg().tts.engine };
+          if (req.method === 'GET') {
+            sendJson({ ok: true, ...base, alive: await ttsHealth({ baseUrl: base.baseUrl }) });
+            return;
+          }
+          const body = await readBody();
+          const action = String(body.action ?? '').trim().toLowerCase();
+          if (action === 'start') {
+            const r = await api.ensureRunning();
+            sendJson({ ok: r.ok, ...base, started: r.started, error: r.error ?? null, alive: await ttsHealth({ baseUrl: base.baseUrl }) });
+            return;
+          }
+          if (action === 'stop') {
+            const r = await api.stop({ reason: 'manual' });
+            sendJson({ ok: true, ...base, ...r, alive: await ttsHealth({ baseUrl: base.baseUrl }) });
+            return;
+          }
+          sendJson({ ok: false, error: "action 只能是 start 或 stop" }, 400);
+          return;
+        }
         // 后台生成一首歌：写 hold → 腾资源 → 跑 sing.mjs → sendVoiceForV2 → 清理。
         // 2026-10-26：这个函数在 HTTP 响应**之后**继续跑，所以它绝不能再碰 res / sendJson
         // （发了也白发），结果只写日志 + 落 singJob 状态，等下一个人 GET 查。
@@ -16237,6 +16310,16 @@ ${memLines ? `\n记忆库里：\n${memLines}\n` : '\n记忆库最近没有新东
   };
   setTimeout(() => warmMemoryVectors('启动'), 20000)?.unref?.();
   setInterval(() => warmMemoryVectors('定时'), 60 * 60 * 1000)?.unref?.();
+  // 音色服务：闲够久就关掉，把提交的 8.3 GB 还回去（要用时 synthesizeVoiceForV2 会自己拉起来）。
+  // 每分钟看一眼；唱歌/发语音正在跑的时候不停（那时候正是要它的时候）。
+  const idleStopTts = (reason) => {
+    if (voiceCfg().tts.engine !== 'gptsovits') return;
+    void ttsLife().maybeStopIfIdle({ blocked: () => singJob.running }).then((r) => {
+      if (r.stopped) log('语音', `${reason}：闲置超时，音色服务已停（${Math.round((r.idleMs ?? 0) / 60000)} 分钟没用过）`);
+    }).catch((error) => log('语音', '闲时检查失败（不影响说话）', String(error?.message ?? error)));
+  };
+  setTimeout(() => idleStopTts('启动检查'), 30000)?.unref?.();
+  setInterval(() => idleStopTts('定时检查'), 60 * 1000)?.unref?.();
   // 存活心跳：上线补漏用「上一个进程最后一次心跳」当停摆切分线。
   // 必须在（可能存在的）上线补漏读取旧水位之前启动，但心跳本身只在启动时
   // 读一次旧水位，所以这里先读后写，不会把停摆窗口覆盖掉。

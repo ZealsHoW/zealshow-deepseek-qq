@@ -1,4 +1,4 @@
-# 每晚 23:00 自动让小鲸鱼进入晚安休眠（主人 2026-10-26 要求）。
+﻿# 每晚 23:00 自动让小鲸鱼进入晚安休眠（主人 2026-10-26 要求）。
 # 由计划任务 \qq-bridge-night-sleep 调用，失败只记日志、不弹窗。
 $ErrorActionPreference = 'Stop'
 $root = 'D:\34825\zhuomian\youqq\qq-bridge'

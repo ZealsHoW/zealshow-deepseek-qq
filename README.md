@@ -654,6 +654,7 @@ curl.exe -s http://127.0.0.1:9880/control   # 回 {"message":"command is require
 | `gptsovits.topK` / `topP` / `temperature` / `repetitionPenalty` | `15` / `1` / `1` / `1.35` | 采样参数，默认值就是上游默认值 |
 | `gptsovits.timeoutMs` | `120000` | **首次调用要加载模型**，所以比 SAPI 那条（`tts.timeoutMs`）长得多 |
 | `gptsovits.fallback` | `true` | 服务不可用时**回落**到 SAPI（那时返回值与日志都会带回落原因） |
+| `gptsovits.idleStopMinutes` | `10` | 多久没用就**把服务停掉**还内存（`0` = 永不自动关；见下一节） |
 
 体检与回归：
 
@@ -672,6 +673,39 @@ npm run test:voice-tts           # 第一步的 SAPI 回归，仍然要过
 - **安全同前**：要合成的文字走 HTTP body（不拼命令行）；只发语音库里的文件；合成发生在梯队门禁与静默检查之后。
 
 本机实测（2026-10-24，RTX 4060 Laptop 8G）：首次合成（服务刚起来、要加载模型）107.6 秒，**热态 2.2 秒**；产物 32 kHz 单声道 16 bit wav，5.16 秒/330 KB。已用这条链路真发过一条 QQ 语音（走 `scripts/send-voice.mjs`，网关回读确认是 `record` 段）。
+
+### 不用就关掉：那 8.3 GB 不能常驻（2026-10-26）
+
+问题不是显存，是**提交内存**：服务一加载模型，进程就提交 8.3 GB（实测 PID 13556：`WorkingSet` 531 MB，`Private` 8283 MB），这台机统共 16 GB。以前它是常驻的，于是「不唱歌也不发语音」的时候那 8.3 GB 照样压着：空闲内存只剩 1~2 GB，游戏开不了，ACE-Step 也永远够不到它要的 7~10 GB。
+
+现在的规矩是**用时拉起、闲时关掉**（`src/qqb/tts-lifecycle.mjs`）：
+
+| 时机 | 做什么 |
+| --- | --- |
+| 要合成一条语音（`synthesizeVoiceForV2`，`engine==='gptsovits'`） | 先 `ensureRunning()`：活着直接 `noteUsage()`；没活就现拉（冷启动 26 秒起，内存吃紧时实测 105 秒；`waitMs` 默认 180 秒），失败就回落 SAPI 并把原因写日志 |
+| 每次真合成成功 | `noteUsage()` 写 `state/tts-last-used.json` 的 `{at}` |
+| 桥接启动 +30 秒、之后每 60 秒 | `maybeStopIfIdle()`：超过 `idleStopMinutes`（默认 10）没被用过就停服务，日志「闲置超时，音色服务已停（N 分钟没用过）」 |
+| 正在唱歌（`singJob.running`） | `blocked` 挡住，不停 —— 那时候正是要它的时候 |
+
+几个实现上的坑（都写在代码注释里）：
+
+- **停服务要占 `state/tts-hold.json`**：`qq-bridge-keepalive.ps1` 一轮 60 秒，看到服务没活就拉起来。关掉的同时写一段 12 小时的 hold（`by` 记原因），看门狗就不抢了 —— 唱歌腾内存用的也是这同一个开关。`ensureRunning()` 自己拉服务时先写短 hold（`waitMs+60s`）防止两边同时拉，起来/失败都撤掉。
+- **按端口找进程 + 读 `state/gptsovits-serve.pid`**：服务在「加载模型、还没监听端口」的阶段按 `netstat` 是找不到的，启动器会把真正吃内存的 PID 写进那个文件；只认 10 分钟内的（PID 会被系统复用，久了的 pid 文件会误杀别人）。
+- **`stats()` 里字段叫 `lastOk` 不叫 `ok`** —— 路由返回 `{ok:true, ...status}`，状态里再有个 `ok` 就会被盖成 `null`（2026-10-26 实测踩到）。
+- **拉起服务不能用 `detached: true`**：Windows 上那样 spawn 出来的 `pwsh` 会**立刻退出（exit 0）**，脚本一行都没跑，于是这边干等 120 秒还报「拉起超时」（最小复现脚本也能重现）。用 `detached: false` + `stdio: 'ignore'` + `unref()` —— 父进程退出不会杀子进程，服务照样活得下来。
+- 失败永远不阻塞说话：`ensureRunning()` 超时就返回 `{ok:false,error}`，调用方继续走 SAPI。
+
+排障（都要 `x-console-token`，值在 `state/console-token`）：
+
+```powershell
+# 服务活着吗、闲了多久、要不要关、启动脚本在不在
+curl.exe -s -H "x-console-token: $(Get-Content state\console-token -Raw)" http://127.0.0.1:3100/api/socialV2/tts-service
+# 手动拉起（会等到就绪） / 手动停掉（立刻还内存）
+curl.exe -s -X POST -H "x-console-token: ..." -H "content-type: application/json" -d '{"action":"start"}' http://127.0.0.1:3100/api/socialV2/tts-service
+curl.exe -s -X POST -H "x-console-token: ..." -H "content-type: application/json" -d '{"action":"stop"}'  http://127.0.0.1:3100/api/socialV2/tts-service
+```
+
+回归：`npm run test:tts-lifecycle`（不碰真服务：时钟/探活/spawn/kill 全部注入，覆盖「已就绪不重复拉」「拉起成功只 spawn 一次且撤 hold」「超时返回错误且撤 hold」「闲够才停、唱歌时不停」「`idleStopMinutes=0` = 别自动关」）。
 
 ### 换音色：借一个干净的嗓子（Edge TTS 参考 + 试听）
 
