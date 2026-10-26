@@ -123,13 +123,15 @@ const SONGS = [
 ];
 
 function parseArgs(argv) {
-  const out = { only: null, force: false, list: false, minFree: 5500 };
+  const out = { only: null, force: false, list: false, minFree: 5500, vc: false };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === '--force') out.force = true;
     else if (a === '--list') out.list = true;
     else if (a === '--only') out.only = String(argv[++i] ?? '').split(',').map((s) => s.trim()).filter(Boolean);
     else if (a === '--min-free') out.minFree = Math.max(1000, Number(argv[++i]) || 5500);
+    // 换成她自己的音色（Seed-VC）。默认关：ACE-Step 自己的女声也够用，而且 VC 要多花几十秒。
+    else if (a === '--vc') out.vc = true;
   }
   return out;
 }
@@ -172,6 +174,7 @@ function sing(song) {
       '--out', outRel,
       '--json'
     ];
+    if (args.vc) argv.push('--vc');
     const startedAt = Date.now();
     const child = spawn(process.execPath, argv, { cwd: root, stdio: ['ignore', 'pipe', 'pipe'] });
     let stdout = '';
