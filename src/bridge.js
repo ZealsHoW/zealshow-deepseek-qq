@@ -138,6 +138,35 @@ function songLibraryPlayable() {
   });
 }
 
+/**
+ * 把「发到哪儿」的各种写法归一到 `private:QQ号` / `group:群号`。
+ *
+ * 2026-10-27 主人要的是「到具体的时候发到某某地方或群里」——所以她说话的时候可以点名：
+ *   group:851489980 / 群 851489980 / 群聊:851489980
+ *   private:3482501440 / 私聊 3482501440 / QQ:3482501440
+ *   光给一串数字：在白名单群里就按群，否则按私聊
+ * 返回 null 表示看不懂（调用方回 400）。
+ */
+function resolveSongTarget(raw, fallbackKey = '') {
+  const text = String(raw ?? '').trim();
+  if (!text) return fallbackKey ? String(fallbackKey) : null;
+  const direct = /^(group|private)\s*[:：]\s*(\d{4,12})$/i.exec(text);
+  if (direct) return `${direct[1].toLowerCase()}:${direct[2]}`;
+  const group = /^(?:群|群聊|群里|group)\s*[:：]?\s*(\d{4,12})$/i.exec(text);
+  if (group) return `group:${group[1]}`;
+  const priv = /^(?:私聊|好友|private|qq)\s*[:：]?\s*(\d{4,12})$/i.exec(text);
+  if (priv) return `private:${priv[1]}`;
+  const digits = /^(\d{4,12})$/.exec(text);
+  if (digits) {
+    const id = Number(digits[1]);
+    const groups = (cfg?.allow?.groups ?? []).map(Number);
+    const privs = (cfg?.allow?.private ?? []).map(Number);
+    if (groups.includes(id) && !privs.includes(id)) return `group:${id}`;
+    return `private:${id}`;
+  }
+  return null;
+}
+
 /** 从网关拉一次好友/群列表，把 scope → 名字 记进人名簿。失败只记日志，不影响对话。 */
 async function seedPeopleFromGateway(reason = '启动') {
   try {
@@ -9274,17 +9303,23 @@ async function main() {
         if (req.method === 'POST' && url.pathname === '/api/socialV2/song-library/send') {
           const body = await readBody();
           const token = String(body.token ?? req.headers['x-agent-token'] ?? '').trim();
-          const key = String(body.key ?? body.target ?? '').trim();
+          // key = 她此刻所在的会话（令牌绑这个）；target = 要发到哪儿（可以点名别处）。
+          const key = String(body.key ?? body.sessionKey ?? '').trim();
+          const wantTarget = String(body.target ?? body.to ?? '').trim();
+          const target = resolveSongTarget(wantTarget, key);
           const voice = voiceCfg();
           if (!voice.enabled) { sendJson({ ok: false, error: '语音功能已关闭' }, 403); return; }
-          if (!key) { sendJson({ ok: false, error: 'key 不能为空（格式 group:群号 或 private:QQ号）' }, 400); return; }
+          if (!key) { sendJson({ ok: false, error: 'key 不能为空（她此刻的会话：group:群号 或 private:QQ号）' }, 400); return; }
+          if (!target) { sendJson({ ok: false, error: `target 看不懂（${wantTarget}）：写 group:群号 / private:QQ号，或者直接给一串号` }, 400); return; }
           if (currentMode !== 'reserved2') { sendJson({ ok: false, error: '该接口仅 reserved2 模式可用' }, 403); return; }
+          // 两种合法调用：管理端（控制台令牌，脚本/运维用）或智能体（会话令牌绑自己那轮）。
+          const operatorOk = Boolean(consoleToken) && tokenEq(token, consoleToken);
           if (!token) { sendJson({ ok: false, error: 'reserved2 模式调用必须携带 agent token' }, 403); return; }
-          if (!agentTokenOk(key, token)) { sendJson({ ok: false, error: 'agent token 无效' }, 403); return; }
+          if (!operatorOk && !agentTokenOk(key, token)) { sendJson({ ok: false, error: 'agent token 无效' }, 403); return; }
           if (!v2ToolEnabled('sing')) { sendJson({ ok: false, error: '工具未启用：qq_sing' }, 403); return; }
-          if (!v2SessionAllowed(key)) { sendJson({ ok: false, error: '目标不在当前模式允许范围内' }, 403); return; }
-          if (shouldBlockSilentReply(key)) { sendJson({ ok: false, error: '静默模式已开启，当前不允许发送' }, 403); return; }
-          const gate = await tierGuardV2(key, 'qq_sing');
+          if (!v2SessionAllowed(target)) { sendJson({ ok: false, error: `目标不在白名单里：${target}` }, 403); return; }
+          if (shouldBlockSilentReply(target)) { sendJson({ ok: false, error: '静默模式已开启，当前不允许发送' }, 403); return; }
+          const gate = await tierGuardV2(target, 'qq_sing');
           if (!gate.ok) { sendJson({ ok: false, error: gate.error, tier: gate.tier, requester: gate.requester }, 403); return; }
           songLibrary.reload();
           const playable = songLibraryPlayable();
@@ -9305,23 +9340,32 @@ async function main() {
             }, 404);
             return;
           }
-          const relFile = String(chosen.file).split(path.sep).join('/');
           const absFile = path.resolve(ROOT, chosen.file);
           if (!fs.existsSync(absFile)) {
-            sendJson({ ok: false, error: `这首歌的文件不见了：${relFile}` }, 500);
+            sendJson({ ok: false, error: `这首歌的文件不见了：${String(chosen.file)}` }, 500);
+            return;
+          }
+          // sendVoiceForV2 的相对路径是**相对语音库目录**（socialV2.voice.dir，默认 audio）解析的。
+          // 曲库清单里存的是仓库根相对路径（audio/songs/x.wav），直接传会变成 audio/audio/songs/x.wav
+          // ——2026-10-27 实测「语音库里找不到」就是这么来的，这里换成相对语音库的 songs/x.wav。
+          const voiceDirAbs = path.resolve(ROOT, String(voice.dir ?? 'audio'));
+          const relFile = path.relative(voiceDirAbs, absFile).split(path.sep).join('/');
+          if (!relFile || relFile.startsWith('..')) {
+            sendJson({ ok: false, error: `这首歌不在语音库里（${relFile || '路径为空'}）：曲库音频要放在 ${path.basename(voiceDirAbs)}/ 下面` }, 500);
             return;
           }
           try {
             const startedAt = Date.now();
-            const sent = await sendVoiceForV2(key, relFile, { label: '唱了首歌', verify: true });
+            const sent = await sendVoiceForV2(target, relFile, { label: '唱了首歌', verify: true });
             songLibrary.markUsed(chosen.id);
-            log('曲库', `已发出 ${chosen.id}（${chosen.title}）→ ${key}，messageId=${sent?.messageId ?? '?'}，用时 ${Date.now() - startedAt}ms`);
+            log('曲库', `已发出 ${chosen.id}（${chosen.title}）→ ${target}${target === key ? '' : `（从 ${key} 点名发的）`}，messageId=${sent?.messageId ?? '?'}，用时 ${Date.now() - startedAt}ms`);
             sendJson({
               ok: true,
               id: chosen.id,
               title: chosen.title,
               moods: chosen.moods ?? [],
               file: relFile,
+              target,
               messageId: sent?.messageId ?? null,
               verified: sent?.verification?.confirmed === true,
               ms: Date.now() - startedAt

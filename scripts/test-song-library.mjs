@@ -110,8 +110,23 @@ ok(/url\.pathname === '\/api\/socialV2\/song-library'/.test(bridgeSrc), 'GET /ap
 ok(/url\.pathname === '\/api\/socialV2\/song-library\/send'/.test(bridgeSrc), 'POST /song-library/send 能发');
 ok(/const chosen = wantId[\s\S]{0,200}songLibrary\.pick\(\{ moods: wantMoods, excludeRecent: 3 \}\)/.test(bridgeSrc), '按 mood 挑（避开最近发过的 3 首）');
 ok(/songLibrary\.markUsed\(chosen\.id\)/.test(bridgeSrc), '发出去后记账');
-ok(/sendVoiceForV2\(key, relFile, \{ label: '唱了首歌', verify: true \}\)/.test(bridgeSrc), '复用 sendVoiceForV2 发语音并回读校验');
+ok(/sendVoiceForV2\(target, relFile, \{ label: '唱了首歌', verify: true \}\)/.test(bridgeSrc), '复用 sendVoiceForV2 发语音并回读校验');
 ok(/曲库还空着/.test(bridgeSrc), '空库时给出可读错误（409）');
+
+console.log('\n曲库：点名发到别处（2026-10-27 主人要的「发到某某地方或群里」）');
+
+ok(/function resolveSongTarget\(raw, fallbackKey = ''\)/.test(bridgeSrc), '有把「发到哪儿」归一成 key 的解析函数');
+ok(/\^\(\?:群\|群聊\|群里\|group\)/.test(bridgeSrc) && /\^\(\?:私聊\|好友\|private\|qq\)/.test(bridgeSrc), '认得「群 851489980 / 私聊 3482501440」这种说法');
+ok(/groups\.includes\(id\) && !privs\.includes\(id\)/.test(bridgeSrc), '光给数字时：在白名单群里按群，否则按私聊');
+ok(/const target = resolveSongTarget\(wantTarget, key\)/.test(bridgeSrc), '路由里 target 缺省回落到当前会话');
+ok(/v2SessionAllowed\(target\)/.test(bridgeSrc) && /目标不在白名单里/.test(bridgeSrc), '点名发别处仍要过白名单');
+ok(/shouldBlockSilentReply\(target\)/.test(bridgeSrc), '别处开着静默也不发');
+ok(/target: z\.string\(\)\.optional\(\)\.describe\('发到哪儿/.test(mcpSrc), 'MCP 工具把 target 暴露给模型');
+ok(/发到了 \$\{data\.target\}/.test(mcpSrc), '发到别处时回话里说清发到哪儿');
+// 2026-10-27 实测：曲库存的是仓库根相对路径，而 sendVoiceForV2 按「语音库目录」解析相对路径，
+// 直接传会变成 audio/audio/songs/x.wav（报「语音库里找不到」）。必须换算成 songs/x.wav。
+ok(/path\.relative\(voiceDirAbs, absFile\)/.test(bridgeSrc), '发给 sendVoiceForV2 的路径要相对语音库目录，不是仓库根');
+ok(/relFile\.startsWith\('\.\.'\)/.test(bridgeSrc), '歌不在语音库里就明确报错，别拿库外文件硬发');
 
 console.log('\n曲库：MCP 工具');
 

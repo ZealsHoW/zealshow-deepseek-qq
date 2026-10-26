@@ -969,7 +969,14 @@ node scripts/voice-convert.mjs --source audio/xxx.wav --target audio/ref/edge-xi
 
 实测（2026-10-26 23:50，停掉 TTS + Hindsight 后可用 ~9.8 GB）：**每首约 40 秒**，6 首全成，音频 4.0~4.7 MB/首（22~26 秒，24 kHz 左右）。所以「预先唱几条」在 16 GB 机器上是可行的，前提是**先把内存腾出来**（见上面「内存基线」那条）。
 
-**她怎么用**：`socialV2.tools.sing` 打开后，工具列表里除了 `qq_sing` 还会多一个 `qq_sing_send`（`key` / `token` 必填，可选 `moods: [...]`、`id`）。返回 `ok=true` 就是**已经发出去了**（带 `messageId`，能读回确认），所以不用再说「等我几分钟」。曲库空的时候回 409 并让她改用 `qq_sing`。
+**她怎么用**：`socialV2.tools.sing` 打开后，工具列表里除了 `qq_sing` 还会多一个 `qq_sing_send`（`key` / `token` 必填，可选 `moods: [...]`、`id`、`target`）。返回 `ok=true` 就是**已经发出去了**（带 `messageId`，能读回确认），所以不用再说「等我几分钟」。曲库空的时候回 409 并让她改用 `qq_sing`。
+
+**发到别处（2026-10-27 加的）**：`target` 可以不填（= 当前会话），也可以点名：
+- `group:851489980`、`群 851489980`、`群聊:851489980`
+- `private:3482501440`、`私聊 3482501440`、`QQ:3482501440`
+- 只给一串数字：白名单群里命中就按群，否则按私聊（两边都在白名单里那也按私聊，别猜）
+
+归类逻辑在 `src/bridge.js` 的 `resolveSongTarget()`。跨会话发送**仍要过白名单**（`v2SessionAllowed(target)`，不过就 403「目标不在白名单里」）和对面的静默开关；`key` 只用来校验令牌归属（她此刻在哪），不再等于发送目标。管理端（`x-console-token` + body 里 `token` 用控制台令牌）可以不带会话令牌调用，方便脚本补发。
 
 **排障**：`GET /api/socialV2/song-library`（带 `x-console-token`）看曲库清单 + `playable`（清单有、文件也在的条数）+ 每首用过几次。桥接每次调用前都会 `reload()` 清单，所以预生成脚本写完不用重启桥接。回归：`npm run test:song-library`。
 - **偶发 `exit=3221225477`（0xC0000005 访问违例）**：diffusion 跑完、后处理阶段崩，重试一次就过（这台 16GB 机器 `available` 常年在 0MB 附近）。脚本会把最后 6 行日志写进 `detail`，看到它重试即可；连续崩就先把 Ollama 模型卸掉再唱。

@@ -119,6 +119,199 @@ const SONGS = [
       '反正你也跑不掉',
       '乖乖坐着当我的听众'
     ].join('\n')
+  },
+  // 2026-10-27 追加：主人要「多一点」，按日常会用到的时候补一打。
+  {
+    id: 'morning-sun',
+    title: '太阳先醒',
+    moods: ['happy', 'cheer'],
+    tags: 'chinese pop, bright female vocal, upbeat, ukulele, morning',
+    duration: 22,
+    steps: 22,
+    lyrics: [
+      '太阳比我起得早',
+      '窗帘缝里挤进来一条光',
+      '被子说再躺五分钟',
+      '我说好就五分钟',
+      '起床啦起床啦',
+      '今天的你也要顺顺利利'
+    ].join('\n')
+  },
+  {
+    id: 'goodnight-kiss',
+    title: '晚安亲亲',
+    moods: ['sleep', 'soothe'],
+    tags: 'lullaby, music box, soft female vocal, slow, dreamy',
+    duration: 26,
+    steps: 24,
+    lyrics: [
+      '灯关掉一半',
+      '留一盏给我唱歌',
+      '你闭上眼睛',
+      '我把今天都收进抽屉',
+      '晚安呀晚安',
+      '明天醒了先叫我的名字'
+    ].join('\n')
+  },
+  {
+    id: 'rainy-window',
+    title: '下雨的窗',
+    moods: ['soothe', 'miss'],
+    tags: 'chinese pop, lo-fi, soft piano, rain, gentle female vocal',
+    duration: 24,
+    steps: 24,
+    lyrics: [
+      '雨敲在窗子上',
+      '像谁在很小声地说话',
+      '我把杯子捧热',
+      '把没说完的话咽回去',
+      '你要是也在下雨',
+      '就当这首是递过去的伞'
+    ].join('\n')
+  },
+  {
+    id: 'exam-luck',
+    title: '考神保佑',
+    moods: ['cheer'],
+    tags: 'chinese pop, energetic female vocal, drums, driving, upbeat',
+    duration: 20,
+    steps: 22,
+    lyrics: [
+      '笔盖拧开',
+      '深呼吸三次',
+      '不会的先跳过',
+      '会的别手抖',
+      '你复习过的每一页',
+      '今晚都站在你这边'
+    ].join('\n')
+  },
+  {
+    id: 'apology-cake',
+    title: '对不起嘛',
+    moods: ['sorry', 'soothe'],
+    tags: 'chinese pop, cute female vocal, acoustic guitar, warm, playful',
+    duration: 22,
+    steps: 22,
+    lyrics: [
+      '刚才是我不对',
+      '话说重了一点点',
+      '我把道歉烤成一块小蛋糕',
+      '奶油抹得有点歪',
+      '你尝一口好不好',
+      '吃完了就不许再生气了'
+    ].join('\n')
+  },
+  {
+    id: 'newyear-firework',
+    title: '新年烟花',
+    moods: ['happy', 'cheer'],
+    tags: 'chinese pop, festive, bells, bright female vocal, celebratory',
+    duration: 24,
+    steps: 24,
+    lyrics: [
+      '烟花在楼顶炸开',
+      '把整条街都照亮',
+      '旧的一年有点粗糙',
+      '新的一年要好好的',
+      '许个愿吧',
+      '我替你数到三'
+    ].join('\n')
+  },
+  {
+    id: 'long-night',
+    title: '夜还很长',
+    moods: ['soothe', 'sleep'],
+    tags: 'ambient, soft humming, slow, warm pad, gentle female vocal',
+    duration: 26,
+    steps: 22,
+    lyrics: [
+      '夜还很长',
+      '不用急着睡着',
+      '我在这儿慢慢哼',
+      '你听着就好',
+      '想说就说两句',
+      '不想说我们就一起安静'
+    ].join('\n')
+  },
+  {
+    id: 'proud-of-you',
+    title: '为你骄傲',
+    moods: ['cheer'],
+    tags: 'chinese pop, anthemic, female vocal, strings, uplifting',
+    duration: 24,
+    steps: 24,
+    lyrics: [
+      '你可能自己没发现',
+      '你比上个月厉害多了',
+      '那些熬过去的晚上',
+      '都算数',
+      '所以抬头',
+      '这首歌是给你的'
+    ].join('\n')
+  },
+  {
+    id: 'silly-dance',
+    title: '跟我乱跳',
+    moods: ['playful', 'happy'],
+    tags: 'funk, bouncy bass, cute female vocal, dance, playful',
+    duration: 20,
+    steps: 20,
+    lyrics: [
+      '左脚右脚随便踩',
+      '不用管拍子对不对',
+      '反正现在没人看',
+      '你就当自己是主角',
+      '跳得难看也没关系',
+      '我陪你一起难看'
+    ].join('\n')
+  },
+  {
+    id: 'hug-now',
+    title: '现在抱一下',
+    moods: ['soothe', 'miss'],
+    tags: 'chinese R&B, soft female vocal, warm, slow groove, gentle',
+    duration: 22,
+    steps: 22,
+    lyrics: [
+      '不用说话',
+      '靠过来一点就好',
+      '我把手放在你背上',
+      '数你呼吸的节拍',
+      '累就累一会儿',
+      '我在呢'
+    ].join('\n')
+  },
+  {
+    id: 'weekend-lazy',
+    title: '周末别起床',
+    moods: ['happy', 'playful'],
+    tags: 'bossa nova, light female vocal, guitar, lazy afternoon, warm',
+    duration: 22,
+    steps: 22,
+    lyrics: [
+      '周末的早上',
+      '闹钟已经被我关掉',
+      '早饭等它凉一点',
+      '我们先把觉睡完',
+      '躺着也算正经事',
+      '今天谁也别勤快'
+    ].join('\n')
+  },
+  {
+    id: 'thank-you',
+    title: '谢谢你呀',
+    moods: ['cheer', 'soothe'],
+    tags: 'chinese folk pop, warm female vocal, acoustic, sincere, gentle',
+    duration: 22,
+    steps: 22,
+    lyrics: [
+      '谢谢你呀',
+      '把我这点小毛病都接住',
+      '我不会说很漂亮的话',
+      '就把这句唱得认真一点',
+      '以后也这样吧',
+      '你往前走 我跟着'
+    ].join('\n')
   }
 ];
 

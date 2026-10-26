@@ -2326,27 +2326,29 @@ if (cfg.socialV2?.voice?.enabled !== false && cfg.socialV2?.tools?.sing !== fals
   // 曲库：提前存好的几首成品，按情景秒发（不用等 1~5 分钟生成）。
   server.tool(
     'qq_sing_send',
-    '从曲库发一首**已经唱好**的歌——秒发，不用等生成。曲库是提前录好的几首，按情景分了 mood：happy 开心 / soothe 安慰 / sleep 哄睡 / birthday 生日 / miss 想他 / playful 调皮 / cheer 打气 / sorry 道歉。只给 moods 就会挑一首合适的（最近发过的会被避开），也可以给 id 点名要某一首。调用返回 ok=true 就代表**已经发出**了（带 messageId），所以不用再说「等我几分钟」，发完接着聊即可。如果返回曲库是空的（409），说明还没预生成，那时才用 qq_sing 现场唱。',
+    '从曲库发一首**已经唱好**的歌——秒发，不用等生成。曲库是提前录好的几首，按情景分了 mood：happy 开心 / soothe 安慰 / sleep 哄睡 / birthday 生日 / miss 想他 / playful 调皮 / cheer 打气 / sorry 道歉。只给 moods 就会挑一首合适的（最近发过的会被避开），也可以给 id 点名要某一首。**可以点名发到别处**：给 target（比如群 851489980，或 private:3482501440），不给就发到当前这个会话；只能发到白名单里的人或群。调用返回 ok=true 就代表**已经发出**了（带 messageId），所以不用再说「等我几分钟」，发完接着聊即可。如果返回曲库是空的（409），说明还没预生成，那时才用 qq_sing 现场唱。',
     {
-      key: z.string().describe('会话 key，格式 group:群号 或 private:QQ号'),
+      key: z.string().describe('你此刻所在的会话 key，格式 group:群号 或 private:QQ号'),
       token: z.string().describe('会话令牌（见唤醒提示中的【会话令牌】）'),
       moods: z.array(z.string()).optional().describe('情景标签，可多个：happy/soothe/sleep/birthday/miss/playful/cheer/sorry。不给就随机挑一首'),
-      id: z.string().optional().describe('点名要某一首（曲库 id，比如 sleep-lullaby）；给了就不按 moods 挑')
+      id: z.string().optional().describe('点名要某一首（曲库 id，比如 sleep-lullaby）；给了就不按 moods 挑'),
+      target: z.string().optional().describe('发到哪儿：留空=当前这个会话；也可以 group:群号 / 群 851489980 / private:3482501440 / 私聊 3482501440。只能在白名单里，发别处会被拒')
     },
-    async ({ key, token, moods, id }) => {
+    async ({ key, token, moods, id, target }) => {
       try {
         const data = await agentApi('/api/socialV2/song-library/send', {
           method: 'POST',
-          body: JSON.stringify({ key, token, ...(Array.isArray(moods) && moods.length ? { moods } : {}), ...(id ? { id } : {}) }),
+          body: JSON.stringify({ key, token, ...(target ? { target } : {}), ...(Array.isArray(moods) && moods.length ? { moods } : {}), ...(id ? { id } : {}) }),
           headers: { 'x-agent-token': token },
           timeoutMs: 60000
         });
         if (data?.ok) {
           const moodText = (data.moods ?? []).join('/') || '没标';
+          const where = data.target && data.target !== key ? `发到了 ${data.target}` : '就在这个会话里';
           return {
             content: [{
               type: 'text',
-              text: `已经发出去了：《${data.title}》（${data.id}，${moodText}，${data.messageId ? `messageId=${data.messageId}` : '没拿到 messageId'}${data.verified ? '，回读确认是真的语音' : ''}）。这是提前唱好的成品，对方听到的是完整的歌，不用再等生成。`
+              text: `已经发出去了：《${data.title}》（${data.id}，${moodText}，${where}，${data.messageId ? `messageId=${data.messageId}` : '没拿到 messageId'}${data.verified ? '，回读确认是真的语音' : ''}）。这是提前唱好的成品，对方听到的是完整的歌，不用再等生成。`
             }]
           };
         }
