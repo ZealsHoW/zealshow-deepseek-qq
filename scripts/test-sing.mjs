@@ -42,6 +42,14 @@ for (const flag of ['--lyrics', '--tags', '--duration', '--steps', '--out', '--c
   ok(mjs.includes(`'${flag}'`) && py.includes(`'${flag}'`), `${flag} 两端都对得上`);
 }
 ok(/lyrics-file/.test(mjs) && /lyrics-file/.test(py), '--lyrics-file 两端都对得上');
+// 2026-10-27：主人嫌跑调/音色不真实，加 audio2audio 参考通道（照参考音频的曲风唱）。
+ok(/--ref-strength/.test(mjs) && /--ref-strength/.test(py), '--ref / --ref-strength 两端都对得上');
+ok(/audio2audio_enable/.test(py) && /ref_audio_input/.test(py), 'sing.py 真的把参考音频传进 ACE-Step 的 audio2audio');
+ok(/args\.ref\) pyArgs\.push\('--ref'/.test(mjs), 'sing.mjs 会把 --ref 透传给 python');
+ok(/参考音频不存在/.test(py), '参考音频不存在时明确报错，不去猜');
+// 2026-10-27 实测：torchaudio 2.9+ 的 load() 改走 torchcodec，venv 里没装 ⇒ --ref 直接 ImportError。
+// sing.py 必须像 save 一样用 soundfile 顶掉它，否则参考通道在真机上根本跑不起来。
+ok(/_load_via_soundfile/.test(py) && /_ta2\.load = _load_via_soundfile/.test(py), 'sing.py 用 soundfile 顶掉 torchaudio.load（否则 --ref 缺 torchcodec 直接崩）');
 
 console.log('## 依赖现状');
 const acestepHome = process.env.ACESTEP_HOME || path.resolve(repoRoot, '..', '_acestep');

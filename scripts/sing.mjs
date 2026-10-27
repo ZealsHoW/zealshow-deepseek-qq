@@ -66,6 +66,9 @@ if (args.steps) pyArgs.push('--steps', String(args.steps));
 if (args.seed !== undefined) pyArgs.push('--seed', String(args.seed));
 if (args['checkpoint-dir']) pyArgs.push('--checkpoint-dir', args['checkpoint-dir']);
 if (args['cpu-offload'] !== undefined) pyArgs.push('--cpu-offload', String(args['cpu-offload']));
+// audio2audio：照参考音频的曲风/配器唱（--ref 一段音频，--ref-strength 0~1 越大越贴近）。
+if (args.ref) pyArgs.push('--ref', String(args.ref));
+if (args['ref-strength'] !== undefined) pyArgs.push('--ref-strength', String(args['ref-strength']));
 const outPath = args.out || path.join('audio', 'sing-out.wav');
 pyArgs.push('--out', outPath);
 

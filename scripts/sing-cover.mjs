@@ -20,6 +20,8 @@
 //   --add               唱完收进曲库（qq_sing_send 以后能直接点）
 //   --no-vc             不换音色（ACE-Step 的原声）
 //   --out <路径>        输出位置（默认 audio/songs/cover-<slug>.wav）
+//   --ref <音频>        参考音频（audio2audio）：只影响曲风/配器/律动，不会让她照着原曲的旋律唱
+//   --ref-strength <0~1> 参考的相似强度，默认 0.6（越大越贴参考的编曲气质）
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
@@ -28,7 +30,7 @@ import { createSongLibrary } from '../src/qqb/song-library.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const argv = process.argv.slice(2);
-const opts = { send: '', tags: 'mandopop ballad, sad female vocal, piano, strings, slow, emotional', duration: 30, steps: 26, title: '', moods: ['sad'], add: false, vc: true, out: '' };
+const opts = { send: '', tags: 'mandopop ballad, sad female vocal, piano, strings, slow, emotional', duration: 30, steps: 26, title: '', moods: ['sad'], add: false, vc: true, out: '', ref: '', refStrength: 0.6 };
 const rest = [];
 for (let i = 0; i < argv.length; i++) {
   const a = argv[i];
@@ -41,6 +43,8 @@ for (let i = 0; i < argv.length; i++) {
   else if (a === '--add') opts.add = true;
   else if (a === '--no-vc') opts.vc = false;
   else if (a === '--out') opts.out = String(argv[++i] ?? '');
+  else if (a === '--ref') opts.ref = String(argv[++i] ?? '');
+  else if (a === '--ref-strength') opts.refStrength = Math.min(Math.max(Number(argv[++i]) || 0.6, 0), 1);
   else rest.push(a);
 }
 
@@ -80,6 +84,7 @@ const title = opts.title || slugBase;
 
 const args = [path.join(root, 'scripts', 'sing.mjs'), '--lyrics-file', lyricsPath, '--tags', opts.tags, '--duration', String(opts.duration), '--steps', String(opts.steps), '--out', outRel, '--json'];
 if (opts.vc) args.push('--vc');
+if (opts.ref) args.push('--ref', String(opts.ref), '--ref-strength', String(opts.refStrength));
 if (opts.send) args.push('--send', opts.send);
 
 console.log(`▶ 唱《${title}》：${lyrics.split(/\r?\n/).filter(Boolean).length} 句 / ${opts.duration}s${opts.vc ? ' / 换她的音色' : ''}`);

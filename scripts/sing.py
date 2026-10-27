@@ -47,6 +47,8 @@ def main():
     ap.add_argument('--checkpoint-dir', default=os.environ.get('ACESTEP_CHECKPOINT_DIR', DEFAULT_CKPT))
     ap.add_argument('--cpu-offload', type=int, default=1, help='1=开（8GB 显存推荐），0=关')
     ap.add_argument('--overlapped-decode', type=int, default=1)
+    ap.add_argument('--ref', default='', help='参考音频（audio2audio）：照着它的曲风/配器唱')
+    ap.add_argument('--ref-strength', type=float, default=0.6, help='参考强度 0~1（越大越贴近参考）')
     args = ap.parse_args()
 
     lyrics = args.lyrics
@@ -92,6 +94,24 @@ def main():
     except Exception as e:  # noqa: BLE001
         print(f'  ⚠ 没换成 soundfile 后端（{e}），如果一会儿 save 报 torchcodec 就是这个原因', flush=True)
 
+    # 同一件事的另一半：torchaudio 2.9+ 的 load() 也改走 torchcodec。
+    # 参考音频（--ref）那条路是 pipeline 自己调 torchaudio.load 读进来的，缺 torchcodec 会直接
+    # ImportError: TorchCodec is required（2026-10-27 实测）。这里用 soundfile 顶一个：
+    # soundfile 读出来是 (time, channels)，torchaudio.load 约定是 (channels, time)。
+    try:
+        import torchaudio as _ta2
+        import soundfile as _sf2
+        import torch as _torch
+
+        def _load_via_soundfile(filepath, **kwargs):
+            data, sr = _sf2.read(str(filepath), dtype='float32', always_2d=True)
+            wav = _torch.from_numpy(data.T.copy())
+            return wav, int(sr)
+
+        _ta2.load = _load_via_soundfile
+    except Exception as e:  # noqa: BLE001
+        print(f'  ⚠ 没换成 soundfile 读取后端（{e}），--ref 可能报 torchcodec 缺失', flush=True)
+
     if torch.cuda.is_available():
         print(f'  GPU: {torch.cuda.get_device_name(0)} / {torch.cuda.get_device_properties(0).total_memory / 1024**3:.1f}GB', flush=True)
     else:
@@ -109,6 +129,18 @@ def main():
     seeds = None if args.seed < 0 else [args.seed]
     t1 = time.time()
     print(f'→ 生成 {args.duration:.0f}s / {args.steps} 步 …', flush=True)
+    extra = {}
+    # audio2audio：给一段参考音频，让模型照着那个「味道」写（曲风/配器/律动都靠得更近）。
+    # 2026-10-27 主人嫌她唱得跑调、音色不真实时加的通道：ACE-Step 本身不支持按原曲旋律唱，
+    # 但给参考音频能明显改善编曲与演唱的「像首歌」程度。参考片段只在本机读，不入库。
+    if args.ref:
+        if not os.path.isfile(args.ref):
+            print(f'✗ 参考音频不存在：{args.ref}', file=sys.stderr)
+            return 2
+        print(f'→ 参考音频：{args.ref}（强度 {args.ref_strength:.2f}）', flush=True)
+        extra['audio2audio_enable'] = True
+        extra['ref_audio_input'] = os.path.abspath(args.ref)
+        extra['ref_audio_strength'] = float(args.ref_strength)
     pipe(
         prompt=args.tags,
         lyrics=lyrics,
@@ -118,6 +150,7 @@ def main():
         save_path=out,
         format='wav',
         batch_size=1,
+        **extra,
     )
     dt = time.time() - t1
     if not os.path.isfile(out):

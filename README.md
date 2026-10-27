@@ -1000,6 +1000,20 @@ node scripts/sing-cover.mjs 雨爱 --mood sad --add
 - ACE-Step 只会按给你的词**重新作曲**（不会复刻原曲的旋律/编曲），所以听感是「她用这个风格唱这些词」，不是原版伴奏里的人声替换。
 - 歌词上限 1200 字（接口限制），太长就分两段唱。唱一首约 2~3 分钟（含 110 秒左右的换音色），内存不够先跑 `scripts/mem-free.ps1`。
 - 她自己也能现唱：主人在聊天里把歌词贴给她，她用 `qq_sing`（`lyrics` 直接传）就行，不用经过这个脚本。
+- **参考音频（`--ref` / `--ref-strength`）**：`node scripts/sing-cover.mjs 雨爱 --ref audio/songs/sad-rain.wav --ref-strength 0.6`。这条走的是 ACE-Step 的 audio2audio，**只影响曲风/配器/律动，不会让她照着参考里的旋律唱**（想复刻原曲旋律这条做不到，得去训练/换专门的人声翻唱模型）。参考文件不存在会直接报错退出。
+  - 环境坑（2026-10-27 实测）：torchaudio 2.9+ 的 `load()` 改走 **torchcodec**，而这个 venv 里没装 ⇒ `--ref` 会在 `infer_latents` 里 `ImportError: TorchCodec is required`。`scripts/sing.py` 里已经用 **soundfile** 顶掉 `torchaudio.load`（和它早就顶掉 `torchaudio.save` 同一个理由），所以不用装 torchcodec、也不用 ffmpeg 的 C 库。
+
+#### 为什么她唱起来有点跑调、音色也不太像真人
+
+这三件事是分开的，别混在一起改：
+
+| 听起来的问题 | 真正的原因 | 能怎么动 |
+| --- | --- | --- |
+| 跑调 / 五音不全 | ACE-Step 是**把旋律和唱腔一起生成**的：词一进去，音高曲线是模型自己「编」的，不是先有谱再唱；换气、咬字也跟着抖 | 调高 `--steps`（26→45 明显更稳）、tags 加 `in tune, clear Mandarin pronunciation`；本质改不了——所以人设里干脆写成「爱唱歌但五音不全」（见下） |
+| 音色不像真人 | 换音色那一步（Seed-VC）只搬**音色**，不修音高、不改口型；参考片段（`audio/ref/xiaojing-b-p1.wav`，7.4 秒）越短、越平，越容易发闷/发夹 | `scripts/voice-convert.mjs --steps 50 --similarity 0.85 --intelligibility 0.9`（更贴参考音色，但会更「端着」）；参考片段可以用 `scripts/pick-ref-segment.py --pitch` 重挑 |
+| 听着「假」 | 22.1 kHz 单声道 + 模型生成的混响，高频本来就薄 | 只能在生成侧调 tags（加 `warm, breathy, close mic`）——别指望后期修 |
+
+**人设里那条（2026-10-27 主人定）**：`roles/小鲸鱼.md` 的「性格」里写着「**爱唱歌，而且五音不全**：一听到歌就想跟着唱……爸妈从来不嫌她唱得难听，还夸她敢开口、敢表现」。所以跑调不是 bug，是她的设定——被说跑调她会先不服气「哪有」，然后自己笑场。改人格卡不用重启（`currentRoleHintV2()` 按 mtime+size 缓存，下一轮就读到）。
 
 ## 待发文件夹（qq_list_outbox / qq_save_message_image / qq_draw_image）
 

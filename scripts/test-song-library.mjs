@@ -164,5 +164,6 @@ ok(/--lyrics-file/.test(coverCode), '翻唱走 --lyrics-file 传歌词，不在�
 ok(/state', 'lyrics'/.test(coverCode) || /state\/lyrics/.test(coverCode), '也认 state/lyrics/ 下的 txt');
 ok(/--send/.test(coverCode) && /--add/.test(coverCode), '能直接发出去，也能收进曲库');
 ok(/createSongLibrary/.test(coverCode), '收进曲库用的是同一套 song-library');
+ok(/--ref-strength/.test(coverCode) && /opts\.ref\) args\.push\('--ref'/.test(coverCode), '翻唱脚本能把参考音频（--ref / --ref-strength）透传给 sing.mjs');
 
 console.log(`\n结果：${passed} 通过 0 失败`);
