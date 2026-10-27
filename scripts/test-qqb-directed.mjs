@@ -184,3 +184,13 @@ test('追办：答应了不动手会被叫醒，且不许编「已经发了」',
   // 全局铁律：做过才许说做过
   assert.ok(src.includes('【做过才许说做过】'));
 });
+test('追办：控制台下托付也挂追办，待办带「已经等了N分钟」，直连引擎也有追办提示词', () => {
+  const src = fs.readFileSync(path.join(import.meta.dirname, '..', 'src', 'bridge.js'), 'utf8');
+  // 控制台 /api/directives/create 原来只落盘、不挂追办 —— 聊天路径有、这条路径没有。
+  assert.ok(src.includes('runtimeHooks.directiveNudge(originKey, created.directive.id)'));
+  // 只列待办会被当成背景板：每一条都得带上等了多久
+  assert.ok(src.includes('⏰已经等了 ${Math.round(waitedMs / 60000)} 分钟还没动手'));
+  // 追办提示词原来只写在 DSH 路径（buildWakePromptV2），直连引擎的 buildEnginePrompts 没有
+  assert.equal(src.split("reason.startsWith('directiveFollowUp')").length - 1, 2);
+  assert.ok(src.includes('const followUpLine = reason.startsWith'));
+});

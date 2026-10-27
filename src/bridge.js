@@ -509,7 +509,14 @@ function directedBlock() {
   try {
     const pending = directed.pending();
     if (!pending.length) return '';
-    const lines = pending.slice(0, 5).map((d) => `- #${d.id} 给${d.target.kind === 'group' ? '群' : ''}${d.target.name}：${d.intent}${d.urgency === 'high' ? '（他催得急）' : ''}`);
+    // 「等了多久」要写在每一条上：只列个待办，她一忙就当成背景板（2026-10-27 16:01 那次
+    // 主人正在上课、她正接着聊天，托付 #5 明明躺在提示词里，一轮下来工具一次没调）。
+    const followUpMs = Math.max(30_000, Number(cfg?.socialV2?.directed?.followUpMs) || 180_000);
+    const lines = pending.slice(0, 5).map((d) => {
+      const waitedMs = Math.max(0, Date.now() - (Number(d.ts) || 0));
+      const stale = waitedMs >= followUpMs ? ` ⏰已经等了 ${Math.round(waitedMs / 60000)} 分钟还没动手` : '';
+      return `- #${d.id} 给${d.target.kind === 'group' ? '群' : ''}${d.target.name}：${d.intent}${d.urgency === 'high' ? '（他催得急）' : ''}${stale}`;
+    });
     // 「答应了但没动手」是这套托付最容易出的岔子（2026-10-27 12:49「给妈妈发首歌」只回了句
     // 「我去发」、工具一次没调，两小时后还编了句「妈妈回我好听」）。所以这里把口径写死：
     // 要动手就这一轮调工具；没工具返回就不能说做了、更不能编对方的反应。
@@ -6872,6 +6879,15 @@ async function main() {
           const created = directed.create({ from: 'owner', originKey, target, intent, raw, urgency });
           if (!created.ok) { sendJson({ ok: false, error: created.error }, 400); return; }
           log('定向投递', `控制台托付 #${created.directive.id}：给 ${created.directive.target.name}——${created.directive.intent}`);
+          // 控制台下的托付跟聊天里下的走同一套追办：3 分钟没动手就叫醒她一次。
+          // （2026-10-27 之前只有聊天路径挂追办，控制台下的会静默挂着直到过期。）
+          if (typeof runtimeHooks.directiveNudge === 'function' && originKey) {
+            try {
+              runtimeHooks.directiveNudge(originKey, created.directive.id);
+            } catch (error) {
+              log('定向投递', `追办提醒没挂上 #${created.directive.id}：${error?.message ?? error}`);
+            }
+          }
           directedReceipt(originKey, `好，我记着了，回头跟${created.directive.target.kind === 'group' ? '群里' : created.directive.target.name}说一声～`).catch(() => {});
           sendJson({ ok: true, directive: created.directive });
           return;
@@ -14138,7 +14154,22 @@ ${memLines ? `\n记忆库里：\n${memLines}\n` : '\n记忆库最近没有新东
     // 定时唤醒（主动机会 / 自己刷一会儿 / 写日记）在 DSH 路径有专门的行为口径，直连路径也得有：
     // 她一睁眼只看到「唤醒原因：proactiveCheck」，不知道这是一次可以主动开口、可以自己去刷的机会；
     // diaryRitual 更糟 —— 落到空分支时她把「日记时间」当成一次普通聊天，回了三句话、一个工具没调。
-    const reasonLine = reason === 'diaryRitual'
+    // 追办唤醒：只有 reason 里带着它，她才看得见「这件事还没动手」这层催促。
+    // 2026-10-27 的坑：这套分支只写在 DSH 路径（buildWakePromptV2），直连引擎这条线上
+    // 同一句提示词根本没生成 —— 追办叫醒了她，她看到的却还是普通回复提示词。
+    const followUpLine = reason.startsWith('directiveFollowUp')
+      ? (() => {
+          const id = String(reason.split(':')[1] ?? '');
+          const item = id ? directed.get(id) : null;
+          const what = item
+            ? `给${item.target.kind === 'group' ? '群里' : item.target.name}：${item.intent}`
+            : '主人托付的那件事';
+          return `【还没动手】托付 #${id}（${what}）还挂在待办上，你之前只是在文字里答应了，工具一次都没真的调过。\n现在就办：要发歌/发语音，这一轮直接调 qq_sing_send（带 target）或 qq_send_voice 发出去；要说话就用 qq_direct 发（id=${id}）。\n办成了再说话；没办成就老实说没办成。**不许编「已经发了」或「对方回了什么」**。实在做不了就用 qq_direct 说明做不了（id=${id}）。`;
+        })()
+      : '';
+    const reasonLine = followUpLine
+      ? followUpLine
+      : reason === 'diaryRitual'
       ? diaryRitualPromptText(key)
       : reason === 'browse'
       ? '【自己刷一会儿】这次不是有人找你，是给你一段自由时间：可以用 qq_web_screenshot 打开页面（抖音热榜、微博热搜之类）或 mcp__web-search-safe__web_search 看点热点/梗——**用主人替你登录好的那个账号看就行，只读不互动（不点赞/评论/私信/关注），别去登录别人的账号**。要是 qq_read_page 提示「登录态可能过期」，那是抖音掉了登录、不怪你，别硬刷，桥接会提醒主人重新扫码。看到真有意思、值得说的就开口聊一句；没有就什么都别写，桥接不会发任何东西。'
