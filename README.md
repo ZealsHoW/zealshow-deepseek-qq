@@ -1027,10 +1027,16 @@ pwsh -File _rvc\quick45.ps1 -Models @('e60_s4560','e100_s12500') -Start 30 -Seco
 ```
 
 - **成品必须压在 45 秒左右（QQ 语音输入上限 60 秒，主人 2026-10-27 明确要求）**。55 秒会被掐、也没法重听，留出 15 秒余量最稳；`quick45.ps1` 默认就是 45 秒。
-- **治破音（后半程最明显）**：① 干声喂 RVC 前先 `loudnorm=I=-18:TP=-3`（源码人声后半段常顶到 0 dBFS，削波会一路带进换音）；② `--index-rate 0.4 --protect 0.5`（0.75/0.33 是默认值，索引放得太重会金属感/沙）；③ 混音里 `highshelf=g=-2:f=7000` 收齿音、`alimiter=limit=0.9` 压人声、总线 `loudnorm=I=-15:TP=-1.5` 后再 `alimiter=limit=0.94`。四条一起上，实测削波样点 0、峰值 ≤ −1.0 dBFS。
+- **治破音/发沙（后半程最明显），2026-10-27 三条候选实测选中的配方**（主人选「第三条」）：
+  1. 干声喂 RVC 前先 `loudnorm=I=-18:TP=-3`（源人声副歌常顶到 0 dBFS，溢出会一路带进换音）；
+  2. `--index-rate 0.4 --protect 0.5`（默认 0.75/0.33；索引放得太重会金属感/沙）；
+  3. 混音链里人声 `lowpass=f=9000`（**这一条是治「高音区沙粒」的关键**，也是主人最终选中的原因）+ `highshelf=g=-1.5:f=7500` + `volume=0.72`；
+  4. **混音前不加 `alimiter`**（持续大音量的人声被它压过反而发破），只在总线上 `loudnorm=I=-15:TP=-1.8` 后 `alimiter=limit=0.96:attack=5:release=120`。
+
+  两条脚本的默认值已经是这套（`quick45.ps1` / `make-cover.ps1`），实测削波样点 0、峰值 −1.5 dBFS 左右。当时另外两条候选（去掉限幅只改混音 / index 0.6+protect 0.25）都不如这条干净，别回退。
 - **长音（副歌拖腔）**：这个 fork 的推理 CLI 只支持 `--f0-method pm|rmvpe`（**没有 harvest**），所以长音只能靠「降低 index-rate + 提高 protect」保；实测 493 Hz 那条长音 源 1.31 s → 换音后 1.15 s，够用。段落裁到「让长音落在 40–45 秒」最保险：`python -P _rvc\find-long-notes.py <人声.wav> 20 95` 先看长音在哪。
-- **自检**：`python -P _rvc\check45.py <mix.wav> <conv.wav> [起点秒]` —— 要求削波 0、峰值 ≤ −1 dBFS、结尾区长音 ≥ 1.0 s，三项都过再发。发之前还要 `-c:a pcm_s16le`（44.1 kHz 立体声 45 秒约 7.6 MB，`send-voice.mjs` 上限 20 MB）。
-- 音色取舍（主人听感）：`e60_s4560`（只有 290 条 TTS 语料）**节奏更稳**；`e100_s12500`（加了 11 条真实素材 ×3）**人声更像真人**但节奏略晃。两边长音/破音处理一样，只有权重不同。
+- **自检**：`python -P _rvc\check45.py <mix.wav> <conv.wav> [起点秒]` —— 要求削波 0、峰值 ≤ −1 dBFS、结尾区长音 ≥ 1.0 s，三项都过再发；`diag-distort.py` / `diag-clip.py` / `gravel.py` 用来对比「源干声 vs 换音后」的峰值、削波、音高抖动、3–10 kHz 平坦度。发之前还要 `-c:a pcm_s16le`（44.1 kHz 立体声 45 秒约 7.6 MB，`send-voice.mjs` 上限 20 MB）。
+- 音色取舍（主人听感）：`e60_s4560`（只有 290 条 TTS 语料）**节奏更稳、最终选用**；`e100_s12500`（加了 11 条真实素材 ×3）**人声更像真人**但节奏略晃、后半程更容易发沙。注：e100 之后继续训到 e130 的那轮被主动停掉，没再往下训。
 
 ## 待发文件夹（qq_list_outbox / qq_save_message_image / qq_draw_image）
 
