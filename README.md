@@ -1015,6 +1015,23 @@ node scripts/sing-cover.mjs 雨爱 --mood sad --add
 
 **人设里那条（2026-10-27 主人定）**：`roles/小鲸鱼.md` 的「性格」里写着「**爱唱歌，而且五音不全**：一听到歌就想跟着唱……爸妈从来不嫌她唱得难听，还夸她敢开口、敢表现」。所以跑调不是 bug，是她的设定——被说跑调她会先不服气「哪有」，然后自己笑场。改人格卡不用重启（`currentRoleHintV2()` 按 mtime+size 缓存，下一轮就读到）。
 
+#### 用原曲做翻唱（RVC 换音色，2026-10-27）
+
+ACE-Step 那条路只会重新作曲；要**原曲旋律 + 她的音色**，走 `_rvc\`（RVC v2 40k，权重 `assets/weights/xiaojing_e*.pth`）：
+
+```powershell
+# 整首：分离 → 40 秒切片 → 逐片换音色 → 拼接 → 混音 → 截片段
+pwsh -File _rvc\make-cover.ps1 -Song 'sound\某首.wav' -Model xiaojing_e60_s4560 -CutSeconds 45
+# 45 秒快出（A/B 对比、直接发用这个最省事）
+pwsh -File _rvc\quick45.ps1 -Models @('e60_s4560','e100_s12500') -Start 30 -Seconds 45 -Tag ab
+```
+
+- **成品必须压在 45 秒左右（QQ 语音输入上限 60 秒，主人 2026-10-27 明确要求）**。55 秒会被掐、也没法重听，留出 15 秒余量最稳；`quick45.ps1` 默认就是 45 秒。
+- **治破音（后半程最明显）**：① 干声喂 RVC 前先 `loudnorm=I=-18:TP=-3`（源码人声后半段常顶到 0 dBFS，削波会一路带进换音）；② `--index-rate 0.4 --protect 0.5`（0.75/0.33 是默认值，索引放得太重会金属感/沙）；③ 混音里 `highshelf=g=-2:f=7000` 收齿音、`alimiter=limit=0.9` 压人声、总线 `loudnorm=I=-15:TP=-1.5` 后再 `alimiter=limit=0.94`。四条一起上，实测削波样点 0、峰值 ≤ −1.0 dBFS。
+- **长音（副歌拖腔）**：这个 fork 的推理 CLI 只支持 `--f0-method pm|rmvpe`（**没有 harvest**），所以长音只能靠「降低 index-rate + 提高 protect」保；实测 493 Hz 那条长音 源 1.31 s → 换音后 1.15 s，够用。段落裁到「让长音落在 40–45 秒」最保险：`python -P _rvc\find-long-notes.py <人声.wav> 20 95` 先看长音在哪。
+- **自检**：`python -P _rvc\check45.py <mix.wav> <conv.wav> [起点秒]` —— 要求削波 0、峰值 ≤ −1 dBFS、结尾区长音 ≥ 1.0 s，三项都过再发。发之前还要 `-c:a pcm_s16le`（44.1 kHz 立体声 45 秒约 7.6 MB，`send-voice.mjs` 上限 20 MB）。
+- 音色取舍（主人听感）：`e60_s4560`（只有 290 条 TTS 语料）**节奏更稳**；`e100_s12500`（加了 11 条真实素材 ×3）**人声更像真人**但节奏略晃。两边长音/破音处理一样，只有权重不同。
+
 ## 待发文件夹（qq_list_outbox / qq_save_message_image / qq_draw_image）
 
 `state/outbox/` 就是「待发文件夹」：她自己截的网页、收藏的网图、画的图、以及**主人丢进去让她发的文件**都放这儿，`qq_send_image` 只认这个目录里的文件名。默认开启，开关是 `socialV2.tools.listOutbox` / `saveMessageImage` / `drawImage`。

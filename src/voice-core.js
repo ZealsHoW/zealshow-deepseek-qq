@@ -238,7 +238,9 @@ export async function inspectAudio(file, {
   if (p.duration > maxSeconds) {
     return { ok: false, size: st.size, duration: p.duration, codec: p.codec, error: `时长 ${formatDuration(p.duration)} 超过上限 ${formatDuration(maxSeconds)}` };
   }
-  if (p.duration > 60) warnings.push(`时长 ${formatDuration(p.duration)} 较长，QQ 会显示为长语音`);
+  // QQ 语音输入上限 60 秒（主人 2026-10-27 明确）：超了对方听不全，所以人声/翻唱一律压到 45 秒左右。
+  if (p.duration > 60) warnings.push(`时长 ${formatDuration(p.duration)} 超过 QQ 语音输入上限（60 秒），对方可能只听到开头一截`);
+  else if (p.duration > 48) warnings.push(`时长 ${formatDuration(p.duration)} 已经贴近 QQ 语音上限（60 秒），建议压到 45 秒左右再发`);
   if (!p.codec) warnings.push('没找到音频流，网关转码可能失败');
   return {
     ok: true, size: st.size, duration: p.duration, codec: p.codec,

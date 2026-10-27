@@ -108,6 +108,15 @@ console.log('## 音频校验（体积/空文件）');
   ok(describeAudio({ duration: 95, size: 2048, codec: 'mp3', sampleRate: 24000, channels: 1 }).includes('1分35秒'), 'describeAudio 含时长与编码');
 }
 
+console.log('## QQ 语音上限（60 秒）与「压到 45 秒」口径');
+{
+  // 主人 2026-10-27 定的口径：QQ 语音输入上限 60 秒，人声/翻唱一律压到 45 秒左右再发。
+  // 这里盯的是「这条口径还写在代码里」，防止有人把告警删掉后又是 5 分钟的长语音直接发出去。
+  const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'voice-core.js'), 'utf8');
+  ok(/QQ 语音输入上限/.test(src), '超过 60 秒的语音会被标成「超过 QQ 语音输入上限」');
+  ok(/> 48/.test(src) && /45 秒左右/.test(src), '48 秒以上就提醒压到 45 秒左右');
+}
+
 console.log('## 配置项（AI 发语音默认关闭，等语音库准备好再开）');
 {
   // 这一段查的是**「出厂默认就应该是关的」**这类契约。该契约的权威声明是
