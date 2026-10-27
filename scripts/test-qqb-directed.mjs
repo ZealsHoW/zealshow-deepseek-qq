@@ -169,3 +169,18 @@ test('统计与别名表；坏文件不影响使用', () => {
   fs.rmSync(root, { recursive: true, force: true });
   fs.rmSync(bad, { recursive: true, force: true });
 });
+test('追办：答应了不动手会被叫醒，且不许编「已经发了」', () => {
+  const src = fs.readFileSync(path.join(import.meta.dirname, '..', 'src', 'bridge.js'), 'utf8');
+  // 托付注入块把口径写死：这一轮就调工具、没工具返回不许说做了
+  assert.ok(src.includes('要办就**这一轮直接调工具**办掉'));
+  assert.ok(src.includes('只在文字里说「我去发」不算做过'));
+  // 入队后挂追办计时器，到点还没定夺就叫醒
+  assert.ok(src.includes('runtimeHooks.directiveNudge = (key, id) =>'));
+  assert.ok(src.includes("scheduleWakeV2(key, `directiveFollowUp:${id}`)"));
+  assert.ok(src.includes("'directiveFollowUp']"));
+  // 追办那一轮的提示词明说「还没动手」，并禁止编造结果
+  assert.ok(src.includes("reason.startsWith('directiveFollowUp')"));
+  assert.ok(src.includes('不许编「已经发了」'));
+  // 全局铁律：做过才许说做过
+  assert.ok(src.includes('【做过才许说做过】'));
+});

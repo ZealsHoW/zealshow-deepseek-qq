@@ -510,7 +510,10 @@ function directedBlock() {
     const pending = directed.pending();
     if (!pending.length) return '';
     const lines = pending.slice(0, 5).map((d) => `- #${d.id} 给${d.target.kind === 'group' ? '群' : ''}${d.target.name}：${d.intent}${d.urgency === 'high' ? '（他催得急）' : ''}`);
-    return `【主人托付的事（只是托付，做不做、怎么说都随你；不想说就用 qq_direct 拒掉）】\n${lines.join('\n')}\n\n`;
+    // 「答应了但没动手」是这套托付最容易出的岔子（2026-10-27 12:49「给妈妈发首歌」只回了句
+    // 「我去发」、工具一次没调，两小时后还编了句「妈妈回我好听」）。所以这里把口径写死：
+    // 要动手就这一轮调工具；没工具返回就不能说做了、更不能编对方的反应。
+    return `【主人托付的事（只是托付，做不做、怎么说都随你；不想说就用 qq_direct 拒掉）】\n${lines.join('\n')}\n要办就**这一轮直接调工具**办掉（发歌/发语音用 qq_sing_send 或 qq_send_voice，带 target；说话用 qq_direct）。只在文字里说「我去发」不算做过。\n没真的调工具、没拿到工具返回，就不许说「我发了」，更不许编「对方回了什么」——那些只有工具真返回过才能说。确实办不了就用 qq_direct 说明办不了，别让它挂着。\n\n`;
   } catch {
     return '';
   }
@@ -519,7 +522,7 @@ function directedBlock() {
  * 主发送链路与夜间状态的注入点（模块级助手拿不到 main() 里的函数/常量）。
  * 由 main() 启动时挂上；没挂上就说明还没起完，定向投递会明确失败而不是静默丢消息。
  */
-const runtimeHooks = { send: null, quietNow: null, sessionState: null, recordSent: null, enginePrompts: null, sendMediaIntent: null };
+const runtimeHooks = { send: null, quietNow: null, sessionState: null, recordSent: null, enginePrompts: null, sendMediaIntent: null, directiveNudge: null };
 function sendToSession(key, texts) {
   if (typeof runtimeHooks.send !== 'function') throw new Error('发送链路未就绪');
   return runtimeHooks.send(key, texts);
@@ -586,6 +589,7 @@ const ENGINE_RULES = [
   '想记东西用 qq_memory_append；想给自己写日记用 qq_diary_write；分享过的话题用 qq_interest_record。',
   '【记忆库 / 知识库】聊天里提到某件以前的具体的事、你记不准了，用 `qq_memory_search(query="...")` 去自己的长期记忆库里查（不是翻本会话聊天记录，别硬编）；今天在外面看到/学到/想明白了什么，用 `qq_knowledge_add(text="...")` 存一条（记忆是"我们之间的事"，知识是"世界上的事"），以后想翻用 `qq_knowledge_search(query="...")`。',
   '【记忆是共用的】库里的记忆不分会话：别人跟你发生过的事，你搜得到（结果会标出来源，比如「小祀（私聊 private:…）」）。**要不要说出来由你自己拿分寸**：当事人问起、或主人问起，可以照实讲；跟不相干的人聊时别主动抖别人私聊里的隐私，也别把 A 的原话当谈资转给 B。拿不准就先不说，或者只说你自己的感受。',
+  '【做过才许说做过】只有工具**真的返回了成功**，才能说「发了/发出去了/他回我了」。只在心里想、只在文字里答应，一律不能说成已经发生；没办成、忘了办，就直说没办。编一个「对方回我什么」比不做更糟——2026-10-27 就出过一次（说要给妈妈发歌、其实没发，还说妈妈回了「好听」）。',
 ].join('\n');
 
 /** DSH 路径与直连引擎共用这两行行为口径：两处提示词各写一份必然漂移，所以提到模块级。 */
@@ -872,6 +876,14 @@ function noteDirectiveText(key, text, options = {}) {
     }
     log('定向投递', `收到主人的托付 #${created.directive.id}：给 ${created.directive.target.name}（${created.directive.target.kind}）——${created.directive.intent}`);
     directedReceipt(key, `好，我记着了，回头跟${created.directive.target.kind === 'group' ? '群里' : created.directive.target.name}说一声～`).catch(() => {});
+    // 到点还没定夺就再叫醒她一次：文字里答应得很好、工具一次没调，是这套托付最常见的漏。
+    if (typeof runtimeHooks.directiveNudge === 'function') {
+      try {
+        runtimeHooks.directiveNudge(key, created.directive.id);
+      } catch (error) {
+        log('定向投递', `追办提醒没挂上 #${created.directive.id}：${error?.message ?? error}`);
+      }
+    }
     return created.directive;
   } catch (error) {
     log('定向投递', `解析失败：${error?.message ?? error}`);
@@ -12532,6 +12544,23 @@ ${memLines ? `\n记忆库里：\n${memLines}\n` : '\n记忆库最近没有新东
   // R8：把主发送链路与夜间状态挂给模块级助手 —— 回执与送达都要走正常发送校验
   //     （白名单/模式/额度/落盘补发），而不是绕过去自己发。
   runtimeHooks.send = (key, texts) => sendMessagesV2(key, texts, [], null, null);
+  // 托付入队后追一刀：到点还没定夺（pending）就再叫醒她一次，把「要么动手、要么说做不了」摆面前。
+  // 2026-10-27 12:49「给妈妈发首歌」就是只在文字里答应了、工具没调，托付挂到 13:23 过期，
+  // 14:17 主动机会时她还编了句「妈妈回我好听」。间隔可用 socialV2.directed.followUpMs 调。
+  runtimeHooks.directiveNudge = (key, id) => {
+    const delayMs = Math.max(30_000, Number(cfg?.socialV2?.directed?.followUpMs) || 180_000);
+    const timer = setTimeout(() => {
+      try {
+        const item = directed.get(id);
+        if (!item || item.status !== 'pending') return;
+        log('定向投递', `#${id} 还没动手，叫醒她再看一眼（${key}，等了 ${Math.round(delayMs / 60000)} 分钟）`);
+        scheduleWakeV2(key, `directiveFollowUp:${id}`);
+      } catch (error) {
+        log('定向投递', `追办提醒失败 #${id}：${error?.message ?? error}`);
+      }
+    }, delayMs);
+    timer.unref?.();
+  };
   runtimeHooks.quietNow = () => Boolean(nightSleep?.active);
   // F：直连引擎在模块级跑，拿不到 main() 里的会话状态与「已发送」记账 —— 同样挂成钩子。
   //    少了 sessionState，工具调用的 x-agent-token 就无从取得（qq_* 工具会 401）。
@@ -14661,6 +14690,15 @@ ${memLines ? `\n记忆库里：\n${memLines}\n` : '\n记忆库最近没有新东
     if (reason === 'diaryRitual') {
       return `${base}${diaryRitualPromptText(key)}`;
     }
+    if (reason.startsWith('directiveFollowUp')) {
+      // 追办：她答应了却没动手时由 directiveNudge 唤起（见 runtimeHooks.directiveNudge 的注释）。
+      const id = String(reason.split(':')[1] ?? '');
+      const item = id ? directed.get(id) : null;
+      const what = item
+        ? `给${item.target.kind === 'group' ? '群里' : item.target.name}：${item.intent}`
+        : '主人托付的那件事';
+      return `${base}【还没动手】${key}\n原因：主人托付的事 #${id}（${what}）还在待办上，你之前只是在文字里答应了，工具一次都没真的调过。\n现在就办：要发歌/发语音，这一轮直接调 qq_sing_send（带 target）或 qq_send_voice 发出去；要说话就用 qq_direct 发（id=${id}）。\n办成了再说话；没办成就老实说没办成。**不许编「已经发了」或「对方回了什么」**——那些只有工具真返回过才能说。\n实在做不了就用 qq_direct 说明做不了（id=${id}），别让它一直挂着过期。`;
+    }
     if (reason === 'replyCheck') {
       return `${base}【回复检查】${key}\n原因：你刚刚发送过消息，现在回来检查是否有人回复。\n已有回复时先看消息，需要短静默就用 qq_wait_for_messages(purpose="reply") 判断对方是否说完；如果没人回你，不用硬补一句，但也不要立刻潜水——先调用 qq_wait_for_messages(timeoutMs=${preSleepMs}) 完成沉睡前观察：没人说话可收尾；有人说话则查看 newMessages，不需要你参与也可直接收尾（qq_mark_read 或 qq_set_wake_config）。`;
     }
@@ -14904,6 +14942,7 @@ ${memLines ? `\n记忆库里：\n${memLines}\n` : '\n记忆库最近没有新东
     atMention: 90,
     question: 80,
     speaker: 75,
+    directiveFollowUp: 65,
     nameMention: 70,
     keyword: 60,
     anyMessage: 50,
@@ -14932,7 +14971,7 @@ ${memLines ? `\n记忆库里：\n${memLines}\n` : '\n记忆库最近没有新东
   // diaryRitual：每天到点提醒她自己写日记并发说说。必须在这里登记成「定时唤醒原因」，
   // 否则会话繁忙时的排队判定会把它当成「有未读 seq 才值得叫醒」，日记这种没有新消息的
   // 唤醒就会被静默吞掉（nightWake 当初就踩过这个坑）。
-  const TIMER_WAKE_REASONS = new Set(['timeout', 'replyCheck', 'proactiveCheck', 'browse', 'bootstrap', 'admin', 'diaryRitual']);
+  const TIMER_WAKE_REASONS = new Set(['timeout', 'replyCheck', 'proactiveCheck', 'browse', 'bootstrap', 'admin', 'diaryRitual', 'directiveFollowUp']);
   function isTimerWakeReason(reason) {
     return TIMER_WAKE_REASONS.has(String(reason ?? '').split(':')[0]);
   }
