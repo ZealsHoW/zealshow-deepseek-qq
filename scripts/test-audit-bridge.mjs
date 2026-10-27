@@ -760,6 +760,10 @@ await test('直连引擎提示词：反AI味/积极性回了，最近聊天记�
     assert.match(p.system, /【积极性】/, '积极性那行不能丢');
     assert.match(p.system, /不要写“思考过程/, '必须明确禁止把思维链当正文写出来');
     assert.match(p.system, /qq_send_sticker/, '表情意向通道要在提示词里说明');
+    // 2026-10-27 主人反馈「不要总是揪着妈妈背单词，可以多几种」：话题轮换的口径写在
+    // ENGINE_RULES 里，DSH 与直连引擎共用，两条路径都不能丢。
+    assert.match(p.system, /【别揪着一件事】/, '话题轮换那行不能丢');
+    assert.match(p.system, /催妈妈背单词/, '得点名说清是哪件总被念叨的事');
     // 聊天记录进 user（以前只有元信息，她每轮都得先花步数把消息捞回来）。
     assert.match(p.user, /最近的聊天记录/);
     assert.match(p.user, /在干嘛？/);

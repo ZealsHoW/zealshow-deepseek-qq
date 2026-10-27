@@ -88,6 +88,24 @@ test('evolve: 规矩归「底线」不归「近况」，聊天碎片不进人设
   assert.ok(raw.includes('【她自己的长期特征'), '区块标题说的是长期特征，不是近况');
 });
 
+test('evolve: 过期（退役）的记忆不再塑造人设', (t) => {
+  // 2026-10-27：主人说「别总揪着妈妈背单词」，根子是那批「七点五十四抽查单词」的约定
+  // 被写成一直生效的 promise trait。记忆设成过期后，演化不该再从它推出特征。
+  const root = tmpRoot(t);
+  const card = writeCard(root, `${CARD_HEAD}\n`);
+  const store = fakeStore();
+  store.rows = [
+    { id: 11, subject: '小鲸鱼', text: '我约定每天七点五十四叫妈妈背单词', kind: 'promise', importance: 0.95, layer: 'private', expires_at: Date.now() - 1000 },
+    { id: 12, subject: '小鲸鱼', text: '小鲸鱼喜欢听雨声', kind: 'preference', importance: 0.6, layer: 'private', expires_at: null }
+  ];
+  const evo = createEvolve({ root, store });
+  evo.apply({ reason: '退役的不进人设' });
+
+  const raw = fs.readFileSync(card, 'utf8');
+  assert.ok(!raw.includes('背单词'), '过期记忆不许再变成特征');
+  assert.ok(raw.includes('喜欢听雨声'), '没过期的照旧进人设');
+});
+
 test('evolve: 老表里错标成「喜欢/近况」的规矩，读回来时自动挪到「底线」', (t) => {
   const root = tmpRoot(t);
   writeCard(root, `${CARD_HEAD}\n`);

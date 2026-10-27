@@ -185,7 +185,14 @@ export function createEvolve({
     // 1) 记忆库里关于她自己的承诺 / 偏好 / 事实
     try {
       const rows = store?.exportAll ? store.exportAll({}) : [];
+      // 退役（过期）的记忆不再拿来塑造人设：2026-10-27 主人说「别总揪着妈妈背单词」，
+      // 根子就是那批「七点五十四抽查单词」的约定被记忆注入、又被这里写成一直生效的
+      // promise trait。过期只是让它不再自动冒头，行还在库里可以查。
+      const nowTs = Date.now();
+      const alive = (row) => !row?.deleted_at && !row?.archived_at
+        && !(row?.expires_at && Number(row.expires_at) <= nowTs);
       const mine = rows
+        .filter(alive)
         .filter((row) => String(row?.subject ?? '') === '小鲸鱼' || /^我$/.test(String(row?.subject ?? '')))
         .sort((a, b) => Number(b?.importance ?? 0) - Number(a?.importance ?? 0))
         .slice(0, memoryLimit);

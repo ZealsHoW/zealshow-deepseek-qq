@@ -1265,6 +1265,23 @@ POST /api/socialV2/memory-search           # 返回 model/semantic/embedded + �
 
 工具输出里每条会带「（记得很清楚）」这类清晰度，她也就能说「这个我记不太清了」。
 
+#### 让一件事「退场」：`scripts/memory-retire.mjs`（2026-10-27）
+
+有一条「七点五十四叫妈妈起床背单词」的约定被反复提起，主人说「不要总是揪着妈妈背单词，可以多几种」。根子不在代码，在**记忆库**：那批 `promise` 条目 `importance` 0.9、`use_count` 几十次，靠遗忘曲线一直排在最前，于是提示词、人设特征、她的话全往这件事上拐。
+
+退役靠「过期」，不靠删：
+
+```
+node scripts/memory-retire.mjs --match 单词 --kinds promise,topic,event           # 预演，列命中
+node scripts/memory-retire.mjs --match 单词 --kinds promise,topic,event --apply    # 真写：expires_at = now
+```
+
+- `recall` 的 where 里有 `expires_at IS NULL OR expires_at > ?` ⇒ 过期即不再注入、也不再被主动检索到，但行还在库里，翻历史照样查得到。
+- 人设演化（`src/qqb/persona/evolve.mjs` 的 `derive`）也会跳过过期/归档/删除的行 —— 否则过期的约定还会被写成一直生效的 trait（这次就是踩了这半步）。
+- 提示词里同时加了【别揪着一件事】：同一件事一天自然提一次就够，对方在忙/岔开话题就先别提，关心换着来（吃饭、路上顺不顺、累不累、想不想听我唱一首、要不要一起看个剧…）。
+
+回归：`scripts/test-audit-bridge.mjs` 断言【别揪着一件事】在直连引擎提示词里；`scripts/test-qqb-persona-evolve.mjs` 断言「过期记忆不再塑造人设」。
+
 回归：`npm run test:qqb-memory-ebbinghaus`（S/R/depth 单调性与上限、情绪抬高权重、旧记忆更淡）、`npm run test:qqb-memory-rag`（hash 向量确定/归一、blob 往返、按形近找回、不沾边滤掉、pending 补建、语义缺席回落）；`test-qqb-memory-refine` 里断言了 `emotion` 列与 `vectors` 表（旧库打开会自动补）。
 
 ### 日记 → 说说（每天到点自己写一条）
