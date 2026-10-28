@@ -194,6 +194,41 @@ function createMood() {
   };
 }
 
+// R9 精神值/念头：夹具里不做真磁盘读写（真实现会去碰 ROOT/state/*.json）。
+// 用惰性桩保证 bridge 的接线点（提示词、睡眠钩子、念头循环、/api/socialV2/spirit）能跑通；
+// 真行为由 scripts/test-qqb-spirit.mjs 与 scripts/test-qqb-thoughts.mjs 用真实现覆盖。
+function createSpirit() {
+  const snap = {
+    spirit: 0.8, hunger: 0.2, asleep: false, awakeHours: 1, fatigueFactor: 1, sleptHours: 0,
+    status: '精神还行', budget: { maxChars: 120, tone: '还行：正常一句话' }, updatedAt: 0, log: [],
+  };
+  return {
+    version: '0.1.0',
+    path: '',
+    snapshot: () => ({ ...snap }),
+    summary: () => '',
+    gate: () => ({ allow: true, reason: 'audit-stub', spirit: 0.8 }),
+    cost: () => ({ ok: true, cost: 0, spirit: 0.8 }),
+    sleep: () => ({ ...snap, asleep: true }),
+    wake: () => ({ ...snap }),
+    nap: () => ({ ...snap }),
+    sweet: () => ({ ...snap }),
+    setSpirit: () => ({ ok: true, spirit: 0.8 }),
+  };
+}
+function createThoughts() {
+  return {
+    version: '0.1.0',
+    path: '',
+    think: () => ({ id: 'audit-stub', at: 0, text: '', source: 'random', urge: 0, acted: false }),
+    recent: () => [],
+    due: () => null,
+    markActed: () => false,
+    summaryText: () => '',
+    snapshot: () => ({ items: [], lastAt: 0 }),
+  };
+}
+
 // R1b/R5 人设演化与干预：夹具里绝不能真写人格卡与审计库（临时目录里没有真卡片，
 // 真实现还会去碰 SQLite），用惰性桩保证 bridge 的调用点可跑；
 // 真行为由 scripts/test-qqb-persona-evolve.mjs 用真实现 + 临时目录覆盖。
@@ -487,6 +522,8 @@ export async function bridgeHarness({ config = {}, savedState, files = {}, globa
     createBackoff, createOutbox, createInboundDedup,
     // R2：情绪状态机也用桩（夹具不做真磁盘读写）。
     createMood,
+    // R9：精神值/念头同样用桩（夹具不做真磁盘读写）。
+    createSpirit, createThoughts,
     // 抖音登录态监视：注入**真实现**（它只读写一个显式传入的文件路径，而那个路径由 bridge.js
     // 按被替换过的 ROOT 算出来 = 夹具临时目录；写桩反而会把「连续几次才算掉登录」的规则抄两份）。
     readWatch: loginWatch.readWatch,

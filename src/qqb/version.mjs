@@ -14,13 +14,13 @@
 // 注册表里 `qqb/version` 这一条自己的版本。两个名字并存：这个文件既被当作
 // 「模块」（导出 VERSION，供 module-version verify / 健康上报核对），又是整包总览
 // （导出 QQB_VERSION）。它们必须相等，否则 verify 会当场报错。
-export const VERSION = '0.1.6';
+export const VERSION = '0.1.7';
 export const QQB_VERSION = VERSION;
 
 /** @type {Record<string, {version: string, files: string[], note: string}>} */
 export const MODULES = {
   'qqb/version': {
-    version: '0.1.6',
+    version: '0.1.7',
     files: ['src/qqb/version.mjs'],
     note: '模块版本登记表与回滚入口',
   },
@@ -103,6 +103,16 @@ export const MODULES = {
     version: '0.1.2',
     files: ['src/qqb/persona/mood.mjs'],
     note: 'R2 情绪/状态机：mood/energy/irritation/social 四维、事件驱动 + 时间衰减、行为门控建议、跨重启持久化。0.1.1 修精力收支：warm_chat 的 energy 由 -0.02 降到 -0.005——原值下光是「被搭话」每小时 6 条就把恢复额（约 +0.12/h）吃光，精力被钉死在 0，「主动开口」的闸门（energy ≥ 0.25）永远够不着（配套改动在桥接侧：一次回复只记一次 own_reply）。0.1.2：家人的夸奖/鼓励/「爱你」开始真的补精力（praised +0.06、新增 loved +0.12），loveWords/negations 两个词表把「疼爱」和「嫌弃」分开；新增 setDim(name,value) 走实例做手动校准（直接改 state/persona-state.json 会被内存旧值盖掉），配套 POST /api/socialV2/mood 与 scripts/set-mood.mjs',
+  },
+  'persona/spirit': {
+    version: '0.1.0',
+    files: ['src/qqb/persona/spirit.mjs'],
+    note: 'R9 精神系统（活人化）：精神/饥饿/清醒时长三件事，行为花精神、睡觉按指数曲线回满（睡满 sleepHoursToFull 才满）、清醒超 fullRestHours 消耗翻倍、甜食立刻补但更饿、打盹有日上限；只给建议（gate/replyBudget），精神低就把回复锁短，绝不拦死回复；状态落 state/spirit.json，时间推进用 lazy tick',
+  },
+  'persona/thoughts': {
+    version: '0.1.0',
+    files: ['src/qqb/persona/thoughts.mjs'],
+    note: 'R9 念头系统（活人化）：她自己的小想法（没回的话/兴趣/记忆/身体感觉/随机），每条带 urge；攒够 due() 才主动开口，有冷却、超 6 小时作废，做过就标记不再重复；状态落 state/thoughts.json',
   },
   'persona/evolve': {
     version: '0.1.3',

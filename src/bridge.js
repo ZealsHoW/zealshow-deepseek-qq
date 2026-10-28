@@ -44,6 +44,8 @@ import { createOneBotClient } from './qqb/net/onebot.mjs';
 import { checkSensitive, groupOwnerAllowed, isSensitiveTool, proactiveFlavor, proactiveScaleFor, sessionTierOf, tierLabel, tierOf, tierPromptText, tiersEnabled, wakeTierBonus } from './qqb/tiers.mjs';
 import { createInboundDedup } from './qqb/net/inbound.mjs';
 import { createMood } from './qqb/persona/mood.mjs';
+import { createSpirit } from './qqb/persona/spirit.mjs';
+import { createThoughts } from './qqb/persona/thoughts.mjs';
 import { readWatch, shouldNotifyWatch, markWatchNotified, buildWatchNotice } from './qqb/read-login-watch.mjs';
 // 本机 TTS（Windows 自带 SAPI/OneCore）：qq_send_voice 传 text 就能当场合成一条语音。
 // 实现与安全边界（文字只走临时文件、绝不拼命令行）见 src/qqb/tts.mjs。
@@ -330,6 +332,107 @@ function moodEnabled() {
     return true;
   }
 }
+// R9 念头循环的定时器句柄：必须声明在 main() 里调用 startThoughtLoop() 之前，
+// 否则「调用时跳过声明」会踩 TDZ（Cannot access 'thoughtTimer' before initialization）。
+let thoughtTimer = null;
+
+// R9 精神系统（2026-10-28 主人的「活人化」重构）：
+//   行为要花精神 → 精神低了她真的累、回得短 → 睡觉按指数曲线回满。
+// 和 mood 一样是**建议层**：读不到/写不进去/算错都必须放行，不能把正常回复拦断。
+// 状态落 state/spirit.json。
+const spirit = createSpirit({
+  root: ROOT,
+  options: cfg?.socialV2?.spirit?.options ?? {},
+  logger: { warn: (message, detail) => log('精神', message, detail ?? '') }
+});
+function spiritEnabled() {
+  try {
+    return cfg?.socialV2?.spirit?.enabled !== false;
+  } catch {
+    return true;
+  }
+}
+function spiritSummary() {
+  if (!spiritEnabled()) return '';
+  try {
+    return spirit.summary();
+  } catch {
+    return '';
+  }
+}
+/** 只读快照（观测端点、念头循环用）；不可用时给 null。 */
+function spiritSnapshot() {
+  if (!spiritEnabled()) return null;
+  try {
+    return spirit.snapshot();
+  } catch {
+    return null;
+  }
+}
+/**
+ * R9：累的时候别让她写小作文——按精神值锁死这一轮的字数上限（软话照说，只是短）。
+ * 只在精神值低于 0.4 时硬截，免得平时把她的话砍断。
+ */
+function limitReplyBySpirit(text) {
+  const src = String(text ?? '').trim();
+  if (!src) return src;
+  if (!spiritEnabled()) return src;
+  try {
+    const snap = spirit.snapshot();
+    const cap = Number(snap?.budget?.maxChars) || 0;
+    if (snap.spirit >= 0.4 || !cap || src.length <= cap) return src;
+    log('精神', `太累了，回复从 ${src.length} 字截到 ${cap} 字`);
+    return `${src.slice(0, cap).replace(/[，、,；;：:\s]+$/, '')}…`;
+  } catch {
+    return src;
+  }
+}
+/** R9：工具也花精神——看视频/刷抖音/听歌/看书/唱歌/画画/写日记，按工具名映射到行为。 */
+const SPIRIT_TOOL_COSTS = {
+  qq_sing: 'sing',
+  qq_send_voice: 'voice', qq_voice_reply: 'voice', qq_tts_say: 'voice',
+  qq_browse: 'browse', qq_web_search: 'browse', web_search: 'browse', web_fetch: 'browse', qq_search: 'browse',
+  qq_music: 'music', qq_play_music: 'music',
+  qq_video: 'video', qq_watch_video: 'video',
+  qq_tiktok: 'tiktok', qq_douyin: 'tiktok', qq_scroll_tiktok: 'tiktok',
+  qq_book: 'book', qq_read_book: 'book',
+  qq_draw: 'draw', qq_draw_image: 'draw',
+  qq_diary_write: 'diary',
+  qq_app: 'app', qq_open_app: 'app',
+};
+function spendSpiritForTool(name) {
+  const action = SPIRIT_TOOL_COSTS[String(name ?? '')];
+  if (action) spendSpirit(action, { tool: String(name) });
+}
+/** 花精神（统一入口；出错绝不抛给调用方）。 */
+function spendSpirit(action, detail = {}) {
+  if (!spiritEnabled()) return null;
+  try {
+    return spirit.cost(action, detail);
+  } catch {
+    return null;
+  }
+}
+/** R9 念头：她心里自己冒出来的想法，攒到一定欲望就主动去做。状态落 state/thoughts.json。 */
+const thoughts = createThoughts({
+  root: ROOT,
+  logger: { warn: (message, detail) => log('念头', message, detail ?? '') }
+});
+function thoughtsEnabled() {
+  try {
+    return cfg?.socialV2?.thoughts?.enabled !== false;
+  } catch {
+    return true;
+  }
+}
+function thoughtsText() {
+  if (!thoughtsEnabled()) return '';
+  try {
+    return thoughts.summaryText(Math.max(1, Number(cfg?.socialV2?.thoughts?.promptLimit) || 3));
+  } catch {
+    return '';
+  }
+}
 /** 按关键词给一句人话做情感判定（不调模型，免费），失败只记日志。 */
 function noteMoodText(key, text) {
   if (!moodEnabled()) return null;
@@ -600,6 +703,12 @@ const ENGINE_RULES = [
   // 2026-10-27 主人反馈「不要总是揪着妈妈背单词，可以多几种」：记忆里一堆「七点五十四抽查单词」
   // 的约定被反复注入，她每轮都往这上面拐，像复读。约定可以记着，但**话题要轮换**。
   '【别揪着一件事】同一件事（尤其是催妈妈背单词、抽查单词这种）别每轮都提。答应过的事记着，但一天自然提一次就够；她明显不想聊、在上班/上课/看剧、或者已经岔开话题了，就先别提。关心一个人有很多种方式，换着来：吃没吃饭、上班路上顺不顺、今天累不累、肩膀酸不酸、想不想听我唱一首、要不要一起看个剧、天冷了加衣服、周末想去哪、别熬太晚……同一个话题连着出现两三轮，就换个新角度，别往上叠。',
+  // R9（2026-10-28 主人「活人化」重构）：单句、停顿、自主、念头、记忆留感受。
+  '【只说一句】每次回话**只说一句话**：一个意思说完就停，不补第二句解释、不列举、不连发一串。想说的很多就挑最想说的那一句。',
+  '【说完停一下】说完这句，先在心里停大约一秒（像真人打完字看一眼），再决定要不要有下一句——大多数时候不用。',
+  '【不用问可不可以】想做什么直接去做，不用先问「我能…吗」「可以吗」再等我点头；只有这两条照旧：只跟白名单里的人说话、钱和隐私不碰。',
+  '【念头是你自己的】你心里会冒出一些想法（提示词里有），有些只是想，有些很想去做——想做就去做，不想就让它过去；别为了「完成任务」或「讨好」去说话。',
+  '【记忆要留感受】想起或归档一件事时，除了发生了什么，也留一句你当时的感受（比如「那天笑得肚子疼」）；感受比事实更容易让你记得自己是谁。',
 ].join('\n');
 
 /** DSH 路径与直连引擎共用这两行行为口径：两处提示词各写一份必然漂移，所以提到模块级。 */
@@ -783,7 +892,7 @@ function ensureEngine() {
       catalogFilter: (spec) => !engineHiddenSendTool(spec?.function?.name),
       // 引擎执行的工具调用也落进 state/tool-calls.jsonl（与 DSH 链路同一个文件、同一套格式，
       // 多了 source:'engine' 便于区分来源）。没有这一步，引擎接管主链路后这份日志就整段变黑。
-      toolLog: (entry) => toolCallLog.append(entry),
+      toolLog: (entry) => { toolCallLog.append(entry); spendSpiritForTool(entry?.name ?? entry?.tool); },
     });
     void toolbox.refresh().then((info) => {
       log('直连引擎', `工具箱就绪：${info.tools} 个工具（已屏蔽 ${ENGINE_SEND_TOOLS.size - ENGINE_MEDIA_INTENT_TOOLS.size} 个发送类文本工具，媒体意向 ${ENGINE_MEDIA_INTENT_TOOLS.size} 个）`);
@@ -6736,6 +6845,49 @@ async function main() {
           });
           return;
         }
+        // R9 精神值：读/写。写支持 nap（趴一会儿）、sweet（吃点甜的）、set（直接设）、sleep/wake（手动睡/醒）。
+        if (url.pathname === '/api/socialV2/spirit' && req.method === 'GET') {
+          const snap = spiritSnapshot();
+          sendJson({
+            ok: true,
+            enabled: spiritEnabled(),
+            snapshot: snap,
+            summary: spiritSummary(),
+            gate: snap ? { reply: spirit.gate('reply', {}), proactive: spirit.gate('proactive', {}) } : null
+          });
+          return;
+        }
+        if (url.pathname === '/api/socialV2/spirit' && req.method === 'POST') {
+          if (!spiritEnabled()) { sendJson({ ok: false, error: '精神系统已关闭（config.socialV2.spirit.enabled=false）' }, 409); return; }
+          const body = await readBody();
+          const action = String(body?.action || '').trim();
+          let result = null;
+          try {
+            if (action === 'nap') result = spirit.nap({ minutes: Number(body.minutes) || 20 });
+            else if (action === 'sweet') result = spirit.sweet({ what: body.what ? String(body.what).slice(0, 40) : '甜的' });
+            else if (action === 'set') result = spirit.setSpirit(body.spirit, { reason: body.reason });
+            else if (action === 'sleep') result = spirit.sleep({ reason: body.reason || 'manual' });
+            else if (action === 'wake') result = spirit.wake({ hours: Number.isFinite(Number(body.hours)) ? Number(body.hours) : null });
+            else { sendJson({ ok: false, error: 'action 只能是 nap / sweet / set / sleep / wake' }, 400); return; }
+          } catch (error) {
+            sendJson({ ok: false, error: String(error?.message ?? error) }, 500);
+            return;
+          }
+          log('精神', `手动 ${action}${action === 'set' ? ` → ${body.spirit}` : ''}${body.reason ? `（${String(body.reason).slice(0, 40)}）` : ''}`);
+          sendJson({ ok: true, action, result, snapshot: spiritSnapshot(), summary: spiritSummary() });
+          return;
+        }
+        // R9 念头：只读，看看她心里现在惦记什么。
+        if (url.pathname === '/api/socialV2/thoughts' && req.method === 'GET') {
+          sendJson({
+            ok: true,
+            enabled: thoughtsEnabled(),
+            summary: thoughtsText(),
+            items: thoughtsEnabled() ? thoughts.snapshot().items : [],
+            due: thoughtsEnabled() ? thoughts.due() : null
+          });
+          return;
+        }
         if (url.pathname === '/api/socialV2/persona' && req.method === 'GET') {
           // R1b/R5 只读观测：她自己演化出来的近况、待决的主人建议、审计与卡片备份。
           const pKey = url.searchParams.get('key') ? String(url.searchParams.get('key')) : null;
@@ -9923,9 +10075,25 @@ async function main() {
           stopped = stopped ?? error;
           noteSendSilence(key, error);
         })
-        .then(() => sleep(cfg.sendDelayMs));
+        .then(() => sleep(cfg.sendDelayMs + (i === parts.length - 1 ? sendPauseMs() : 0)));
     }
     return sendChain;
+  }
+
+  /**
+   * R9：说完一句先停一下（主人 2026-10-28：「强制进入约一秒钟的思考/停顿」）。
+   * 发完这一条到下一次开口之间至少隔这么久，模拟真人打完字看一眼再决定要不要说下一句。
+   * `social.singleSentencePauseMs` 设 0 可关掉。
+   */
+  function sendPauseMs() {
+    try {
+      const raw = cfg?.social?.singleSentencePauseMs;
+      if (raw === 0) return 0;
+      const ms = Number(raw ?? 1000);
+      return Number.isFinite(ms) && ms > 0 ? Math.min(5000, ms) : 0;
+    } catch {
+      return 1000;
+    }
   }
 
   /** 上一批发往该会话的消息是否全部成功。 */
@@ -10058,12 +10226,35 @@ async function main() {
   // 新分句逻辑：分句权交给 AI。
   // AI 用空格表示“这里要分成下一条消息”，桥接按空格拆条；
   // 不想分条时用标点连接、不加空格即可。单条消息只做 maxReplyChars（默认 500 字）安全硬拆。
+  /**
+   * R9：取「第一句」。单句模式下整段只留开头那一句，超长再截断。
+   * 句末标点（。！？!?…～~）算一句结束；换行也当一句话结束。
+   */
+  function firstSentenceOf(src, cap) {
+    const flat = String(src ?? '').replace(/\s*\n+\s*/g, ' ').replace(/[ \t]{2,}/g, ' ').trim();
+    if (!flat) return '';
+    const m = flat.match(/^[\s\S]*?[。！？!?…～~]+/);
+    let one = (m ? m[0] : flat).trim();
+    if (one.length > cap) one = `${one.slice(0, cap).replace(/[，、,；;：:]+$/, '')}…`;
+    return one;
+  }
+
+  // 单句模式的「分句」实现见 planSocialTimeline。
   function planSocialTimeline(text, socialCfg) {
     const src = String(text ?? '').replace(/\r\n/g, '\n').trim();
     const rawMaxChars = Number(socialCfg?.maxReplyChars ?? 500);
     const maxChars = Number.isFinite(rawMaxChars) && rawMaxChars >= 1 ? Math.floor(rawMaxChars) : 500;
     const enabled = socialCfg?.burstEnabled !== false;
     if (!src) return { main: [], followUp: null };
+
+    // R9 单句模式（主人 2026-10-28）：一次只发一句。
+    // 之前「用空格/空行分条」会让她一口气连发好几条；现在把整段压到**第一句**，
+    // 剩下的不要了——想说的挑最想说的那句。`social.singleSentence=false` 可退回旧行为。
+    if (socialCfg?.singleSentence !== false) {
+      const cap = Math.max(8, Math.min(maxChars, Number(socialCfg?.singleSentenceMaxChars) || 80));
+      const one = firstSentenceOf(src, cap);
+      return { main: one ? [singleLineForQQ(one)] : [], followUp: null };
+    }
 
     // 关闭分条：整条作为一条消息发送，只做安全硬拆
     if (!enabled) {
@@ -10125,6 +10316,9 @@ async function main() {
         sendChain = sendChain.then(() => sleep(delay));
       }
     }
+    // R9：这一串说完，也停一秒再让别人（或下一轮）接话。
+    const pause = sendPauseMs();
+    if (pause) sendChain = sendChain.then(() => sleep(pause));
     return sendChain.then(() => sent);
   }
 
@@ -12543,6 +12737,8 @@ ${memLines ? `\n记忆库里：\n${memLines}\n` : '\n记忆库最近没有新东
   archiveHistoryNow();
   // R1：把历史归档沉淀进长期记忆（自动、免费、可关；见 startMemoryIntake 注释）。
   startMemoryIntake();
+  // R9：念头循环——她自己的小想法攒够了就主动开口（见 thoughtTick 注释）。
+  startThoughtLoop();
   // R1：跨会话事实的 LLM 精炼 + 旧记忆归档（见 startMemoryRefine / startMemoryArchive 注释）。
   startMemoryRefine();
   startMemoryArchive();
@@ -13900,6 +14096,8 @@ ${memLines ? `\n记忆库里：\n${memLines}\n` : '\n记忆库最近没有新东
       // 用内存计数上限的追加器：不再「append 完再读回整个文件数行数」——
       // 那个写法在 2000 行（约 650KB）时单次要 15ms，而每次工具调用要写两条。
       toolCallLog.appendLine(`${JSON.stringify(safeEntry)}\n`);
+      // R9：工具也花精神（看视频/刷抖音/听歌/看书/唱歌…），按工具名映射。
+      spendSpiritForTool(safeEntry.name ?? safeEntry.tool);
     } catch (error) {
       log('写入工具调用日志失败:', error?.message ?? error);
     }
@@ -14115,6 +14313,9 @@ ${memLines ? `\n记忆库里：\n${memLines}\n` : '\n记忆库最近没有新东
       LINE_ANTI_AI,
       LINE_PROACTIVE,
       moodSummary(),
+      // R9：精神值 + 念头（都是她自己的状态，只描述、不命令）。
+      spiritSummary(),
+      thoughtsText(),
       formatInitialPromptV2(key),
       personaBlock(),
       personaPendingLine(),
@@ -14384,6 +14585,10 @@ ${memLines ? `\n记忆库里：\n${memLines}\n` : '\n记忆库最近没有新东
     clearNightWakeTask();
     // R2：睡够了她才有力气——醒了先回血（时间衰减也会补，这里给一次确定的「休息」）。
     noteMood('rest');
+    // R9：精神值按「睡了多少小时」用指数曲线结算——睡满 sleepHoursToFull 才回满。
+    try {
+      if (spiritEnabled()) spirit.wake({ hours: sleptMs / 3600000 });
+    } catch (error) { log('精神', `醒来结算失败：${error?.message ?? error}`); }
     log(`[night] 晚安休眠结束（${why}，睡了 ${(sleptMs / 3600000).toFixed(1)} 小时），开始唤醒会话`);
     const keys = Object.keys(state.sessions || {});
     for (const key of keys) {
@@ -14423,6 +14628,53 @@ ${memLines ? `\n记忆库里：\n${memLines}\n` : '\n记忆库最近没有新东
     return { active: false };
   }
 
+  // R9：念头循环——每隔一段时间问自己一次「现在惦记什么」。平时只是写进她的下一轮提示词；
+  // 真到按捺不住（urge 高、精神够、不在睡觉）才主动唤醒一次，别把她变成「定时播报机」。
+  function thoughtKey() {
+    const owner = Number(cfg.ownerQQ);
+    if (owner && state.sessions?.[`private:${owner}`]) return `private:${owner}`;
+    return Object.keys(state.sessions || {}).find((k) => String(k).startsWith('private:')) || null;
+  }
+  function thoughtTick(why = 'timer') {
+    if (!thoughtsEnabled()) return;
+    if (nightSleep.active || socialV2.paused) return;
+    const key = thoughtKey();
+    if (!key) return;
+    const st = getSocialV2State(key);
+    const snap = spiritSnapshot() || { spirit: 0.6, hunger: 0.3 };
+    let item = null;
+    try {
+      thoughts.think({
+        recent: (st.recentMessages || []).slice(-8),
+        interests: interestsAll().slice(0, 8).map((x) => x.topic),
+        spirit: snap.spirit,
+        hunger: snap.hunger,
+        mood: moodSnapshot()?.dims || {}
+      });
+      item = thoughts.due();
+    } catch (error) {
+      log('念头', `生成失败：${error?.message ?? error}`);
+      return;
+    }
+    if (!item) return;
+    const gate = spiritEnabled() ? spirit.gate('proactive') : { allow: true };
+    if (!gate.allow) return;
+    thoughts.markActed(item.id);
+    log('念头', `按捺不住（${why}）：${item.text}（urge ${item.urge}）→ 唤醒 ${key}`);
+    scheduleWakeV2(key, 'proactiveCheck');
+  }
+  function startThoughtLoop() {
+    if (!thoughtsEnabled()) return;
+    if (thoughtTimer) clearInterval(thoughtTimer);
+    const hours = Math.max(0.2, Number(cfg.socialV2?.thoughts?.intervalHours ?? 1.5));
+    thoughtTimer = setInterval(() => thoughtTick('timer'), Math.round(hours * 3600000));
+    thoughtTimer.unref?.();
+    // 启动 5 分钟后先想一次，别一开机就立刻冒念头。
+    const boot = setTimeout(() => thoughtTick('boot'), 5 * 60000);
+    boot.unref?.();
+    log('念头', `念头循环已启动：每 ${hours} 小时想一次`);
+  }
+
   function startNightSleep({ hours, source = 'tool' } = {}) {
     const c = nightRitualCfg();
     const h = Number(hours) > 0 ? Number(hours) : (Number(c.minHours) + Math.random() * Math.max(0, Number(c.maxHours) - Number(c.minHours)));
@@ -14436,6 +14688,10 @@ ${memLines ? `\n记忆库里：\n${memLines}\n` : '\n记忆库最近没有新东
     setSleepQuietTasks(true, '进入晚安休眠');
     scheduleNightWakeTask(nightSleep.wakeAt);
     noteMood('late_night'); // R2：熬夜是要还的（精力与心情都掉一点）
+    // R9：进入睡眠——记下睡前精神；醒来按睡了多久用指数曲线回填。
+    try {
+      if (spiritEnabled()) spirit.sleep({ reason: source });
+    } catch (error) { log('精神', `入睡记录失败：${error?.message ?? error}`); }
     log(`[night] 开始晚安休眠 ${h.toFixed(1)} 小时（来源 ${source}），预计 ${new Date(nightSleep.wakeAt).toLocaleString()} 醒`);
     return nightSleepStatus();
   }
@@ -14452,6 +14708,10 @@ ${memLines ? `\n记忆库里：\n${memLines}\n` : '\n记忆库最近没有新东
     // 提前取消（主人叫她起来）：看门狗立刻恢复，兜底任务撤掉。
     setSleepQuietTasks(false, '取消晚安休眠');
     clearNightWakeTask();
+    // R9：提前被叫醒，按实际睡的时间结算（多半没睡够，回不满）。
+    try {
+      if (spiritEnabled()) spirit.wake({});
+    } catch (error) { log('精神', `提前醒来结算失败：${error?.message ?? error}`); }
     log(`[night] 取消晚安休眠（${reason}）`);
     return nightSleepStatus();
   }
@@ -14570,6 +14830,13 @@ ${memLines ? `\n记忆库里：\n${memLines}\n` : '\n记忆库最近没有新东
     // 桥接中途重启也要把「睡着=看门狗停用」这件事重新落实（任务状态不跟着进程走）。
     setSleepQuietTasks(true, '恢复晚安休眠');
     scheduleNightWakeTask(wakeAt);
+    // R9：进程重启时若还在睡眠窗口内，精神系统也跟着回到「睡着」——否则她会以为自己醒着。
+    try {
+      if (spiritEnabled()) {
+        const snap = spirit.snapshot();
+        if (!snap.asleep) spirit.sleep({ reason: '恢复晚安休眠' });
+      }
+    } catch (error) { log('精神', `恢复睡眠态失败：${error?.message ?? error}`); }
     log(`[night] 恢复晚安休眠，预计 ${new Date(wakeAt).toLocaleString()} 醒`);
   }
 
@@ -14698,11 +14965,14 @@ ${memLines ? `\n记忆库里：\n${memLines}\n` : '\n记忆库最近没有新东
     const capabilityLine = capabilityHintV2();
     // R2：把「此刻的心情/精力」作为一行状态写进提示词（很短，且只是描述她自己的状态）。
     const moodLine = moodSummary() ? `${moodSummary()}\n\n` : '';
+    // R9：精神值（体力）与心里冒出来的念头——两条独立的短状态，和心情分开写。
+    const spiritLine = spiritSummary() ? `${spiritSummary()}\n\n` : '';
+    const thoughtsLine = thoughtsText() ? `${thoughtsText()}\n\n` : '';
     // R1b/R5：她自己长出来的近况 + 还没处理的主人建议（都只有一两行，没内容时是空串）。
     const personaLine = personaBlock() ? `${personaBlock()}\n\n` : '';
     const adviceLine = personaPendingLine();
     const directedLine = directedBlock();
-    const base = roleLine + identityLine + tokenLine + initialPromptLine + antiAiLine + capabilityLine + proactiveLine + historyLine + stickerLine + replyLine + statusLine + moodLine + personaLine + adviceLine + directedLine + wakeLine + memoryLine + peopleLine + participationLine + familyLine + memoryHintLine + preSleepLine;
+    const base = roleLine + identityLine + tokenLine + initialPromptLine + antiAiLine + capabilityLine + proactiveLine + historyLine + stickerLine + replyLine + statusLine + moodLine + spiritLine + thoughtsLine + personaLine + adviceLine + directedLine + wakeLine + memoryLine + peopleLine + participationLine + familyLine + memoryHintLine + preSleepLine;
     if (reason === 'bootstrap') {
       return `${base}【引导唤醒】你已接入 QQ 会话 ${key}。\n当前是二代仿真模式：你的文本输出不会自动发送到 QQ，所有发言必须通过工具完成。\n请先调用 qq_get_prompt 查看角色、推荐值、可用工具和状态；有待回应的消息先按首回复节奏处理，最后才用 qq_set_wake_config 设置你希望如何被唤醒。`;
     }
@@ -16159,7 +16429,7 @@ ${memLines ? `\n记忆库里：\n${memLines}\n` : '\n记忆库最近没有新东
                     }
                     continue;
                   }
-                  const timeline = planSocialTimeline(plain, cfg.social);
+                  const timeline = planSocialTimeline(limitReplyBySpirit(plain), cfg.social);
                   const messages = timeline.main;
                   log(`agent 回复 (${key}) ${plain.length} 字 → ${messages.length} 条`);
                   appendActivity(`${key} agent 回复：${messages[0].slice(0, 80)}${messages.length > 1 ? '（分' + messages.length + '条）' : ''}${messages[0].length > 80 ? '…' : ''}`);
@@ -16168,6 +16438,7 @@ ${memLines ? `\n记忆库里：\n${memLines}\n` : '\n记忆库最近没有新东
                   } else {
                     await sendToQQ(key, messages[0]);
                   }
+                  spendSpirit('chat', { key });
                   // 发言后刷新活跃时间，并调度可能的二次补刀
                   const st = socialState(key);
                   if (isFarewell) {

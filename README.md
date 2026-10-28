@@ -1250,6 +1250,42 @@ GET /api/socialV2/prompt?key=private:3482501440                            # DSH
 
 都带 `x-console-token`；`reason` 可填 `replyCheck` / `proactiveCheck` / `diaryRitual` 等唤醒原因，返回 `{ ok, key, reason, system, user }`。
 
+### 活人化：精神值、念头、一次只发一句（2026-10-28）
+
+主人那晚的原话是「不要让她像个任务机器」。拆成四件，**全部落在桥接层**（模型配合是加分项，不配合也照样生效）：
+
+| 想要的效果 | 谁管 | 接在哪 |
+| --- | --- | --- |
+| 聊天/看视频/刷抖音/唱歌要花精神，累了真的回得短 | `src/qqb/persona/spirit.mjs` | `state/spirit.json`、提示词【你的精神】、`limitReplyBySpirit()` 硬锁字数 |
+| 睡觉才能回满，睡不够就回不满 | 同上 | `startNightSleep` → `spirit.sleep()`；`finishNightSleep` → `spirit.wake({hours})`；`cancelNightSleep` 也结算 |
+| 想法自己冒出来，攒够了才主动开口 | `src/qqb/persona/thoughts.mjs` | `state/thoughts.json`、`thoughtTick()` 每 1.5 小时想一次、`due()` 命中才 `scheduleWakeV2(key,'proactiveCheck')` |
+| 一次只说一句，说完停一秒 | `src/bridge.js` 的 `planSocialTimeline` / `sendPauseMs` | `social.singleSentence=true`、`singleSentenceMaxChars=80`、`singleSentencePauseMs=1000` |
+
+**手感参数**（`config.socialV2.spirit` / `config.socialV2.thoughts` / `config.social`）：
+
+- `sleepHoursToFull: 8` —— 睡满 8 小时**精确回满**：`s = s0 + (1-s0)·(1-e^{-3h/H})/(1-e^{-3})`。`s0=0.1` 时睡 4 小时约 0.83、睡 2 小时约 0.67，不是线性、也不是「一觉就满」。
+- `fullRestHours: 12` —— 醒来 12 小时内消耗正常，之后**翻倍**（`fatigueFactor`）。
+- `costs`：回一句 0.012、发语音 0.03、看视频 0.05、刷抖音 0.04、听歌 0.02、唱歌 0.12、写日记 0.05。工具侧走 `SPIRIT_TOOL_COSTS` 名字映射（加新工具记得加一行）。
+- `sweetRestore: 0.22` / `sweetHunger: 0.3` —— 吃甜的回精神但更饿；饿到 1 之后每小时额外掉 `hungerPenalty`。
+- 回话字数按精神分档：`<0.2 → 24 字`、`<0.35 → 36`、`<0.55 → 60`、`<0.75 → 90`、否则 120。低于 0.4 才会真的截断，平时不砍她的话。
+
+**调试端点**（都要 `x-console-token`）：
+
+```bash
+GET  /api/socialV2/spirit                                    # 精神/饥饿/清醒时长/预算/门控
+POST /api/socialV2/spirit {"action":"nap","minutes":20}       # 打盹（一天有上限）
+POST /api/socialV2/spirit {"action":"sweet","what":"蛋糕"}     # 吃点甜的
+POST /api/socialV2/spirit {"action":"set","spirit":0.9}       # 直接设定（调试用）
+GET  /api/socialV2/thoughts                                  # 她现在惦记什么（含 due）
+```
+
+**踩过的两个坑**：
+
+1. `let thoughtTimer` 原本写在 `startThoughtLoop` 附近，但 `main()` 里的调用点在那行**之前** ⇒ `Cannot access 'thoughtTimer' before initialization`（TDZ），一挂就是一片「看起来无关」的测试。句柄必须声明在调用点之前（现在放在 `moodEnabled()` 下面）。
+2. `spirit.wake({})` 把 `hours: null` 当成了 0（`Number(null) === 0 && Number.isFinite(0)`），醒来等于「睡了 0 小时」，一点精神都不回。改成 `hours != null && Number.isFinite(Number(hours))`，`test-qqb-spirit.mjs` 有一条专门守着。
+
+回归：`node scripts/test-qqb-spirit.mjs`、`node scripts/test-qqb-thoughts.mjs`、`node scripts/test-qqb-liveness.mjs`（最后那个专查「模块写好了却没接线」）。
+
 ### 记得住、忘得对、按意思找得回：遗忘曲线 + 向量索引（2026-10-25）
 
 主人的要求是两条合起来的效果：**记忆要像人一样会淡**（艾宾浩斯 + 情绪挂钩权重，淡的沉到底、重的摆最前），**又要按意思找得回来**（RAG 向量检索）。拆成三层，各管一件事：
