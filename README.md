@@ -1286,6 +1286,52 @@ GET  /api/socialV2/thoughts                                  # 她现在惦记�
 
 回归：`node scripts/test-qqb-spirit.mjs`、`node scripts/test-qqb-thoughts.mjs`、`node scripts/test-qqb-liveness.mjs`（最后那个专查「模块写好了却没接线」）。
 
+### 潘多拉魔盒：把她的内心摊开看（`/pandora`，2026-10-28）
+
+主人要的是「一个能看见她记得什么、怎么想我、今天心情如何的窗口」，外加一套更像人的记忆结构。规格全文在 `docs/PANDORA_SPEC.md`，这里是落地版。
+
+**为什么是桥接自带的网页，而不是 DSH 客户端插件**：DSH 本体是打包好的 Electron（`D:\dsh\resources\app.asar`），客户端插件得打进它自己的构建产物；`%USERPROFILE%\.dsh\plugins\` 下那类插件只提供 host 半（`cordis.patch.yml` + 导出 `Config`），没有 UI 半。所以面板做成独立 Web 应用，同源、同一张库、手机也能看，日后要套壳成插件也不冲突。
+
+打开方式（`x-console-token` 换成 `state/console-token` 里的值）：
+
+```
+http://127.0.0.1:3100/pandora?token=<console-token>
+```
+
+换完会种一枚 30 天 HttpOnly cookie（`pandora_token`），之后刷新不用再带 token。五个 Tab：记忆库（L3–L5 时间轴、权重可改、归档开关）、日记本（日常/重要/刻骨铭心）、人格面板（固化人设 + 实时精神/饥饿/念头）、收藏夹（表情包与相册）、人物档案（她眼里的每个人：称呼/信任度/印象）。
+
+**记忆分六层，但物理上同一张库**（`src/qqb/memory/store.mjs`，schema v5）：
+
+| 层 | 存什么 | kind 映射 |
+| --- | --- | --- |
+| L1 | 人设（不落库，永远注入） | `roles/小鲸鱼.md` |
+| L2 | 原话，只作素材、**不参与召回** | `message` |
+| L3 | 情节/事件 | `event` `topic` |
+| L4 | 事实（召回主力） | `fact` `preference` `impression` `promise` |
+| L5 | 索引卡（≤50 字：时间/人物/起因/结果/情绪） | `card` |
+| L6 | 日记（分级：日常/重要/刻骨铭心） | `diary` |
+
+**关系硬过滤**：`recall({ audience })`，`audienceOf(key, ownerQQ)` 把会话翻成 `owner | friend | group | self`——群聊拿不到私聊记忆、朋友拿不到别人的，除非她自己调 `shareMemory()` 主动分享（`shares` 表，默认 7 天）。跨会话检索（`allScopes`）只允许 `self` 用，也就是**她主动去查**的时候。
+
+**会忘，但不删**：`archiveSweep({ minWeight: 0.12, idleDays: 30 })` 把又淡又久没用的挪进归档（`archived_at` + `archive_reason`），列表面板看得见、能一键复职；被精确关键词命中时会自动复职并打 `revived` 标记。这是「像一个记性变差的人」，不是「数据库清理」。
+
+**夜里巩固 + 做梦**（`src/qqb/memory/consolidate.mjs`）：睡着 10 分钟后，把当天 L2 原话复盘成 L4 事实 + L3 情节 + L5 索引卡；提示词里明令禁止写「主人没理我」这种摘要，要感官细节和潜台词（「他三个小时没回消息，我盯着屏幕，房间安静得心慌」）。做梦是把近期 2–3 条记忆熬成 120–220 字荒诞隐喻，写进当天日记（`meta.kind=dream`），第二天能自己说「我昨天梦到」。手动跑：`POST /api/socialV2/consolidate {"key":"private:3482501440"}`。
+
+**上下文层四件**（都在 `src/bridge.js`，两条提示词路线都接了）：
+1. 索引卡 5 张（`innerIndexPromptText` → `liveMemory.cards({limit:5})`）；
+2. 触景生情（`flash({key,text})`：命中实体就去 L3/L4 拉，注入【突然想起来的】）；
+3. 高情绪锚点（`noteAnchor`：`emotionFromText ≥ 0.6` 才记，同会话最多 5 条，`ANCHOR_TURNS = 100` 轮内每轮递减提示「这件事还压在心里」）；
+4. 厚度规则写进 `ENGINE_RULES`：先有情绪再有画面、细节可以记错情绪必须对、最深的那些只有半句。
+
+**踩过的坑**：
+1. `ALTER TABLE` 不能加 `NOT NULL`/`CHECK`，而且必须在 `CREATE INDEX` **之前**执行，否则老库一堆 `no such column`。CHECK 只存在于新库，老库靠读侧 `normalizeMemLevel ?? levelOfKind` 兜底。
+2. FTS5 external-content 影子表只索引 text/norm/subject，加列不影响；但回填 UPDATE 会触发 `memories_au` 触发器，**必须等虚表建好再回填**。
+3. 实体匹配不能等值（「火锅店」vs「火锅」），要「相等 / LIKE 包含 / 反向包含」三选一。
+4. `src/bridge.js` 加顶层 import 必须同步 `scripts/audit-bridge-harness.mjs` 的 vm 桩——漏一个 `createConsolidator` 就是一整片看起来无关的测试挂掉（这个坑第 4 次踩了）。
+5. 这台机器 PowerShell 里 `node - <<'NODE'` 报 `Missing file specification after redirection operator`，heredoc 不可用，改文件用编辑器或 `[IO.File]::WriteAllText`。
+
+回归：`node scripts/test-qqb-memory-levels.mjs`、`node scripts/test-qqb-consolidate.mjs`、`node scripts/test-qqb-pandora.mjs`、`node panel/selftest.mjs`（最后一个只校验前端静态结构）。
+
 ### 记得住、忘得对、按意思找得回：遗忘曲线 + 向量索引（2026-10-25）
 
 主人的要求是两条合起来的效果：**记忆要像人一样会淡**（艾宾浩斯 + 情绪挂钩权重，淡的沉到底、重的摆最前），**又要按意思找得回来**（RAG 向量检索）。拆成三层，各管一件事：

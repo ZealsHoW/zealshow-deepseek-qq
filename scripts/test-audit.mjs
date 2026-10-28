@@ -128,6 +128,15 @@ const tests = [
   'test-qqb-spirit.mjs',
   'test-qqb-thoughts.mjs',
   'test-qqb-liveness.mjs',
+  // P3 潘多拉：夜间巩固（原话→片段/事实/索引卡）与做梦——JSON 容错、卡片 ≤50 字、
+  //   梦境落日记、同一天再做梦不报错、没库/记录太少都不能抛。
+  'test-qqb-consolidate.mjs',
+  // P1 潘多拉记忆核心：L2–L6 分层、关系硬过滤（群/朋友/主人）、归档清扫与复职、
+  //   实体联想、分享（shares）、面板读写；含一个 v4→v5 老库迁移用例。
+  'test-qqb-memory-levels.mjs',
+  // P1–P4 接线自检：面板静态页/静态分支/spirit 代理、记忆核心 API 是否真接进
+  //   live 门面与两条提示词路线（索引卡、触景生情、100 轮锚点）。
+  'test-qqb-pandora.mjs',
         // R1b/R5：人设慢演化（只改人格卡受管区块 + 审计 + 回滚）与干预提案队列。
         'test-qqb-persona-evolve.mjs',
         // R8 定向投递：自然语言要能解析出对象与嘱托、必须从队列里认辞（撤回/拒绝/过期都要有交代）；

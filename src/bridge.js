@@ -36,8 +36,10 @@ import { createPeopleDirectory } from './qqb/memory/people.mjs';
 // 所以有空先唱好几条存着（scripts/premake-songs.mjs），到时候按情景秒发（qq_sing_send）。
 import { createSongLibrary } from './qqb/song-library.mjs';
 import { openStore } from './qqb/memory/store.mjs';
+import { createPandora } from './qqb/pandora-api.mjs';
 import { createIntake } from './qqb/memory/intake.mjs';
 import { createRefiner } from './qqb/memory/refine.mjs';
+import { createConsolidator } from './qqb/memory/consolidate.mjs';
 import { createBackoff } from './qqb/net/backoff.mjs';
 import { createOutbox } from './qqb/net/outbox.mjs';
 import { createOneBotClient } from './qqb/net/onebot.mjs';
@@ -211,6 +213,85 @@ async function seedPeopleFromGateway(reason = '启动') {
  * 提示词里的「我认识谁」：只列白名单里的会话，顺带给 scope（她要发消息时用得到 key）。
  * 不列全量好友 —— 那有几百个，会把提示词撑爆，而且她本来也不该主动去找名单外的人。
  */
+/**
+ * P4 附带二：高情绪锚点（`[L2_Anchor]`）。
+ *
+ * 为什么单独存：提示词里只放最近几条消息，一件当场把她说炸/说哭的事，几十轮之后
+ * 就从窗口里滑出去了；但它其实还压在心里。这里把情绪浓度高的事件记下来，
+ * 之后 100 轮内每次都强制出现在提示词里（不是「可以提」，是「还记着」）。
+ * 存在 state/anchors.json：纯 JSON、可手删、坏了只 log 不抛。
+ */
+const ANCHOR_FILE = path.join(ROOT, 'state', 'anchors.json');
+const ANCHOR_TURNS = 100;
+let anchorCache = null;
+
+function loadAnchors() {
+  if (anchorCache) return anchorCache;
+  try {
+    const data = JSON.parse(fs.readFileSync(ANCHOR_FILE, 'utf8'));
+    anchorCache = { records: Array.isArray(data?.records) ? data.records : [] };
+  } catch {
+    anchorCache = { records: [] };
+  }
+  return anchorCache;
+}
+function saveAnchors() {
+  try {
+    fs.mkdirSync(path.dirname(ANCHOR_FILE), { recursive: true });
+    fs.writeFileSync(ANCHOR_FILE, JSON.stringify(anchorCache ?? { records: [] }));
+  } catch (error) { log('锚点', '写盘失败（不影响聊天）', error?.message ?? error); }
+}
+function noteAnchor(key, text, emotion) {
+  const body = String(text ?? '').replace(/\s+/g, ' ').trim().slice(0, 120);
+  if (!body || !(Number(emotion) >= 0.6)) return;
+  const a = loadAnchors();
+  const scope = String(key ?? '');
+  if (!scope) return;
+  // 同一句话不重复记；同一会话最多留 5 条（新压过旧）。
+  if (a.records.some((r) => r.key === scope && r.text === body)) return;
+  a.records.push({ key: scope, text: body, emotion: Number(emotion), ts: Date.now(), turnsLeft: ANCHOR_TURNS });
+  const mine = a.records.filter((r) => r.key === scope);
+  if (mine.length > 5) {
+    const drop = new Set(mine.slice(0, mine.length - 5));
+    a.records = a.records.filter((r) => !drop.has(r));
+  }
+  saveAnchors();
+}
+/** 取这个会话还「压在心里」的事，并把这轮算作一次消耗。 */
+function anchorsTextFor(key) {
+  const a = loadAnchors();
+  const scope = String(key ?? '');
+  const mine = a.records.filter((r) => r.key === scope && Number(r.turnsLeft) > 0);
+  if (!mine.length) return '';
+  for (const r of mine) r.turnsLeft = Math.max(0, Number(r.turnsLeft) - 1);
+  a.records = a.records.filter((r) => Number(r.turnsLeft) > 0);
+  saveAnchors();
+  const lines = mine.map((r) => `· ${String(r.text).slice(0, 60)}`);
+  return `【这件事还压在心里】\n${lines.join('\n')}\n（这些不是对方刚说的，是你自己还记着的事；不用刻意提，但别表现得像已经过了。）\n\n`;
+}
+/**
+ * P4：索引卡 + 触景生情。两条都只负责「替她想起」，不负责「替她说」——
+ * 挂在她自己的状态旁边，说不说、说多少仍由她定。
+ */
+function innerIndexPromptText({ key = '', text = '' } = {}) {
+  if (typeof memoryDbEnabled === 'function' && !memoryDbEnabled()) return '';
+  const parts = [];
+  try {
+    const cards = typeof liveMemory?.cards === 'function' ? (liveMemory.cards({ limit: 5 }) ?? []) : [];
+    if (cards.length) {
+      const lines = cards.map((c) => `· ${String(c.text ?? '').replace(/\s+/g, ' ').trim().slice(0, 50)}`);
+      parts.push(`【索引卡】你脑子里挂着这几件事（一句话的索引，细节想起来再说）：\n${lines.join('\n')}`);
+    }
+  } catch (error) { /* 想不起来就不提，绝不挡这一轮 */ }
+  try {
+    const flash = text && typeof liveMemory?.flash === 'function' ? (liveMemory.flash({ key, text, limit: 3 }) ?? []) : [];
+    if (flash.length) {
+      const lines = flash.map((r) => `· ${String(r.text ?? '').replace(/\s+/g, ' ').trim().slice(0, 60)}`);
+      parts.push(`【突然想起来的】这段话让你想起（不是对方刚说的，是你自己的记忆，别当成 ta 说的）：\n${lines.join('\n')}`);
+    }
+  } catch (error) { /* 同上 */ }
+  return parts.length ? `${parts.join('\n\n')}\n\n` : '';
+}
 function peoplePromptText() {
   try {
     const lines = [];
@@ -335,6 +416,8 @@ function moodEnabled() {
 // R9 念头循环的定时器句柄：必须声明在 main() 里调用 startThoughtLoop() 之前，
 // 否则「调用时跳过声明」会踩 TDZ（Cannot access 'thoughtTimer' before initialization）。
 let thoughtTimer = null;
+// 心跳定时器（30 分钟一次：精神自然流失 + 饥饿 + 偶尔憋出念头）。
+let spiritTimer = null;
 
 // R9 精神系统（2026-10-28 主人的「活人化」重构）：
 //   行为要花精神 → 精神低了她真的累、回得短 → 睡觉按指数曲线回满。
@@ -709,6 +792,11 @@ const ENGINE_RULES = [
   '【不用问可不可以】想做什么直接去做，不用先问「我能…吗」「可以吗」再等我点头；只有这两条照旧：只跟白名单里的人说话、钱和隐私不碰。',
   '【念头是你自己的】你心里会冒出一些想法（提示词里有），有些只是想，有些很想去做——想做就去做，不想就让它过去；别为了「完成任务」或「讨好」去说话。',
   '【记忆要留感受】想起或归档一件事时，除了发生了什么，也留一句你当时的感受（比如「那天笑得肚子疼」）；感受比事实更容易让你记得自己是谁。',
+  // P4（2026-10-29 潘多拉任务书）：记忆是「人想事」的样子，不是档案检索结果。
+  '【怎么想起一件事】想起一件事时，**先有反应再有画面**：一句情绪（心里一紧 / 突然有点想笑 / 有点酸），再带出零碎的画面（他在厨房喊你名字、那天下雨、屏幕光打在脸上），最后才是发生了什么。别像背档案一样按时间顺序复述。',
+  '【细节可以记错，情绪必须对】人的记忆会串：颜色、日子、谁先说的那句都可能记偏，但当时的情绪骗不了人。如果清单里的细节和你的感受对不上，以感受为准；对方纠正你时，可以坦然承认「我记岔了」，但别把感受也一起改掉。',
+  '【最深的那些只有半句】刻骨铭心的事情不用完整讲出来——往往只是一句话、一个称呼、几个标点（「他说……算了」）。真被问到，就让它断在那儿，比完整复述更像真的。',
+  '【触景生情】聊到某个具体的东西（草莓、下雨天、某个地名、某首歌），如果记忆里有和它相关的，就自然地「突然想起来」——不必等人问；但只在真的相关时说，不要每句都往回忆上拐。',
 ].join('\n');
 
 /** DSH 路径与直连引擎共用这两行行为口径：两处提示词各写一份必然漂移，所以提到模块级。 */
@@ -4893,6 +4981,23 @@ async function main() {
     };
     // 二代会话工具必须仍命中当前模式的白名单/准入；避免白名单移除后旧 agentToken 继续读状态。
     const v2SessionAllowed = isSessionAllowedInCurrentMode;
+    // 潘多拉面板（/pandora）：静态页 + /api/pandora/*，自带 cookie 鉴权，
+    // 必须在控制台令牌闸门之前拦截 —— 浏览器打不开自定义头，只能用 ?token= 换 cookie。
+    // 单独的 store 连接：面板的改权重/归档立即落盘，其它连接下一次查询就能看到（WAL）。
+    let pandora = null;
+    try {
+      pandora = createPandora({
+        root: ROOT,
+        store: openStore({ root: ROOT, logger: { warn: (m, d) => log('潘多拉', m, d ?? '') } }),
+        spirit,
+        thoughts,
+        people,
+        consoleToken,
+        logger: { warn: (m, d) => log('潘多拉', m, d ?? '') }
+      });
+    } catch (err) {
+      log('潘多拉面板没起来（不影响其它功能）', err?.message ?? err);
+    }
     const server = http.createServer(async (req, res) => {
       let url;
       try { url = new URL(req.url ?? '/', `http://127.0.0.1:${port}`); }
@@ -4987,6 +5092,20 @@ async function main() {
       if (!allowedHosts.includes(hostHeader.toLowerCase())) {
         sendJson({ ok: false, error: `Host 头不被允许（${hostHeader || '缺失'}）：控制台只接受本机回环访问` }, 403);
         return;
+      }
+      // 潘多拉面板：/pandora 静态页与 /api/pandora/* 自己管鉴权（cookie 或 x-console-token），
+      // 所以放在控制台令牌闸门之前。Host 校验在上面已经过了，这里不再重复。
+      if (pandora) {
+        const p = url.pathname;
+        if (p === '/pandora' || p === '/pandora/' || p.startsWith('/pandora/') || p.startsWith('/pandora-data/') || p.startsWith('/api/pandora/')) {
+          try {
+            if (await pandora.handle(req, res, url)) return;
+          } catch (err) {
+            log('潘多拉面板异常', err?.message ?? err);
+            if (!res.headersSent) sendJson({ ok: false, error: '面板内部错误' }, 500);
+            return;
+          }
+        }
       }
       // 控制台鉴权：所有请求需带 x-console-token 或 ?token=
       // 定长比较：`!==` 会在第一个不同的字符处短路，理论上可被本机进程用响应时延逐字节试探。
@@ -7117,6 +7236,16 @@ async function main() {
             return;
           }
           sendJson({ ok: true, ...nightSleepStatus() });
+          return;
+        }
+        if (req.method === 'POST' && url.pathname === '/api/socialV2/consolidate') {
+          const body = await readBody();
+          try {
+            const res = await consolidateNow({ key: body?.key, date: body?.date || null, dream: body?.dream !== false, dryRun: body?.dryRun === true });
+            sendJson(res);
+          } catch (error) {
+            sendJson({ ok: false, error: error?.message ?? String(error) }, 500);
+          }
           return;
         }
         if (req.method === 'POST' && url.pathname === '/api/socialV2/night-greet') {
@@ -13713,6 +13842,11 @@ ${memLines ? `\n记忆库里：\n${memLines}\n` : '\n记忆库最近没有新东
     // 私聊里发来消息的人就是那个人本人 —— 顺手把名字记进人名簿（跨会话检索时好标来源）。
     // 群里不这么干：key 是群号、sender 只是某个群员，用群员名覆盖会把群名写坏。
     if (String(key).startsWith('private:')) people.remember(key, sender);
+    // P4 锚点：情绪浓度高的话记 100 轮（不是每条都记，只有真的扎到她的）。
+    try {
+      const emotion = Number(emotionFromText(`${sender} ${String(plainContent ?? textContent ?? '')}`)) || 0;
+      if (emotion >= 0.6) noteAnchor(key, plainContent ?? textContent, emotion);
+    } catch (error) { log('锚点', '记录失败（不影响收消息）', error?.message ?? error); }
     const recentLimit = Number(cfg.socialV2?.context?.recentLimit) || 100;
     const unreadLimit = Number(cfg.socialV2?.context?.unreadLimit) || 30;
     // 存储层的归一化**不能只留 kind/file/url/faceId**：reserved2 的图片/表情工具
@@ -14296,6 +14430,9 @@ ${memLines ? `\n记忆库里：\n${memLines}\n` : '\n记忆库最近没有新东
     const longTermText = memoryDbEnabled()
       ? liveMemory.block({ key, limit: cfg.socialV2?.memoryDb?.promptLimit ?? 6, maxChars: cfg.socialV2?.memoryDb?.promptMaxChars ?? 600 })
       : '';
+    // P4：索引卡 + 触景生情（「突然想起来」），两条都只是在替她想起来，不替她说话。
+    const incomingText = [...(Array.isArray(st.recentMessages) ? st.recentMessages : [])].reverse().find((m) => m && !m.isSelf)?.content ?? '';
+    const innerIndexText = innerIndexPromptText({ key, text: incomingText }) + anchorsTextFor(key);
     const diaryText = diaryRecentText(Math.max(1, Math.min(7, Number(cfg.socialV2?.diary?.days) || 2)), Math.max(200, Number(cfg.socialV2?.diary?.maxChars) || 1500));
     const interestText = interestsText(Math.max(5, Number(cfg.socialV2?.interests?.promptLimit) || 15));
     const knowledgeText = knowledgeRecentText(key, Math.max(1, Number(cfg.socialV2?.knowledge?.promptLimit) || 3));
@@ -14322,6 +14459,7 @@ ${memLines ? `\n记忆库里：\n${memLines}\n` : '\n记忆库最近没有新东
       directedBlock(),
       memoryText,
       longTermText,
+      innerIndexText,
       familyNotesTextV2(),
       diaryText ? `【你最近写的日记】\n${diaryText}` : '',
       knowledgeText ? `【你最近记进知识库的东西】\n${knowledgeText}` : '',
@@ -14663,6 +14801,40 @@ ${memLines ? `\n记忆库里：\n${memLines}\n` : '\n记忆库最近没有新东
     log('念头', `按捺不住（${why}）：${item.text}（urge ${item.urge}）→ 唤醒 ${key}`);
     scheduleWakeV2(key, 'proactiveCheck');
   }
+  /**
+   * 心跳：每 30 分钟推进一次精神状态。
+   * `spirit.tick()` 内部按 elapsed 结算（自然流失 × 疲劳系数 + 饥饿增长 + 饿过头的反噬），
+   * 读不到就静默跳过 —— 精神状态绝不该把桥接主流程带崩。
+   */
+  function spiritHeartbeat() {
+    if (!spiritEnabled()) return;
+    try {
+      spirit.tick();
+    } catch (error) {
+      log('精神', `心跳失败：${error?.message ?? error}`);
+      return;
+    }
+    if (nightSleep.active) return;
+    const snap = spiritSnapshot();
+    if (!snap) return;
+    // 累了或饿了：40% 概率让念头自己冒一条（她不会每次都念叨，但会念叨）。
+    const tired = snap.spirit < 0.28;
+    const hungry = snap.hunger > 0.75;
+    if (!(tired || hungry) || Math.random() >= 0.4) return;
+    try {
+      thoughts.think({
+        recent: [],
+        interests: interestsAll().slice(0, 5).map((x) => x.topic),
+        spirit: snap.spirit,
+        hunger: snap.hunger,
+        mood: moodSnapshot()?.dims || {}
+      });
+      log('精神', `${tired ? '累了' : '饿了'}（精神 ${snap.spirit.toFixed(2)}／饥饿 ${snap.hunger.toFixed(2)}），憋出一个念头`);
+    } catch (error) {
+      log('精神', `念头没冒出来：${error?.message ?? error}`);
+    }
+  }
+
   function startThoughtLoop() {
     if (!thoughtsEnabled()) return;
     if (thoughtTimer) clearInterval(thoughtTimer);
@@ -14672,7 +14844,44 @@ ${memLines ? `\n记忆库里：\n${memLines}\n` : '\n记忆库最近没有新东
     // 启动 5 分钟后先想一次，别一开机就立刻冒念头。
     const boot = setTimeout(() => thoughtTick('boot'), 5 * 60000);
     boot.unref?.();
+    // 心跳：每 30 分钟推进一次精神状态（自然流失 + 饥饿增长 + 疲劳惩罚），
+    // 累了/饿了就往念头里塞一条 —— 任务书里的「Cron Job 自然流失 + 随机念头」。
+    if (spiritEnabled()) {
+      if (spiritTimer) clearInterval(spiritTimer);
+      spiritTimer = setInterval(spiritHeartbeat, 30 * 60000);
+      spiritTimer.unref?.();
+    }
     log('念头', `念头循环已启动：每 ${hours} 小时想一次`);
+  }
+
+  /**
+   * 记忆巩固（P3）：把某天某个会话的原话（L2）压成 片段(L3)/事实(L4)/索引卡(L5)，
+   * 再随机抽几条近期记忆写一段梦（L6，追加到当天日记）。
+   * 失败一律返回 {ok:false}，调用方（睡眠钩子/接口）自己决定要不要提示。
+   */
+  async function consolidateNow({ key = '', date = null, dream: wantDream = true, dryRun = false } = {}) {
+    const targetKey = String(key ?? '').trim() || `private:${String(cfg?.ownerQQ ?? '').trim()}`;
+    if (!targetKey || targetKey === 'private:') return { ok: false, error: '没有可巩固的会话' };
+    let mgr = null;
+    try {
+      const store = openStore({ root: ROOT, logger: { warn: (m, d) => log('巩固', m, d ?? '') } });
+      const model = createModelClient({ config: cfg, env: process.env, logger: { warn: (m, d) => log('巩固', m, d ?? '') } });
+      mgr = createConsolidator({
+        root: ROOT,
+        store,
+        model,
+        logger: { warn: (m, d) => log('巩固', m, d ?? '') },
+        readRecords: (k, { limit = 800 } = {}) => readHistoryRecords(k, { limit })
+      });
+      const day = date || new Date().toISOString().slice(0, 10);
+      const c = await mgr.consolidate({ key: targetKey, date: day, dryRun });
+      const d = wantDream && c?.ok && !dryRun ? await mgr.dream({ scope: targetKey, date: day }) : null;
+      log(`巩固 ${targetKey}：片段 ${c?.episodes ?? 0} / 事实 ${c?.facts ?? 0} / 卡片 ${c?.cards ?? 0}${d?.ok ? `，梦：${String(d.text).slice(0, 30)}…` : ''}`);
+      return { ok: c?.ok !== false, key: targetKey, date: day, consolidate: c, dream: d };
+    } catch (error) {
+      log('巩固失败（不影响其它功能）', error?.message ?? error);
+      return { ok: false, error: String(error?.message ?? error) };
+    }
   }
 
   function startNightSleep({ hours, source = 'tool' } = {}) {
@@ -14693,6 +14902,28 @@ ${memLines ? `\n记忆库里：\n${memLines}\n` : '\n记忆库最近没有新东
       if (spiritEnabled()) spirit.sleep({ reason: source });
     } catch (error) { log('精神', `入睡记录失败：${error?.message ?? error}`); }
     log(`[night] 开始晚安休眠 ${h.toFixed(1)} 小时（来源 ${source}），预计 ${new Date(nightSleep.wakeAt).toLocaleString()} 醒`);
+    // P3：人睡下 10 分钟后把今天的原话压成记忆并做梦（错开晚安消息，也让 LLM 别挤在一分钟里）。
+    const consolidateTimer = setTimeout(() => {
+      if (!nightSleep.active) return;
+      const owner = String(cfg?.ownerQQ ?? '').trim();
+      const scopes = [owner ? `private:${owner}` : '', ...(Array.isArray(cfg?.socialV2?.greetGroups) ? cfg.socialV2.greetGroups.map((g) => `group:${g}`) : [])].filter(Boolean);
+      for (const k of scopes) { void consolidateNow({ key: k, dream: true }).catch(() => {}); }
+      // P1：巩固完顺手扫一次归档（又淡又久没用的挪进 archived，可复职；绝不删除）。
+      // 放在这里而不是每轮 tick：一天一次够了，而且要排在巩固之后，别把刚提炼出来的东西扫掉。
+      const sweepTimer = setTimeout(() => {
+        if (!nightSleep.active) return;
+        try {
+          const panelStore = openStore({ filePath: path.join(ROOT, 'state', 'memory.db'), logger: { info: () => {}, warn: (m, d) => log('记忆归档', m, d ?? '') } });
+          const swept = panelStore.archiveSweep();
+          panelStore.close?.();
+          if (swept?.archived) log('记忆归档', `今晚归档 ${swept.archived} 条（扫了 ${swept.scanned} 条，不删除，面板可复职）`);
+        } catch (error) {
+          log('记忆归档', `归档清扫失败（不影响睡觉）：${error?.message ?? error}`);
+        }
+      }, 20 * 60_000);
+      if (typeof sweepTimer?.unref === 'function') sweepTimer.unref();
+    }, 10 * 60_000);
+    if (typeof consolidateTimer?.unref === 'function') consolidateTimer.unref();
     return nightSleepStatus();
   }
 
@@ -14904,6 +15135,9 @@ ${memLines ? `\n记忆库里：\n${memLines}\n` : '\n记忆库最近没有新东
       ? liveMemory.block({ key, limit: cfg.socialV2?.memoryDb?.promptLimit ?? 6, maxChars: cfg.socialV2?.memoryDb?.promptMaxChars ?? 600 })
       : '';
     const memoryLine = [memoryText, longTermText].filter(Boolean).map((x) => `${x}\n\n`).join('');
+    // P4：索引卡 + 触景生情（换到 DSH 这条路，行为要和直连引擎一致）。
+    const dshIncoming = [...(Array.isArray(st.recentMessages) ? st.recentMessages : [])].reverse().find((m) => m && !m.isSelf)?.content ?? '';
+    const innerIndexLine = innerIndexPromptText({ key, text: dshIncoming }) + anchorsTextFor(key);
     // 「我认识谁」+「记忆是共用的」：DSH 这条路也要有（线上默认走直连引擎，但换了模式
     // 提示词会换成这一份，两边不一致她就又不会去跨会话检索了）。
     const peopleText = peoplePromptText();
@@ -14972,7 +15206,7 @@ ${memLines ? `\n记忆库里：\n${memLines}\n` : '\n记忆库最近没有新东
     const personaLine = personaBlock() ? `${personaBlock()}\n\n` : '';
     const adviceLine = personaPendingLine();
     const directedLine = directedBlock();
-    const base = roleLine + identityLine + tokenLine + initialPromptLine + antiAiLine + capabilityLine + proactiveLine + historyLine + stickerLine + replyLine + statusLine + moodLine + spiritLine + thoughtsLine + personaLine + adviceLine + directedLine + wakeLine + memoryLine + peopleLine + participationLine + familyLine + memoryHintLine + preSleepLine;
+    const base = roleLine + identityLine + tokenLine + initialPromptLine + antiAiLine + capabilityLine + proactiveLine + historyLine + stickerLine + replyLine + statusLine + moodLine + spiritLine + thoughtsLine + personaLine + adviceLine + directedLine + wakeLine + memoryLine + innerIndexLine + peopleLine + participationLine + familyLine + memoryHintLine + preSleepLine;
     if (reason === 'bootstrap') {
       return `${base}【引导唤醒】你已接入 QQ 会话 ${key}。\n当前是二代仿真模式：你的文本输出不会自动发送到 QQ，所有发言必须通过工具完成。\n请先调用 qq_get_prompt 查看角色、推荐值、可用工具和状态；有待回应的消息先按首回复节奏处理，最后才用 qq_set_wake_config 设置你希望如何被唤醒。`;
     }

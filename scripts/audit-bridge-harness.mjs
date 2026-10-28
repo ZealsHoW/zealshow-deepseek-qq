@@ -106,6 +106,18 @@ function emotionFromText() {
   return 0;
 }
 
+/**
+ * 巩固/做梦（P3）同样是桩：夹具里不调模型、不落日记。
+ * 真行为由 scripts/test-qqb-consolidate.mjs 回归；这里只要「别让桥接 ReferenceError」。
+ */
+function createConsolidator() {
+  return {
+    version: '0.1.0',
+    consolidate: async () => ({ ok: true, skipped: 'audit-stub' }),
+    dream: async () => ({ ok: false, error: 'audit-stub' }),
+  };
+}
+
 // 摄入层同样是惰性桩：夹具里不能真去开库（同上，EPERM）。
 function openStore() {
   return null;
@@ -491,6 +503,7 @@ export async function bridgeHarness({ config = {}, savedState, files = {}, globa
     createPeopleDirectory,
     createSongLibrary,
     emotionFromText,
+    createConsolidator,
     openStore,
     createIntake,
     discoverDshLaunchToken: () => '', unwrap, createTurnCollector,

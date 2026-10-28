@@ -60,14 +60,24 @@ export const MODULES = {
     note: 'R3 实测探针：OneBot 网关 / 桥接控制台 / 常驻 MCP / Hindsight / state 可写 / 记忆库可打开 / 发送队列积压 / 情绪状态（R2）/ 人设演化与干预（R1b+R5）/ 定向投递待办（R8）/ 媒体能力与失败率（R6）/ 模型直连配置（F）；0.1.9 起 checkBridge 读管理端 presetHealth.broken：DSH 报「装配失败」的 preset 让这个探针报 degraded（此前只认 dshReady，preset 坏了 30 多个小时它一直报 ok——就是那个假绿灯）',
   },
   'memory/store': {
-    version: '0.3.0',
+    version: '0.4.0',
     files: ['src/qqb/memory/store.mjs'],
-    note: 'R1 记忆库：SQLite 分层记忆（private/normal/group）、重复事实合并、提炼配额、人设演变审计（R1b）。0.1.1 起 schema v2：新增 archived_at 与 archiveOld()；0.2.0 起 schema v3：emotion 列 + 艾宾浩斯遗忘曲线（weight/retention/depth）；0.3.0 起 schema v4：vectors 表 + hash-v1/bge-m3 向量、字面+向量混合检索',
+    note: 'R1 记忆库：SQLite 分层记忆（private/normal/group）、重复事实合并、提炼配额、人设演变审计（R1b）。0.1.1 起 schema v2：archived_at；0.2.0 起 schema v3：emotion + 艾宾浩斯（weight/retention/depth）；0.3.0 起 schema v4：vectors 表 + 字面/向量混合检索；0.4.0 起 schema v5（潘多拉）：mem_level L2–L6、sensory/subtext 厚度、memory_entities 实体倒排、shares 分享、audience 关系硬过滤（owner/friend/group/self）、archiveSweep 归档清扫 + exact 复职、面板 listMemoriesForPanel/setMemoryWeight/setMemoryArchived',
   },
   'memory/live': {
-    version: '0.3.0',
+    version: '0.4.0',
     files: ['src/qqb/memory/live.mjs'],
-    note: 'R1 接线层：会话 key→分层、桥接写入镜像、唤醒提示注入块（跨会话召回）。0.3.0 起提示词按遗忘权重从重到轻排（重的在前、淡的沉底），search()/warmVectors() 走语义向量',
+    note: 'R1 接线层：会话 key→分层、桥接写入镜像、唤醒提示注入块（跨会话召回）。0.3.0 起按遗忘权重从重到轻排（重的在前、淡的沉底），search()/warmVectors() 走语义向量；0.4.0 起 block()/recall() 带 audience 硬过滤（这一刻对面是谁），新增 audienceOf()、cards()（L5 索引卡）、flash()（实体触景生情）',
+  },
+  'memory/consolidate': {
+    version: '0.1.0',
+    files: ['src/qqb/memory/consolidate.mjs'],
+    note: 'P3 巩固与做梦：把当天 L2 原话复盘成 L4 事实 + L3 情节 + L5 索引卡（禁止写「主人没理我」式摘要，要感官细节与潜台词）；做梦把近期记忆熬成 120–220 字荒诞隐喻存进日记（meta.kind=dream）；进度落 state/consolidate.json，记录太少就跳过',
+  },
+  'pandora/api': {
+    version: '0.1.0',
+    files: ['src/qqb/pandora-api.mjs'],
+    note: '潘多拉魔盒后端：/pandora（console-token 换 HttpOnly cookie）、/pandora/<静态页>、/pandora-data/<白名单目录>、/api/pandora/{memories,memories/:id,memories/:id/archive,diaries,persona,gallery,people,health,spirit}；只作面板用，不改她的行为',
   },
   'memory/intake': {
     version: '0.1.0',

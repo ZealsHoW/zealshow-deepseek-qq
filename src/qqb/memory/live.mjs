@@ -11,7 +11,7 @@ import { KINDS, openStore } from './store.mjs';
 import { HASH_MODEL, createEmbedder, hashVector } from './embed.mjs';
 import { PROMPT_WEIGHT_FLOOR, emotionFromText } from './ebbinghaus.mjs';
 
-export const VERSION = '0.3.0';
+export const VERSION = '0.4.0';
 
 /** social-v2 的类别 → 记忆库类型。 */
 const CATEGORY_TO_KIND = Object.freeze({
@@ -67,6 +67,26 @@ export function layerForKey(key, ownerQQ) {
 export function layersForSession(key, ownerQQ) {
   const layer = layerForKey(key, ownerQQ);
   return layer === 'private' ? ['private', 'normal'] : [layer];
+}
+
+/**
+ * 会话 key → 关系语境（PANDORA_SPEC §2 的硬过滤入口）。
+ * owner = 主人私聊；friend = 其它私聊；group = 群聊；self = 她主动跨会话检索（不设限）。
+ *
+ * 为什么必须有：只靠 `layers` 过滤挡不住「另一份 private」——群聊分层是 group，
+ * 但主人私聊那条通道里 A 的私聊在数据库里也是 private。真正说得清「这一刻对面是谁」
+ * 的只有 scope 本身，所以把 key 一起带上，让 store 在拼 SQL 前算白名单。
+ */
+export function audienceOf(key, ownerQQ, { rel = null } = {}) {
+  const scope = canonicalScope(key);
+  if (rel) return { rel, key: scope, ownerQQ: ownerQQ == null ? null : String(ownerQQ) };
+  if (scope.startsWith('group:')) return { rel: 'group', key: scope, ownerQQ: ownerQQ == null ? null : String(ownerQQ) };
+  if (scope.startsWith('private:')) {
+    const qq = scope.slice('private:'.length);
+    const owner = String(ownerQQ ?? '').replace(/^0+(?=\d)/, '');
+    return { rel: owner && qq === owner ? 'owner' : 'friend', key: scope, ownerQQ: ownerQQ == null ? null : String(ownerQQ) };
+  }
+  return { rel: 'self', key: scope, ownerQQ: ownerQQ == null ? null : String(ownerQQ) };
 }
 
 function clip(text, max) {
@@ -284,6 +304,8 @@ export function createLiveMemory({
         const rows = st.recall({
           scope: canonicalScope(key),
           layers: layersForSession(key, owner),
+          // P1 硬过滤：这一刻对面是谁，只看得见「他和她的」+ global（外加主动分享出去的 scope）。
+          audience: audienceOf(key, owner),
           query: queryText,
           limit: Math.max(limit * 4, 24),
           minScore: 0,
@@ -312,6 +334,42 @@ export function createLiveMemory({
     },
 
     /**
+     * 索引卡（L5，PANDORA_SPEC §8）：每条长记忆一张 ≤50 字的卡（时间/人物/起因/结果/情绪）。
+     * 提示词里只放最近的几张，给模型一个「她脑子里挂着的事」的索引，正文仍靠 block()。
+     */
+    cards({ limit = 5 } = {}) {
+      return guard('cards', () => {
+        const st = open();
+        if (!st || typeof st.listMemoriesForPanel !== 'function') return [];
+        const r = st.listMemoriesForPanel({ levels: ['L5'], limit: Math.max(1, Math.min(20, Number(limit) || 5)) });
+        return (r?.items ?? []).filter((it) => String(it.text ?? '').trim());
+      }, []);
+    },
+
+    /**
+     * 触景生情（§6）：这句话里提到的具体东西（草莓、下雨天、某个地名）如果记忆里出现过，
+     * 直接把 L3/L4 拉出来——不走向量相似度，走实体倒排。命中的是「真提过」，不是「看起来像」。
+     */
+    flash({ key, text, limit = 3 } = {}) {
+      return guard('flash', () => {
+        const st = open();
+        if (!st || typeof st.searchByEntities !== 'function') return [];
+        const owner = ownerQQ();
+        const entities = typeof entitiesOf === 'function' ? entitiesOf(String(text ?? '')) : [];
+        if (!Array.isArray(entities) || !entities.length) return [];
+        const rows = st.searchByEntities({ entities, audience: audienceOf(key, owner), limit: Math.max(1, Math.min(10, Number(limit) || 3)) });
+        return (rows ?? []).map((row) => ({
+          id: row.id,
+          kind: row.kind,
+          subject: row.subject ?? null,
+          text: row.text,
+          scope: row.scope,
+          matched: row.matched ?? null,
+        }));
+      }, []);
+    },
+
+    /**
      * 结构化召回，给 `qq_memory_query` 这类「要能看出记了什么」的场景用
      * （`block()` 是给人看的提示词片段，这里是给模型/控制台看的数据）。
      */
@@ -324,6 +382,7 @@ export function createLiveMemory({
         const rows = st.recall({
           scope: canonicalScope(key),
           layers: layersForSession(key, owner),
+          audience: audienceOf(key, owner),
           kinds: Array.isArray(kinds) && kinds.length ? kinds : null,
           query: queryText,
           limit,

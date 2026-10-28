@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="dark">
+<meta name="referrer" content="same-origin">
+<title>潘多拉魔盒 · 小鲸的内心</title>
+<link rel="stylesheet" href="/pandora/style.css">
+</head>
+<body>
+<div id="auth-banner" class="auth" role="alert" hidden>令牌无效，请用 <code>/pandora?token=…</code> 打开</div>
+<header class="top">
+  <div class="brand">
+    <span class="logo" aria-hidden="true"></span>
+    <h1>潘多拉魔盒</h1>
+    <span class="sub">小鲸的内心</span>
+  </div>
+  <nav id="tabs" class="tabs" role="tablist" aria-label="面板分页">
+    <button type="button" class="tab" role="tab" data-tab="memories" aria-selected="false">记忆库</button>
+    <button type="button" class="tab" role="tab" data-tab="diaries" aria-selected="false">日记本</button>
+    <button type="button" class="tab" role="tab" data-tab="persona" aria-selected="false">人格状态</button>
+    <button type="button" class="tab" role="tab" data-tab="gallery" aria-selected="false">收藏夹</button>
+    <button type="button" class="tab" role="tab" data-tab="people" aria-selected="false">人物档案</button>
+  </nav>
+</header>
+<main id="view" class="view" data-tab="memories">
+  <section class="pane">
+    <div class="filters">
+      <div class="chips"><span class="sk-chip"></span><span class="sk-chip"></span><span class="sk-chip"></span><span class="sk-chip"></span></div>
+      <span class="sk-input"></span>
+    </div>
+    <div class="card sk-card"><div class="sk-line w30"></div><div class="sk-line"></div><div class="sk-line w80"></div><div class="sk-line w50"></div></div>
+    <div class="card sk-card"><div class="sk-line w20"></div><div class="sk-line w90"></div><div class="sk-line w60"></div></div>
+  </section>
+</main>
+<div id="scrim" class="scrim" hidden></div>
+<aside id="drawer" class="drawer" role="dialog" aria-modal="true" aria-labelledby="drawer-title" hidden>
+  <header class="drawer-head">
+    <h2 id="drawer-title">详情</h2>
+    <button type="button" id="drawer-close" class="icon-btn" aria-label="关闭" title="关闭（Esc）">✕</button>
+  </header>
+  <div id="drawer-body" class="drawer-body"></div>
+</aside>
+<div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+<script type="module" src="/pandora/app.js"></script>
+</body>
+</html>

@@ -21,7 +21,7 @@ function live(root, extra = {}) {
 }
 
 test('分层映射：群聊 group / 主人私聊 private / 其它私聊 normal，key 去前导零', () => {
-  assert.equal(VERSION, '0.3.0');
+  assert.equal(VERSION, '0.4.0');
   assert.equal(canonicalScope('group:0900000001'), 'group:900000001');
   assert.equal(canonicalScope('private:01000000001'), 'private:1000000001');
   assert.equal(layerForKey('group:900000001', OWNER), 'group');
