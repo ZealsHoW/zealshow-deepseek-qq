@@ -84,23 +84,29 @@ function readBody(req, limit = 64 * 1024) {
 function parseDiary(raw, file) {
   const lines = String(raw).split(/\r?\n/);
   const head = lines[0] ?? '';
-  const m = head.match(/^#\s*([0-9]{4}-[0-9]{2}-[0-9]{2})\s*\|\s*([^|]*)\|/);
-  const date = m?.[1] ?? file.replace(/\.md$/, '');
-  const gradeRaw = String(m?.[2] ?? '').trim();
+  // 两种头都见过：`# 2026-10-28 | 日常 |`（新格式）与 `# 2026-10-28`（旧格式，没分级没心情）。
+  const dateMatch = head.match(/^#\s*([0-9]{4}-[0-9]{2}-[0-9]{2})/);
+  const gradeMatch = head.match(/\|\s*([^|]*)\s*\|/);
+  const date = dateMatch?.[1] ?? file.replace(/\.md$/, '');
+  const gradeRaw = String(gradeMatch?.[1] ?? '').trim();
   const grade = /刻骨|难忘|unforgettable/i.test(gradeRaw)
     ? 'unforgettable'
     : /重要|important/i.test(gradeRaw)
       ? 'important'
       : 'daily';
   const body = lines
-    .slice(m ? 1 : 0)
+    .slice(dateMatch ? 1 : 0)
     .map((l) => l.replace(/^-\s+(\d{1,2}:\d{2})\s*/, '[$1] '))
     .join('\n')
     .trim();
+  // 标题取第一条真正的正文（跳过空行、`#` 小标题与 `> ` 引用），没有就用日期兜底。
+  const titleLine = body
+    .split(/\n/)
+    .map((l) => l.trim())
+    .find((l) => l && !l.startsWith('#') && !l.startsWith('>'));
   return {
     date,
-    // `# 日期 | 分级 |` 之后没有单独的标题字段；取第一条正文当标题，够用且不编造。
-    title: body.split(/\n/)[0].replace(/^\[\d{1,2}:\d{2}\]\s*/, '').slice(0, 40),
+    title: String(titleLine ?? date).replace(/^\[\d{1,2}:\d{2}\]\s*/, '').slice(0, 40),
     grade,
     kind: /梦|dream/i.test(gradeRaw) || /^梦/m.test(body) ? 'dream' : 'diary',
     mood: gradeRaw && !/刻骨|难忘|重要|unforgettable|important/i.test(gradeRaw) ? gradeRaw : '',
