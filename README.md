@@ -1021,9 +1021,11 @@ ACE-Step 那条路只会重新作曲；要**原曲旋律 + 她的音色**，走 
 
 ```powershell
 # 整首：分离 → 40 秒切片 → 逐片换音色 → 拼接 → 混音 → 截片段
-pwsh -File _rvc\make-cover.ps1 -Song 'sound\某首.wav' -Model xiaojing_e60_s4560 -CutSeconds 45
+pwsh -File _rvc\make-cover.ps1 -Song 'sound\某首.wav'          # 默认就是 e400 + 45 秒
 # 45 秒快出（A/B 对比、直接发用这个最省事）
-pwsh -File _rvc\quick45.ps1 -Models @('e60_s4560','e100_s12500') -Start 30 -Seconds 45 -Tag ab
+pwsh -File _rvc\quick45.ps1 -Models @('e400_s85200') -Start 30 -Seconds 45 -Tag ab
+# 清唱（旋律照原曲、不要伴奏）
+pwsh -File _rvc\acapella.ps1 -Song '杨丞琳 - (1749534772)雨爱' -Start 30 -Seconds 45 -Send
 ```
 
 - **成品必须压在 45 秒左右（QQ 语音输入上限 60 秒，主人 2026-10-27 明确要求）**。55 秒会被掐、也没法重听，留出 15 秒余量最稳；`quick45.ps1` 默认就是 45 秒。
@@ -1036,7 +1038,10 @@ pwsh -File _rvc\quick45.ps1 -Models @('e60_s4560','e100_s12500') -Start 30 -Seco
   两条脚本的默认值已经是这套（`quick45.ps1` / `make-cover.ps1`），实测削波样点 0、峰值 −1.5 dBFS 左右。当时另外两条候选（去掉限幅只改混音 / index 0.6+protect 0.25）都不如这条干净，别回退。
 - **长音（副歌拖腔）**：这个 fork 的推理 CLI 只支持 `--f0-method pm|rmvpe`（**没有 harvest**），所以长音只能靠「降低 index-rate + 提高 protect」保；实测 493 Hz 那条长音 源 1.31 s → 换音后 1.15 s，够用。段落裁到「让长音落在 40–45 秒」最保险：`python -P _rvc\find-long-notes.py <人声.wav> 20 95` 先看长音在哪。
 - **自检**：`python -P _rvc\check45.py <mix.wav> <conv.wav> [起点秒]` —— 要求削波 0、峰值 ≤ −1 dBFS、结尾区长音 ≥ 1.0 s，三项都过再发；`diag-distort.py` / `diag-clip.py` / `gravel.py` 用来对比「源干声 vs 换音后」的峰值、削波、音高抖动、3–10 kHz 平坦度。发之前还要 `-c:a pcm_s16le`（44.1 kHz 立体声 45 秒约 7.6 MB，`send-voice.mjs` 上限 20 MB）。
-- 音色取舍（主人听感）：`e60_s4560`（只有 290 条 TTS 语料）**节奏更稳、最终选用**；`e100_s12500`（加了 11 条真实素材 ×3）**人声更像真人**但节奏略晃、后半程更容易发沙。注：e100 之后继续训到 e130 的那轮被主动停掉，没再往下训。
+- **一律用 e400（主人 2026-10-28 定：「记得把她唱的所有歌按 e400 来」）**：`assets/weights/xiaojing_e400_s85200.pth`，是通宵训到底的那一版（e40–e400 共 41 个 checkpoint / 2.1 GB）。e160/e260/e400 的客观指标几乎量不出差（质心 1343/1346/1340 Hz、4 kHz 以上能量 0.38/0.35/0.35%），差的只是听感上的稳定度，所以**所有歌统一 e400**，三首（雨爱 / 最后一页 / 如果可以）都已按 e400 重出整首 + 45 秒版。`make-cover.ps1`、`quick45.ps1`、`acapella.ps1` 的默认值都是它。
+- 早先的取舍留档，别回退：`e60_s4560`（只有 290 条 TTS 语料）节奏更稳，`e100_s12500`（加了 11 条真实素材 ×3）更像真人但后半程容易发沙；这两版都已被 e400 取代。
+- **换模型必须清切片**：`vc\` 里是上一版模型换出来的 40 秒切片，脚本按「输出文件存在就跳过」，换模型会静默混着两代音色（2026-10-28 差点又踩）。现在 `make-cover.ps1` 在 `vc\.model` 里记模型名，不一致就清空重转；`infer/cli.py` 本身对「已存在的输出文件」也是静默失败，所以 `acapella.ps1` 是显式先 `Remove-Item` 再转。
+- **训练数据怎么攒的**：真实素材先 `adeclip,alimiter=limit=0.5:level=false` 去削波（模拟平台导出的峰值普遍顶 0 dBFS，实测被压平样点 0.038%–1.82%，去完归零且质心不变），再按 `-Copies` 复制进混音集；分离出的真人干声用 `_rvc/screen-sing.py` 挑能唱的段（判据是「相邻帧 f0 跳变 >1.5 半音的比例 ≤ 0.08」，**不能用整句 f0 标准差**——歌本来就有旋律走向，会被全筛掉），筛出 103 段 / 35.1 MB，用 `-SingCopies 1` 并进数据集（477 文件 / 255.5 MB，每轮 126 秒）。
 
 ## 待发文件夹（qq_list_outbox / qq_save_message_image / qq_draw_image）
 
