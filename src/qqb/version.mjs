@@ -60,12 +60,12 @@ export const MODULES = {
     note: 'R3 实测探针：OneBot 网关 / 桥接控制台 / 常驻 MCP / Hindsight / state 可写 / 记忆库可打开 / 发送队列积压 / 情绪状态（R2）/ 人设演化与干预（R1b+R5）/ 定向投递待办（R8）/ 媒体能力与失败率（R6）/ 模型直连配置（F）；0.1.9 起 checkBridge 读管理端 presetHealth.broken：DSH 报「装配失败」的 preset 让这个探针报 degraded（此前只认 dshReady，preset 坏了 30 多个小时它一直报 ok——就是那个假绿灯）',
   },
   'memory/store': {
-    version: '0.4.0',
+    version: '0.4.1',
     files: ['src/qqb/memory/store.mjs'],
     note: 'R1 记忆库：SQLite 分层记忆（private/normal/group）、重复事实合并、提炼配额、人设演变审计（R1b）。0.1.1 起 schema v2：archived_at；0.2.0 起 schema v3：emotion + 艾宾浩斯（weight/retention/depth）；0.3.0 起 schema v4：vectors 表 + 字面/向量混合检索；0.4.0 起 schema v5（潘多拉）：mem_level L2–L6、sensory/subtext 厚度、memory_entities 实体倒排、shares 分享、audience 关系硬过滤（owner/friend/group/self）、archiveSweep 归档清扫 + exact 复职、面板 listMemoriesForPanel/setMemoryWeight/setMemoryArchived',
   },
   'memory/live': {
-    version: '0.4.0',
+    version: '0.4.1',
     files: ['src/qqb/memory/live.mjs'],
     note: 'R1 接线层：会话 key→分层、桥接写入镜像、唤醒提示注入块（跨会话召回）。0.3.0 起按遗忘权重从重到轻排（重的在前、淡的沉底），search()/warmVectors() 走语义向量；0.4.0 起 block()/recall() 带 audience 硬过滤（这一刻对面是谁），新增 audienceOf()、cards()（L5 索引卡）、flash()（实体触景生情）',
   },
@@ -155,9 +155,14 @@ export const MODULES = {
     note: 'F：直连引擎的工具箱——从常驻 MCP 服务(3210)现拉 tools/list 合并成 OpenAI function 清单，tools/call 按名字找归属端点；会话参数 key/token 对模型隐藏、调用时由引擎注入；结果超 4000 字截断。0.1.1 修会话参数注入：要补哪些 key/token 改按 **schema 声明过的属性** 判（新增 sessionArgsOf 并写进 entry.session），不再按 required——key/token 在很多工具里是可选属性（qq_describe_image 一个 required 都没有），旧判据让它们永远补不进、模型又看不到 ⇒ 调用必然失败。0.1.2 修「图片被压成三个字」：tools/call 的结果里图片 part 原本被 map 成字符串「[图片]」、base64 直接丢掉，模型只收到那三个字 ⇒ 她会说「我看不到图」并开始回避图片话题；现在像素原样带出（images:[{mimeType,data}]，最多 MAX_RESULT_IMAGES=2 张、单张 base64 上限 8MB），由 loop.mjs 贴进多模态 user 消息',
   },
   'engine/loop': {
-    version: '0.1.6',
+    version: '0.1.7',
     files: ['src/qqb/engine/loop.mjs'],
     note: 'F：直连引擎的对话回路——模型要工具就自己执行再塞回结果，最多 4 步；关键是 fallbackSafe：一个工具都没跑过才允许回退 DSH，跑过就绝不回退（否则消息发两遍）。0.1.1 起支持 request.intercept(name,args,entry)：宿主可拦下某个工具调用自己处理（返回 {ok,text,error} 当结果），拦下的调用同样计入「跑过工具」，拦截函数抛错会转成工具错误结果而不是炸掉整轮。0.1.2 起支持 toolLog(entry)：每执行一个工具（含被拦截、参数写坏、执行失败）回调 call/result 两条，供宿主落盘——此前引擎的工具统计只在内存里，引擎接管后 tool-calls.jsonl 整段变黑；钩子抛错只警告，绝不影响这一轮。0.1.3 修 injectArgs 的名单来源：改取 entry.session（toolbox 按 schema 声明算出来的），entry.required 只作旧形状兜底——旧判据让 key/token 这类可选会话参数补不进去。0.1.4 加两条「别哑掉」的护栏：工具**连续**失败 maxFailedToolCalls（默认 3）次就停手，不等步数烧光；步数用尽还没说话时再要一次不带工具的回复（rescued:true 就照常说话），并把失败的工具与次数写进 error 文本——此前工具一坏就是空烧 20～40 秒后一声不吭，日志里只有一句「达到最大步数还没说话」，查不出是哪个工具在坏。0.1.5 把工具取回来的图片真的送到模型眼前：OpenAI 兼容协议里 tool 消息只能放文本，所以照惯例紧跟一条 role:user 的多模态消息（text + image_url data URL）——此前工具箱把图片压成「[图片]」三个字，她等于对着一张写着「[图片]」的纸条说话。0.1.6 兜住「模型把工具调用写成了正文」：2026-10-22 00:25 她（browse 唤醒）把 `<tool calls>` + `<tool invoke name="qq_describe_image">` 这一段**原文当消息发进了 QQ**（主人收到的就是一堆标签）——XML 是模型的原生写法，而这条链路讲的是 OpenAI 的 tools/tool_calls，格式走岔时那段文本就没人接手；现在 parseTextToolCalls 把它翻回真正的调用照样执行、stripTextToolCalls 把标签从正文抹掉，桥接的 sanitizeEngineReplyV2 再兜一道',
+  },
+  'engine/compact': {
+    version: '0.1.0',
+    files: ['src/qqb/engine/compact.mjs'],
+    note: 'P4 上下文折叠（PANDORA_SPEC §7）：上下文用到预算 70% 时，把最老那一段压成「核心事件 + 情绪基调」一句话插在历史最前面，腾地方给新消息；最近 keepRecent 条（默认 12）永远原样保留；折叠只减条目、不删原文（L2 底账在记忆库里）；estimateTokens 粗估中文字数、summarizeDropped 取窗口最后一句 + emotionTone 情绪词表；任何异常都返回原样，绝不因为折叠把一轮对话搞挂',
   },
 };
 

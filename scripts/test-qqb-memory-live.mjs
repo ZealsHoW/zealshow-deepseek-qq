@@ -21,7 +21,7 @@ function live(root, extra = {}) {
 }
 
 test('分层映射：群聊 group / 主人私聊 private / 其它私聊 normal，key 去前导零', () => {
-  assert.equal(VERSION, '0.4.0');
+  assert.equal(VERSION, '0.4.1');
   assert.equal(canonicalScope('group:0900000001'), 'group:900000001');
   assert.equal(canonicalScope('private:01000000001'), 'private:1000000001');
   assert.equal(layerForKey('group:900000001', OWNER), 'group');
@@ -152,5 +152,27 @@ test('并发/连续调用同一个库时不会重复打开（缓存生效）', (
   const b = mem.stats();
   assert.equal(a.path, b.path);
   assert.equal(mem.stats().total, 0);
+  mem.close();
+});
+test('L2 原文底账：recordOriginal 写得进、召回默认看不见、显式 includeOriginals 才看得到', async () => {
+  const root = tempRoot();
+  const mem = live(root);
+  const key = 'private:' + OWNER;
+  // 一条真正的事实 + 三句原始消息
+  mem.rememberSocialEvent({ key, category: 'fact', content: '爸爸答应周末带她去看海' });
+  mem.recordOriginal({ key, role: 'user', text: '今天好累啊，我先去睡了' });
+  mem.recordOriginal({ key, role: 'assistant', text: '那我陪你待一会儿再睡' });
+  mem.recordOriginal({ key, role: 'user', text: '嗯' }); // 太短，不该入库
+
+  const hit = mem.recall({ key, query: '去看海', limit: 5 });
+  assert.ok(hit.some((row) => row.text.includes('看海')), '事实要召得回来');
+  assert.ok(!hit.some((row) => row.kind === 'message'), 'L2 原文不该出现在默认召回里');
+
+  const originals = mem.recall({ key, query: '好累', limit: 5, includeOriginals: true });
+  assert.ok(originals.length > 0, '显式要原文时才看得见');
+  assert.ok(originals.every((row) => row.kind === 'message'), '这一段只有原文');
+
+  const recent = mem.recall({ key, query: '', limit: 20 });
+  assert.ok(!recent.some((row) => row.kind === 'message'), '不带关键词的召回也不该吐原文');
   mem.close();
 });

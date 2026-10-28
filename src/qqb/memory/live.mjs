@@ -11,7 +11,7 @@ import { KINDS, openStore } from './store.mjs';
 import { HASH_MODEL, createEmbedder, hashVector } from './embed.mjs';
 import { PROMPT_WEIGHT_FLOOR, emotionFromText } from './ebbinghaus.mjs';
 
-export const VERSION = '0.4.0';
+export const VERSION = '0.4.1';
 
 /** social-v2 的类别 → 记忆库类型。 */
 const CATEGORY_TO_KIND = Object.freeze({
@@ -218,6 +218,37 @@ export function createLiveMemory({
      * 把一条 social-v2 记忆镜像进长期库。
      * 返回 { action: inserted|merged|revived|rejected, ... }；库不可用时返回 null。
      */
+    /**
+     * §1 原文底账（L2）：每句原始消息都留一份，**只给巩固/做梦当素材，不参与召回**。
+     * 召回那边默认把 L2 排除掉了（`includeOriginals` 才看得见），所以不怕多。
+     * 同一句重复发按 hash 合并，桥接重放同一段时间不会把库撑爆。
+     */
+    recordOriginal({ key, role = 'user', text, at = null } = {}) {
+      return guard('recordOriginal', () => {
+        const st = open();
+        if (!st) return null;
+        const body = String(text ?? '').trim();
+        // 太短的（「嗯」「哈」）单独存一条没有信息量，还会把 L2 撑成噪声。
+        if (body.length < 4) return null;
+        const owner = ownerQQ();
+        const who = role === 'assistant' || role === 'self' ? '小鲸鱼' : String(role || '对方');
+        return st.remember({
+          layer: layerForKey(key, owner),
+          scope: canonicalScope(key),
+          kind: 'message',
+          memLevel: 'L2',
+          subject: who,
+          text: body.slice(0, 500),
+          emotion: emotionFromText(body),
+          // 原文的重要度压到最低：它只在巩固时被读，永远不该靠权重挤进提示词。
+          importance: 0.2,
+          confidence: 0.9,
+          source: 'origin-log',
+          meta: { role: String(role ?? ''), at: Number(at) || null },
+        });
+      }, null);
+    },
+
     rememberSocialEvent({ key, category, content, extra, source = 'bridge-social', importance, emotion } = {}) {
       return guard('rememberSocialEvent', () => {
         const st = open();
@@ -373,7 +404,7 @@ export function createLiveMemory({
      * 结构化召回，给 `qq_memory_query` 这类「要能看出记了什么」的场景用
      * （`block()` 是给人看的提示词片段，这里是给模型/控制台看的数据）。
      */
-    recall({ key, query, limit = 12, kinds } = {}) {
+    recall({ key, query, limit = 12, kinds, includeOriginals = false } = {}) {
       return guard('recall', () => {
         const st = open();
         if (!st) return [];
@@ -384,6 +415,8 @@ export function createLiveMemory({
           layers: layersForSession(key, owner),
           audience: audienceOf(key, owner),
           kinds: Array.isArray(kinds) && kinds.length ? kinds : null,
+          // 默认不吐 L2 原文（每句话都算记忆会把真正的事实挤掉）；排障/面板要看原文才置 true。
+          includeOriginals: includeOriginals === true,
           query: queryText,
           limit,
           minScore: 0,

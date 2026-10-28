@@ -994,6 +994,37 @@ function ensureEngine() {
   }
 }
 /**
+ * 给直连引擎拼一段最近的原始对话（不折叠，折叠交给 loop 里的 foldHistory）。
+ *
+ * 截到「最后一条对方消息」之前：最后那条就是本轮 prompt.user 里已经写进去的触发消息，
+ * 再塞一遍等于同一句说两次，模型容易误以为对方重复发了。
+ *
+ * @param {string} key 会话
+ * @param {{limit?: number}} [options]
+ * @returns {{role: 'user'|'assistant', content: string}[]}
+ */
+function engineHistoryV2(key, { limit = 80 } = {}) {
+  try {
+    const records = readHistoryRecords(key, { limit });
+    let lastUser = -1;
+    for (let i = records.length - 1; i >= 0; i -= 1) {
+      if (records[i] && records[i].self !== true) { lastUser = i; break; }
+    }
+    const cut = lastUser >= 0 ? lastUser : records.length;
+    return records.slice(0, cut)
+      .map((rec) => {
+        const content = String(rec?.x ?? '').trim();
+        if (!content) return null;
+        return { role: rec?.self === true ? 'assistant' : 'user', content };
+      })
+      .filter(Boolean);
+  } catch (error) {
+    log('直连引擎', '读会话历史失败，这一轮不带历史', error?.message ?? error);
+    return [];
+  }
+}
+
+/**
  * 跑一轮直连回合并把她说的话发出去。
  * @returns {Promise<{handled: boolean, ok: boolean, text: string, fallbackSafe: boolean, error: string}>}
  */
@@ -1015,12 +1046,19 @@ async function runDirectAgentTurn(key, reason) {
   const result = await runtime.loop.run({
     system,
     user: String(prompts?.user ?? ''),
+    // §7 上下文折叠：带上最近的原话，lib 那边用到预算 70% 时自动把最老那段压成一句话。
+    history: engineHistoryV2(key),
+    historyBudgetTokens: Number(cfg?.model?.historyBudgetTokens) || 6000,
+    historyKeepRecent: Number(cfg?.model?.historyKeepRecent) || 12,
     extraArgs: { key, token: st.agentToken },
     purpose: `qq-direct:${reason}`,
     maxSteps: Math.max(1, Number(cfg?.model?.maxSteps) || 4),
     intercept: media.intercept,
   });
   const ms = Date.now() - startedAt;
+  if (result.compact?.folded) {
+    log('直连引擎', `上下文折叠：${result.compact.dropped} 条更早的话压成一句（${result.compact.tokensBefore} → ${result.compact.tokensAfter} tokens）`);
+  }
   if (!result.ok) {
     log('直连引擎', `这一轮没跑成（${ms}ms，第 ${result.steps} 步）：${result.error}`);
     return { handled: !result.fallbackSafe, ok: false, text: '', fallbackSafe: result.fallbackSafe !== false, error: String(result.error ?? '') };
@@ -13847,6 +13885,10 @@ ${memLines ? `\n记忆库里：\n${memLines}\n` : '\n记忆库最近没有新东
       const emotion = Number(emotionFromText(`${sender} ${String(plainContent ?? textContent ?? '')}`)) || 0;
       if (emotion >= 0.6) noteAnchor(key, plainContent ?? textContent, emotion);
     } catch (error) { log('锚点', '记录失败（不影响收消息）', error?.message ?? error); }
+    // §1 原文底账（L2）：对方说的话原样留一份，只给夜间巩固/做梦当素材，不参与召回。
+    try {
+      liveMemory.recordOriginal?.({ key, role: 'user', text: plainContent ?? textContent, at: Date.now() });
+    } catch (error) { log('原文底账', '记录失败（不影响收消息）', error?.message ?? error); }
     const recentLimit = Number(cfg.socialV2?.context?.recentLimit) || 100;
     const unreadLimit = Number(cfg.socialV2?.context?.unreadLimit) || 30;
     // 存储层的归一化**不能只留 kind/file/url/faceId**：reserved2 的图片/表情工具
@@ -14158,6 +14200,9 @@ ${memLines ? `\n记忆库里：\n${memLines}\n` : '\n记忆库最近没有新东
       // 归档流水：这里是小鲸鱼所有出站文字的必经之路（AI 回复 / 工具发送 / 控制台发送），
       // text 已经过 redactKnownTokensOnly 脱敏。
       appendMemoryLog(key, 'agent', null, text);
+      // §1 原文底账（L2）：自己的话也留一份，只给夜间巩固/做梦当素材，不参与召回。
+      // recordOriginal 内部 guard 过，库坏了也只是这一条没记上，绝不影响发送。
+      liveMemory.recordOriginal?.({ key, role: 'assistant', text, at: now + i * 1000 });
     }
     if (st.recentMessages.length > recentLimit) st.recentMessages.splice(0, st.recentMessages.length - recentLimit);
     // R2：说话是要花力气的——**一次回复记一次**精力消耗。

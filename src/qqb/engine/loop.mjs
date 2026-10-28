@@ -31,7 +31,13 @@
  * 在那之前工具箱把图片压成了 `[图片]` 三个字 ⇒ 她「看不见图」，还会回避图片话题。
  */
 
-export const VERSION = '0.1.6';
+export const VERSION = '0.1.7';
+
+/**
+ * 上下文折叠（PANDORA_SPEC §7）：history 用到预算 70% 时把最老那一段压成一句话。
+ * 放在 loop 里而不是调用方：只有这里知道这一轮真正要发出去多少东西。
+ */
+import { foldHistory } from './compact.mjs';
 
 /** 默认最多几轮「模型→工具→模型」。 */
 export const DEFAULT_MAX_STEPS = 4;
@@ -278,7 +284,16 @@ export function createAgentLoop(options = {}) {
     const limit = Math.max(1, Number(request.maxSteps) || maxSteps);
     const useTools = request.useTools !== false;
     const extraArgs = request.extraArgs && typeof request.extraArgs === 'object' ? request.extraArgs : {};
-    const messages = composeMessages(request);
+    const historyBudgetTokens = Number(request.historyBudgetTokens) || 6000;
+    // 先折叠、再拼消息：折叠结果里那一条【更早的事】会作为 system 消息排在历史最前面。
+    const folded = foldHistory(request.history ?? [], {
+      budgetTokens: historyBudgetTokens,
+      keepRecent: Number(request.historyKeepRecent) || 12,
+    });
+    const messages = composeMessages({ ...request, history: folded.messages });
+    const compactInfo = folded.folded
+      ? { folded: true, dropped: folded.dropped, tokensBefore: folded.tokensBefore, tokensAfter: folded.tokensAfter, summary: folded.summary }
+      : { folded: false };
     const transcript = messages.map((item) => ({ ...item }));
     const executed = [];
     // 落盘钩子：默认用建回路时给的那个，单轮可覆盖。key 从注入参数里取，方便按会话翻日志。
@@ -359,6 +374,7 @@ export function createAgentLoop(options = {}) {
           finishReason,
           fallbackSafe: safe,
           transcript,
+          compact: compactInfo,
         };
       }
       usage = res.usage ?? usage;
@@ -389,6 +405,7 @@ export function createAgentLoop(options = {}) {
           finishReason,
           fallbackSafe: false,
           transcript,
+          compact: compactInfo,
         };
       }
 
@@ -504,6 +521,7 @@ export function createAgentLoop(options = {}) {
         fallbackSafe: false,
         rescued: true,
         transcript,
+        compact: compactInfo,
       };
     }
 
@@ -520,6 +538,7 @@ export function createAgentLoop(options = {}) {
       fallbackSafe: false,
       exhausted: true,
       transcript,
+      compact: compactInfo,
     };
   }
 

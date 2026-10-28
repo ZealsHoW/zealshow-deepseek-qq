@@ -131,6 +131,7 @@ const tests = [
   // P3 潘多拉：夜间巩固（原话→片段/事实/索引卡）与做梦——JSON 容错、卡片 ≤50 字、
   //   梦境落日记、同一天再做梦不报错、没库/记录太少都不能抛。
   'test-qqb-consolidate.mjs',
+  'test-qqb-compact.mjs',
   // P1 潘多拉记忆核心：L2–L6 分层、关系硬过滤（群/朋友/主人）、归档清扫与复职、
   //   实体联想、分享（shares）、面板读写；含一个 v4→v5 老库迁移用例。
   'test-qqb-memory-levels.mjs',

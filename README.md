@@ -1330,7 +1330,24 @@ http://127.0.0.1:3100/pandora?token=<console-token>
 4. `src/bridge.js` 加顶层 import 必须同步 `scripts/audit-bridge-harness.mjs` 的 vm 桩——漏一个 `createConsolidator` 就是一整片看起来无关的测试挂掉（这个坑第 4 次踩了）。
 5. 这台机器 PowerShell 里 `node - <<'NODE'` 报 `Missing file specification after redirection operator`，heredoc 不可用，改文件用编辑器或 `[IO.File]::WriteAllText`。
 
-回归：`node scripts/test-qqb-memory-levels.mjs`、`node scripts/test-qqb-consolidate.mjs`、`node scripts/test-qqb-pandora.mjs`、`node panel/selftest.mjs`（最后一个只校验前端静态结构）。
+回归：`node scripts/test-qqb-memory-levels.mjs`、`node scripts/test-qqb-consolidate.mjs`、`node scripts/test-qqb-pandora.mjs`、`node scripts/test-qqb-compact.mjs`、`node panel/selftest.mjs`（最后一个只校验前端静态结构）。
+
+### 原文底账与上下文折叠（2026-10-29）
+
+L1–L6 里最容易做错的一层是 **L2（原文）**：如果每句话都当成「记忆」，几句闲聊就能把真正的事实挤出提示词，所以她说过的话要留，但**默认永远不召回**。
+
+- 谁写：`appendSocialV2Message`（对方发来的话）与 `recordSentMessagesV2`（她自己说的话，AI 回复/工具发送/控制台发送都经过这里）各调一次 `liveMemory.recordOriginal()`，`kind='message'`、`memLevel='L2'`、`importance=0.2`。少于 4 个字的（「嗯」「哈」）直接不记。
+- 谁不读：`store.recall()` / `recentMemories()` 的 where 里都带 `(mem_level IS NULL OR mem_level <> 'L2')`；要翻原文得显式 `recall({ includeOriginals: true })`（排障/面板用）。
+- 干什么用：夜间巩固（`consolidateNow`）把 L2 当素材，提炼成 L4 事实 / L3 情节 / L5 索引卡；做梦也从这里抽。所以原文是「底账」，不是「记忆」。
+
+上下文折叠在 `src/qqb/engine/compact.mjs`，接在 `loop.run()` 里：
+
+- 估算：中文按字、英文按 4 字符算 token（粗估，宁多勿少）。
+- 触发：`history` 用到 `historyBudgetTokens` 的 **70%**（默认 6000）就开始折；每次多折一条直到落到 55% 以下。
+- 保留：最近 `historyKeepRecent` 条（默认 12）**永远原样**在；折掉的那段压成一句 `【更早的事】对方说到「…」（当时的情绪：…；另有 N 条更早的对话已折叠）`，作为 `system` 消息排在历史最前面，并注明「只是背景，不要当成对方刚说的话」。
+- 日志：真折了会写一行 `直连引擎 上下文折叠：N 条更早的话压成一句（a → b tokens）`。
+- 三个配置旋钮：`model.historyBudgetTokens`、`model.historyKeepRecent`，以及单轮可覆盖的 `request.historyBudgetTokens`。
+- 边界：历史比 `keepRecent` 还短就绝不折（否则会把整段历史折没）；任何异常都原样返回，绝不因为折叠把一轮对话搞挂。
 
 ### 记得住、忘得对、按意思找得回：遗忘曲线 + 向量索引（2026-10-25）
 

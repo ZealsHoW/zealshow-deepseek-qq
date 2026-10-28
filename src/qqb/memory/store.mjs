@@ -38,14 +38,14 @@ import path from 'node:path';
 import { memoryWeight } from './ebbinghaus.mjs';
 import { HASH_MODEL, bigramOverlap, blobToVec, cosine, hashVector, vecToBlob } from './embed.mjs';
 
-export const VERSION = '0.4.0';
+export const VERSION = '0.4.1';
 
 /** 向量检索的两个库：memory（memories 表）和 knowledge（knowledge 表）。 */
 export const VECTOR_KINDS = Object.freeze(['memory', 'knowledge']);
 
 /** 记忆分层。private 只在对应会话内可见，group 可在群内共享，normal 为一般对话。 */
 export const LAYERS = Object.freeze(['private', 'normal', 'group']);
-export const KINDS = Object.freeze(['fact', 'topic', 'impression', 'diary', 'preference', 'event', 'promise']);
+export const KINDS = Object.freeze(['fact', 'topic', 'impression', 'diary', 'preference', 'event', 'promise', 'message']);
 export const MAX_TEXT = 2000;
 
 /** 记忆厚度字段（sensory 感官戳 / subtext 潜台词）的清洗上限：够一段感官描写，又不至于把注入撑爆。 */
@@ -991,6 +991,12 @@ export function openStore(options = {}) {
     }
     if (layers?.length) { where.push(`layer IN (${layers.map(() => '?').join(',')})`); params.push(...layers); }
     if (kinds?.length) { where.push(`kind IN (${kinds.map(() => '?').join(',')})`); params.push(...kinds); }
+    // §1 原文底账：L2 是原始消息，只给巩固/做梦当素材，**默认不参与召回**。
+    // 想翻原文得显式 `includeOriginals: true`（面板/排障用），否则每句话都会成为「记忆」，
+    // 几下就把真正的事实挤出提示词（这是 L1–L6 里最容易做错的一层）。
+    if (query.includeOriginals !== true && !kinds?.includes('message')) {
+      where.push("(mem_level IS NULL OR mem_level <> 'L2')");
+    }
     // 有关键词走全文索引（走索引才叫「检索」，老实现是全表 LIKE 扫 500 行再打分）；
     // 只有索引不可用或关键词太短（trigram 切不出词）时才回落 LIKE。
     // 例外：带了查询向量（RAG）时**不**用字面结果筛候选 —— 语义相近的条目本来就可能一个词都不沾，
@@ -1116,6 +1122,10 @@ export function openStore(options = {}) {
     if (scope && !allScopes) { where.push('(scope = ? OR scope = ?)'); params.push(scope, 'global'); }
     if (layers) { where.push(`layer IN (${layers.map(() => '?').join(',')})`); params.push(...layers); }
     if (kinds) { where.push(`kind IN (${kinds.map(() => '?').join(',')})`); params.push(...kinds); }
+    // 和 recall 同一条规矩：L2 原文默认不参与「最近记忆」，否则每句闲聊都把事实挤到后面。
+    if (query.includeOriginals !== true && !kinds?.includes('message')) {
+      where.push("(mem_level IS NULL OR mem_level <> 'L2')");
+    }
     return db.prepare(`SELECT * FROM memories WHERE ${where.join(' AND ')} ORDER BY updated_at DESC LIMIT ?`)
       .all(...params, limit)
       .map((row) => rowToMemory(row));

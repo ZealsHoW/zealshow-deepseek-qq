@@ -55,6 +55,25 @@ console.log('记忆核心接线：');
   ok('两条路线都注入锚点', (bridge.match(/anchorsTextFor\(key\)/g) ?? []).length >= 2);
 }
 
+console.log('L2 原文底账与上下文折叠：');
+{
+  const store = read('src/qqb/memory/store.mjs');
+  ok('召回默认排除 L2 原文', store.includes("(mem_level IS NULL OR mem_level <> 'L2')") && store.includes('includeOriginals'));
+  const live = read('src/qqb/memory/live.mjs');
+  ok('live 有 recordOriginal（L2 写入）', /recordOriginal\(\{ key, role = 'user', text, at = null \}/.test(live) && live.includes("memLevel: 'L2'"));
+  ok('太短的原文不记', live.includes('if (body.length < 4) return null;'));
+  const bridge = read('src/bridge.js');
+  ok('收消息时记原文', bridge.includes('liveMemory.recordOriginal?.({ key, role: \'user\''));
+  ok('自己说的话也记原文', bridge.includes('liveMemory.recordOriginal?.({ key, role: \'assistant\''));
+  ok('引擎带历史进 loop', bridge.includes('history: engineHistoryV2(key)') && /function engineHistoryV2\(/.test(bridge));
+  ok('历史截到本轮触发消息之前', bridge.includes('lastUser'));
+  ok('折叠生效时写日志', bridge.includes('上下文折叠：${result.compact.dropped}'));
+  const loop = read('src/qqb/engine/loop.mjs');
+  ok('loop 引 foldHistory', loop.includes("import { foldHistory } from './compact.mjs'"));
+  ok('loop 按预算折叠', loop.includes('historyBudgetTokens') && loop.includes('historyKeepRecent'));
+  ok('run() 返回 compact 信息', (loop.match(/compact: compactInfo/g) ?? []).length >= 4);
+}
+
 console.log('审计清单：');
 {
   const audit = read('scripts/test-audit.mjs');
