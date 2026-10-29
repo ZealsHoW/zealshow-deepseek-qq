@@ -1001,6 +1001,8 @@ function ensureEngine() {
 }
 /** 由 main() 注入的读历史函数（readHistoryRecords 是 main 内部的闭包）。 */
 let readHistoryForEngine = null;
+/** 最后一次有人跟她说话（本地时间毫秒）。打盹/吃饭这类「没人的时候」判断要用它。 */
+let lastInboundAt = 0;
 
 /**
  * 给直连引擎拼一段最近的原始对话（不折叠，折叠交给 loop 里的 foldHistory）。
@@ -7100,10 +7102,11 @@ async function main() {
           try {
             if (action === 'nap') result = spirit.nap({ minutes: Number(body.minutes) || 20 });
             else if (action === 'sweet') result = spirit.sweet({ what: body.what ? String(body.what).slice(0, 40) : '甜的' });
+            else if (action === 'eat') result = spirit.eat({ what: body.what ? String(body.what).slice(0, 40) : '一顿饭' });
             else if (action === 'set') result = spirit.setSpirit(body.spirit, { reason: body.reason });
             else if (action === 'sleep') result = spirit.sleep({ reason: body.reason || 'manual' });
             else if (action === 'wake') result = spirit.wake({ hours: Number.isFinite(Number(body.hours)) ? Number(body.hours) : null });
-            else { sendJson({ ok: false, error: 'action 只能是 nap / sweet / set / sleep / wake' }, 400); return; }
+            else { sendJson({ ok: false, error: 'action 只能是 nap / sweet / eat / set / sleep / wake' }, 400); return; }
           } catch (error) {
             sendJson({ ok: false, error: String(error?.message ?? error) }, 500);
             return;
@@ -14201,6 +14204,7 @@ ${memLines ? `\n记忆库里：\n${memLines}\n` : '\n记忆库最近没有新东
   // ── 二代仿真模式（reserved2）唤醒调度 ──────────────────────────────────
   function appendSocialV2Message(key, sender, textContent, plainContent, quoteTargetIsSelf, isOwner, messageId, media = [], userId = null, forwardIds = []) {
     const st = getSocialV2State(key);
+    lastInboundAt = Date.now();
     // 私聊里发来消息的人就是那个人本人 —— 顺手把名字记进人名簿（跨会话检索时好标来源）。
     // 群里不这么干：key 是群号、sender 只是某个群员，用群员名覆盖会把群名写坏。
     if (String(key).startsWith('private:')) people.remember(key, sender);
@@ -15184,6 +15188,26 @@ ${memLines ? `\n记忆库里：\n${memLines}\n` : '\n记忆库最近没有新东
       return;
     }
     if (nightSleep.active) return;
+    const before = spiritSnapshot();
+    if (!before) return;
+    // 她自己的日常：饿了会吃，累了会打盹 —— 2026-10-29 之前这两件事只能从面板手动触发，
+    // 结果饥饿值顶到 1 下不来（每小时反噬精神），白天又没有任何恢复途径，
+    // 所以「精力一直很低」。见 README「精神值为什么整天见底」。
+    const hour = new Date().getHours();
+    const idleMs = Date.now() - (lastInboundAt || 0);
+    try {
+      if (!before.asleep && before.hunger > 0.7) {
+        const meal = hour < 10 ? '早饭' : hour < 15 ? '午饭' : hour < 21 ? '晚饭' : '宵夜';
+        spirit.eat({ what: meal });
+        log('精神', `饿了，自己去吃${meal}（饥饿 ${before.hunger.toFixed(2)}）`);
+      } else if (!before.asleep && before.spirit < 0.35 && hour >= 12 && hour < 18 && idleMs > 45 * 60000
+        && Number(spirit.snapshot?.().napToday ?? 0) < 0.2) {
+        spirit.nap({ minutes: 40 });
+        log('精神', `白天撑不住了，打了个盹（精神 ${before.spirit.toFixed(2)}，40 分钟）`);
+      }
+    } catch (error) {
+      log('精神', `日常节奏没走成：${error?.message ?? error}`);
+    }
     const snap = spiritSnapshot();
     if (!snap) return;
     // 累了或饿了：40% 概率让念头自己冒一条（她不会每次都念叨，但会念叨）。

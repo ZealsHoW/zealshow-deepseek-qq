@@ -141,3 +141,44 @@ test('精神：状态文件坏了也不抛（按初始值继续）', () => {
   const spirit = createSpirit({ file });
   assert.ok(spirit.snapshot().spirit > 0);
 });
+test('精神：吃一顿能降饥饿（2026-10-29 之前只有 sweet，越吃越饿）', () => {
+  const c = clock();
+  const spirit = createSpirit({ now: c.now, options: { hungerPerHour: 0.2, hungerPenalty: 0, drainPerHour: 0 } });
+  spirit.setSpirit(0.2, { reason: '测试' });
+  c.advance(4); // 饥饿涨到 0.8
+  const before = spirit.snapshot();
+  assert.ok(before.hunger > 0.7, `先攒到 ${before.hunger} 再吃`);
+  const fed = spirit.eat({ what: '午饭' });
+  assert.ok(Math.abs(fed.hunger - (before.hunger - 0.35)) < 0.001, '吃一顿要降 0.35 饥饿');
+  assert.ok(Math.abs(fed.spirit - (before.spirit + 0.04)) < 0.001, '吃一顿要补一点点精神');
+  // 一路吃到空腹就停在 0，不会变负
+  for (let i = 0; i < 6; i += 1) spirit.eat();
+  assert.equal(spirit.snapshot().hunger, 0);
+});
+
+test('精神：一天不该全天见底（默认参数下的曲线）', () => {
+  const c = clock();
+  const spirit = createSpirit({ now: c.now });
+  spirit.setSpirit(1, { reason: '醒来' });
+  spirit.wake({ hours: 8 });
+  // 每 5 小时吃一顿，模拟她白天会吃饭
+  for (let h = 5; h <= 15; h += 5) {
+    c.advance(5);
+    spirit.eat();
+  }
+  c.advance(1);
+  const s = spirit.snapshot();
+  assert.ok(s.spirit > 0.35, `清醒 16 小时、中间吃三顿，精神应还在 0.35 以上，实际 ${s.spirit.toFixed(2)}`);
+  assert.ok(s.hunger < 0.9, `吃过饭饥饿不该顶在 1，实际 ${s.hunger.toFixed(2)}`);
+});
+
+test('精神：桥接自己会吃饭、白天会打盹（不再只靠面板手动点）', () => {
+  const src = fs.readFileSync(new URL('../src/bridge.js', import.meta.url), 'utf8');
+  assert.ok(src.includes('spirit.eat({ what: meal })'), '心跳里应自己吃饭');
+  assert.ok(src.includes("before.hunger > 0.7"), '饿了才吃');
+  assert.ok(src.includes('spirit.nap({ minutes: 40 })'), '白天累了应打个盹');
+  assert.ok(src.includes('idleMs > 45 * 60000'), '打盹前要确认没人找她（别聊到一半睡着）');
+  assert.ok(src.includes('napToday ?? 0) < 0.2'), '当日额度快用完就别再打盹（补 0 也要记一条日志很蠢）');
+  assert.ok(src.includes("action === 'eat'"), 'POST /api/socialV2/spirit 支持 eat');
+  assert.ok(src.includes('let lastInboundAt = 0;') && src.includes('lastInboundAt = Date.now();'), '要记最后一次有人说话的时间');
+});

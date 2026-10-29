@@ -19,27 +19,34 @@
 import fs from 'node:fs';
 import path from 'node:path';
 
-export const VERSION = '0.1.0';
+export const VERSION = '0.1.1';
 
 export const DEFAULTS = {
   /** 睡满多少小时精神才彻底回满。 */
   sleepHoursToFull: 8,
   /** 醒来后多少小时内消耗正常，之后翻倍。 */
-  fullRestHours: 12,
+  fullRestHours: 16,
   /** 清醒时每小时自然流失。 */
-  drainPerHour: 0.045,
+  drainPerHour: 0.028,
   /** 打盹每小时恢复（很慢，且一天有上限）。 */
   napPerHour: 0.12,
   /** 打盹一天最多补多少。 */
-  napDayCap: 0.3,
+  napDayCap: 0.35,
   /** 一口甜食立刻补多少精神。 */
   sweetRestore: 0.22,
   /** 一口甜食增加多少饥饿。 */
   sweetHunger: 0.3,
   /** 饥饿每小时自然增长。 */
-  hungerPerHour: 0.05,
+  hungerPerHour: 0.03,
   /** 饿到 1 时额外每小时多掉多少精神。 */
-  hungerPenalty: 0.05,
+  hungerPenalty: 0.02,
+  /**
+   * 吃一顿：降饥饿、补一点点精神。
+   * 2026-10-29 之前只有 sweet()（越吃越饿），所以饥饿值一路顶到 1 再也下不来，
+   * 反噬的「饿」让精神全天在 0.2 以下 —— 这是「精力一直很低」的主因。
+   */
+  eatHungerDrop: 0.35,
+  eatRestore: 0.04,
   /** 各种行为的精神代价（一次）。 */
   costs: {
     chat: 0.012,      // 回一句
@@ -256,6 +263,17 @@ export function createSpirit({
     return snapshot(at);
   }
 
+  /** 好好吃一顿：饥饿降下来，精神也回来一点（吃甜的只会更饿，见 sweet）。 */
+  function eat({ at = now(), what = '一顿饭' } = {}) {
+    tick(at);
+    state.hunger = clamp01(state.hunger - opts.eatHungerDrop);
+    state.spirit = clamp01(state.spirit + opts.eatRestore);
+    note(`吃了${what}：饿 ${state.hunger.toFixed(2)}，精神 +${opts.eatRestore}`, at);
+    dirty = true;
+    save();
+    return snapshot(at);
+  }
+
   /** 吃甜食：立刻补精神，代价是更饿。 */
   function sweet({ at = now(), what = '甜的' } = {}) {
     tick(at);
@@ -298,6 +316,7 @@ export function createSpirit({
       awakeHours: Number(awakeHours(at).toFixed(2)),
       fatigueFactor: fatigueFactor(at),
       sleptHours: state.sleptHours,
+      napToday: Number(state.napToday.toFixed(3)),
       status: statusWord(at),
       budget: replyBudget(state.spirit),
       updatedAt: state.updatedAt,
@@ -340,6 +359,7 @@ export function createSpirit({
     sleep,
     wake,
     nap,
+    eat,
     sweet,
     tick,
     setSpirit,
