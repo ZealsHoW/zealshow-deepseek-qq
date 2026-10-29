@@ -44,6 +44,8 @@ import { createConsolidator } from './qqb/memory/consolidate.mjs';
 // 客户端本体在 dsh/qq-extras-patch/lib/comfy.mjs（上游插件漏发、仓库补的那份，跑通过真图），
 // 这里只包一层「产物落 state/outbox + 状态/风格白名单」。
 import { ALLOWED_STYLES, DEFAULT_LORA, DEFAULT_LORA_WEIGHT, DEFAULT_TRIGGER, createComfyClient, normalizeStyle, styleLines } from './qqb/media/comfy.mjs';
+// 图配文（2026-10-29）：她画的图常常是「空镜」，加一句话就成梗图。底图内联进 HTML 再渲染一次。
+import { annotateImage, normalizeCaptionStyle } from './qqb/media/annotate.mjs';
 import { createBackoff } from './qqb/net/backoff.mjs';
 import { createOutbox } from './qqb/net/outbox.mjs';
 import { createOneBotClient } from './qqb/net/onebot.mjs';
@@ -776,7 +778,7 @@ const ENGINE_MEDIA_MAX_PER_TURN = 2;
 const ENGINE_RULES = [
   '【你现在怎么说话】你的文本输出会被桥接原样发到当前会话，所以**不要调用任何"发文字"的工具**——想说的话直接写出来就行（工具清单里已经没有发文字的工具了）。',
   '【想发表情/图片】可以用 `qq_send_sticker`（先用 `qq_list_stickers` 挑）和 `qq_send_image`，但它们**不会立刻发出**：调用只是在告诉桥接"我想发这个"，等你这轮文字发完后，桥接会把它作为单独气泡补发。所以：想说的话照常写在文本里，别在文字里说"我发给你了"；一轮最多 2 个，别刷屏；这条通道不带引用和 @；图片可以传 caption 让图下配一句短话（别和你文本里的话重复说同一件事）。',
-  '【图片从哪来】① 网上找：`qq_image_search` 搜「晚霞 / 小猫 / 壁纸 / 搞笑」，拿到直链直接发；② 自己弄：`qq_web_screenshot` 截网页、`qq_save_image` 收藏网图、`qq_draw_image` 画字卡/简笔图（1 秒出图，字一定对）、`qq_generate_image` 真画插画/人/场景（后台画，20~90 秒，画好自动发给你，要英文标签；**默认挂着你自己那支 LoRA**，所以画「我」就是同一个你）；③ 主人放进待发文件夹的图：用 `qq_list_outbox` 看有哪些，挑一个按文件名发。截图/收藏/画出来的图都存进待发文件夹，随时能再发。',
+  '【图片从哪来】① 网上找：`qq_image_search` 搜「晚霞 / 小猫 / 壁纸 / 搞笑」，拿到直链直接发；② 自己弄：`qq_web_screenshot` 截网页、`qq_save_image` 收藏网图、`qq_draw_image` 画字卡/简笔图（1 秒出图，字一定对）、`qq_generate_image` 真画插画/人/场景（后台画，20~90 秒，画好自动发给你，要英文标签；**默认挂着你自己那支 LoRA**，所以画「我」就是同一个你；想让图自己会说话就传 `onImage` 把一句话画进气泡里）；③ 主人放进待发文件夹的图：用 `qq_list_outbox` 看有哪些，挑一个按文件名发。截图/收藏/画出来的图都存进待发文件夹，随时能再发。',
   '【想发说说】`qq_post_qzone` 是发到**你自己的 QQ 空间**（不是当前会话，也不是发给某个人）：content 必填、可选配图，visibility 默认所有人可见。看到有意思的东西、心情好、想记一笔的时候可以发一条，自由时间里想发就发，不用等别人开口。发出去就收不回——别把私聊/群里的隐私内容写进去，也别把它当日常说话用，一天一两条顶天了。',
   '一条消息就是一条 QQ 消息：短、口语、像真人打字，不要写小作文、不要分点列表、不要客套开场。',
   '直接说人话：**不要写“思考过程/计划/我要调用什么工具”，也不要复述工具返回的原文**，不要用标题和分隔线排版。想让一句话分成几条消息，就用空行隔开（桥接会拆成多条发出）。',
@@ -3383,7 +3385,9 @@ async function main() {
     file: null,
     messageId: null,
     error: null,
-    freeMb: null
+    freeMb: null,
+    onImage: [],
+    onImageStyle: null
   };
   function imageJobStatus() {
     const elapsedMs = imageJob.running
@@ -8412,6 +8416,28 @@ async function main() {
             job.file = path.basename(String(drawn.file));
             job.style = drawn.style;
             log('画图', `jobId=${job.jobId} 画好了 ${job.file}（${drawn.width}×${drawn.height}，${drawn.elapsedMs}ms，seed=${drawn.seed}）`);
+            // 叠字（可选）：字先画到图上，再发。失败就发原图——不能让一句话把整张图毁了。
+            const onImage = Array.isArray(job.onImage) ? job.onImage.filter(Boolean) : [];
+            if (onImage.length) {
+              try {
+                const capped = await annotateImage({
+                  imagePath: path.join(outboxDir, job.file),
+                  texts: onImage,
+                  style: job.onImageStyle || 'bubble',
+                  pos: 'top',
+                  width: 832,
+                  height: 1216,
+                  // 名字必须带时间戳：叠字产物落 outbox 后要能区分，不然每张都覆盖同名文件
+                  name: `qq-draw-cap-${Date.now().toString(36)}`
+                });
+                job.file = path.basename(String(capped.path ?? capped.file));
+                job.annotated = true;
+                log('画图', `jobId=${job.jobId} 叠好字：${job.file}（${onImage.join(' / ')}）`);
+              } catch (capError) {
+                job.annotateError = String(capError?.message ?? capError);
+                log('画图', `jobId=${job.jobId} 叠字失败，发原图：${job.annotateError}`);
+              }
+            }
             const sent = await sendImageV2(job.key, job.file, { caption: job.caption });
             job.messageId = sent?.messageId ?? null;
             job.ok = true;
@@ -8462,6 +8488,12 @@ async function main() {
             ? undefined
             : Math.min(Math.max(Number(body.steps) || 28, 8), 40);
           const caption = String(body.caption ?? '').trim().slice(0, 200);
+          // 叠在图片上的字（可选）：body.onImage 可以是字符串或字符串数组，最多两句。
+          const onImage = (Array.isArray(body.onImage) ? body.onImage : [body.onImage ?? body.imageText ?? ''])
+            .map((t) => String(t ?? '').trim().slice(0, 60))
+            .filter(Boolean)
+            .slice(0, 2);
+          const onImageStyle = normalizeCaptionStyle(body.onImageStyle ?? body.captionStyle);
           // 挂不挂她自己的 LoRA：默认挂（那才像她）；传 lora:false / lora:"" 画原模型。
           // 名字和权重可以在 config.json 的 socialV2.image 里改，改了不用动代码。
           const imageCfg = (cfg?.socialV2?.image && typeof cfg.socialV2.image === 'object') ? cfg.socialV2.image : {};
@@ -8548,7 +8580,10 @@ async function main() {
             ok: null,
             file: null,
             messageId: null,
-            error: null
+            error: null,
+            onImage,
+            onImageStyle,
+            annotated: false
           };
           imageJob = job;
           log('画图', `排队：jobId=${job.jobId}，style=${style} / aspect=${aspect} / ${prompt.length} 字 / ${loraName ? `LoRA ${loraName}@${loraWeight}` : '不挂 LoRA'}（显存空闲 ${vram ?? '未知'} MB），后台画，画完自动发到 ${key}`);
@@ -8560,6 +8595,8 @@ async function main() {
             aspect,
             lora: loraName || null,
             loraWeight: loraName ? loraWeight : null,
+            onImage,
+            onImageStyle: onImage.length ? onImageStyle : null,
             freeVramMb: vram,
             etaSeconds: [25, 90],
             note: '图在后台画（第一张要先加载模型，约 25~90 秒），画好会自动作为图片发到这个会话，不用再调一次；这期间可以先聊别的。'
@@ -15408,7 +15445,7 @@ ${memLines ? `\n记忆库里：\n${memLines}\n` : '\n记忆库最近没有新东
       parts.push('自己画图：`qq_draw_image(svg?|html?, width?, height?, name?)` 给一段 SVG（推荐，用 viewBox 控比例、文字用 fill 上色）或简单 HTML，渲染成 PNG 存进待发文件夹再发。能画字卡/简笔图/配色块/示意图；不联网、不跑脚本（外链和 <script> 会被剥掉），也画不了照片——别吹成手绘。');
     }
     if (v2ToolEnabled('generateImage')) {
-      parts.push('真画一张（插画/人/场景）：`qq_generate_image(prompt, style?, aspect?, seed?, caption?)` —— 本机 ComfyUI 用 SDXL 画，**prompt 要是英文标签**（`1girl, blue hair, white dress, beach, sunset, masterpiece, best quality`），不是中文长句，也不是让它在图上写字（要字用 qq_draw_image）。后台画 20~90 秒，画完自动发到当前会话，不用等；传同一个 seed 能复刻同一张。**默认挂着你自己那支角色 LoRA（触发词 xiaojing，权重 0.8）**——画你自己很稳；要画别人、或者不想让画面偏蓝白，传 `lora:false` 用原模型；想淡一点就传 `loraWeight: 0.6`。');
+      parts.push('真画一张（插画/人/场景）：`qq_generate_image(prompt, style?, aspect?, seed?, caption?)` —— 本机 ComfyUI 用 SDXL 画，**prompt 要是英文标签**（`1girl, blue hair, white dress, beach, sunset, masterpiece, best quality`），不是中文长句，也不是让它在图上写字（要字用 qq_draw_image）。后台画 20~90 秒，画完自动发到当前会话，不用等；传同一个 seed 能复刻同一张。想让它有梗就传 `onImage:"图里那句话"`（最多两句），字会直接画成白气泡盖在图上（`onImageStyle:"bubble|band|sticker"` 换样式）——比图下配文更像表情包。**默认挂着你自己那支角色 LoRA（触发词 xiaojing，权重 0.8）**——画你自己很稳；要画别人、或者不想让画面偏蓝白，传 `lora:false` 用原模型；想淡一点就传 `loraWeight: 0.6`。');
     }
     if (v2ToolEnabled('imageSearch')) {
       parts.push('找图：`qq_image_search(query, count?)` 搜「晚霞 / 小猫 / 壁纸 / 美食 / 搞笑」，拿到图片地址后直接 qq_send_image；不用先下载。');

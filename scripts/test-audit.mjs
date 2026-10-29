@@ -134,6 +134,8 @@ const tests = [
   'test-qqb-compact.mjs',
   // 自绘（ComfyUI 文生图）：风格归一、连不上时说人话、后台任务与 MCP 接线。
   'test-qqb-comfy.mjs',
+  // 图配文：样式归一、HTML 转义、底图压缩口径、画完先叠字再发的接线。
+  'test-qqb-annotate.mjs',
   // P1 潘多拉记忆核心：L2–L6 分层、关系硬过滤（群/朋友/主人）、归档清扫与复职、
   //   实体联想、分享（shares）、面板读写；含一个 v4→v5 老库迁移用例。
   'test-qqb-memory-levels.mjs',

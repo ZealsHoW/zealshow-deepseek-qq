@@ -777,8 +777,10 @@ export async function captureWebsite(input = {}) {
 // 落进 state/outbox/，之后 qq_send_image 就能发出去。
 //
 // 与 captureWebsite 的关键差别：**画面内容来自模型，不是某个网址**，所以安全口径更严：
-// - 断网：导航前 Network.setBlockedURLs(['*'])，页面发出的任何网络请求一律拦掉，只有内联
-//   内容能画（导航本身走 data: URL，不是网络请求；<img src="http://…"> 之类会被拦下）。
+// - 断网：导航前 Network.setBlockedURLs([...])，只按「协议」拦（http/https/ws/wss/ftp/file），
+//   而不是写字面 '*'。差别在于 data: URI 也会被 '*' 命中：内联图片（`<img src="data:image/png;base64,…">`）
+//   作为请求一样会被挡掉，于是「在图上叠文字」这类合成图只能画出一个破图图标。
+//   data: 是本进程自己塞进去的字节，不是网络出口，所以放行它不破坏上面那条口径。导航本身也是 data: URL。
 // - 去活内容：<script>/<iframe>/<object>/<embed>/<base>/<link>/<meta> 与 on* 事件属性在渲染前
 //   剥掉，画出来的是静态图。
 // 这样即使 prompt injection 让她画「某个内部地址的内容」，也没有出口。
@@ -895,9 +897,12 @@ export async function renderHtmlToImage(input = {}) {
         screenHeight: viewHeight
       });
       // 断网必须在导航之前设好，否则页面里第一个外链请求可能已经发出去。
+      // 按协议拦（不是 '*'），给 data: 留一条口子——内联图片要能显示，见文件头注释。
       try {
         await cdp.send('Network.enable');
-        await cdp.send('Network.setBlockedURLs', { urls: ['*'] });
+        await cdp.send('Network.setBlockedURLs', {
+          urls: ['http://*', 'https://*', 'ws://*', 'wss://*', 'ftp://*', 'file://*']
+        });
       } catch {}
       const loadPromise = cdp.once('Page.loadEventFired', 20000);
       const url = `data:text/html;charset=utf-8;base64,${Buffer.from(document.html, 'utf8').toString('base64')}`;

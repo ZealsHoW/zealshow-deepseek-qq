@@ -149,6 +149,11 @@ export const MODULES = {
     files: ['src/qqb/media/comfy.mjs'],
     note: '自绘：本机 ComfyUI 文生图（Animagine XL 4.0 / SDXL），复用 dsh/qq-extras-patch/lib/comfy.mjs 的成熟客户端，产物落 state/outbox；风格收窄成 anime/anime-sd15/realistic，连不上时给中文原因而不是英文栈；0.2.0 起默认挂她自己的角色 LoRA（xiaojing_sdxl_lora，触发词 xiaojing，权重 0.8），传 lora="" 画原模型',
   },
+  'media/annotate': {
+    version: '0.1.0',
+    files: ['src/qqb/media/annotate.mjs'],
+    note: '图配文：把生成好的底图内联进 HTML，再用无头 Chrome 叠一层气泡（bubble）/字幕条（band）/贴纸（sticker），产物落 state/outbox；底图超 150k 字符先经 ffmpeg 压成 832 宽 jpg；webshot 的断网口径从「拦 *」改成按协议拦，好让 data: 内联图能显示',
+  },
   'model/client': {
     version: '0.1.1',
     files: ['src/qqb/model/client.mjs'],

@@ -2174,9 +2174,11 @@ if (cfg.socialV2?.tools?.generateImage !== false) {
       steps: z.number().optional().describe('采样步数 8~40（默认 28，越大越细也越慢）'),
       caption: z.string().optional().describe('和图片一起发出去的一句话说明（可空）'),
       lora: z.union([z.boolean(), z.string()]).optional().describe('默认挂她自己的 LoRA；传 false 用原模型（画别人/不想要这份质感时），也可传具体文件名'),
-      loraWeight: z.number().optional().describe('LoRA 强度 0~1.5（默认 0.8）。接上 lora=false 时无效')
+      loraWeight: z.number().optional().describe('LoRA 强度 0~1.5（默认 0.8）。接上 lora=false 时无效'),
+      onImage: z.union([z.string(), z.array(z.string())]).optional().describe('要直接叠在图片上的字（做梗图/表情包用）：一句话最好，最多两句；不填就发原图。和 caption 不同——caption 是图下面的说明文字，onImage 是画在图里的气泡'),
+      onImageStyle: z.enum(['bubble', 'band', 'sticker']).optional().describe('叠字的样式：bubble 白气泡（默认）、band 底部黑字幕条、sticker 黄色贴纸')
     },
-    async ({ key, token, prompt, style, aspect, seed, steps, caption, lora, loraWeight }) => {
+    async ({ key, token, prompt, style, aspect, seed, steps, caption, lora, loraWeight, onImage, onImageStyle }) => {
       try {
         const data = await agentApi('/api/socialV2/generate-image', {
           method: 'POST',
@@ -2190,7 +2192,9 @@ if (cfg.socialV2?.tools?.generateImage !== false) {
             ...(steps !== undefined ? { steps } : {}),
             ...(caption ? { caption } : {}),
             ...(lora !== undefined ? { lora } : {}),
-            ...(loraWeight !== undefined ? { loraWeight } : {})
+            ...(loraWeight !== undefined ? { loraWeight } : {}),
+            ...(onImage ? { onImage } : {}),
+            ...(onImageStyle ? { onImageStyle } : {})
           }),
           headers: { 'x-agent-token': token },
           // 路由立刻回 202，这里只要等它把任务排上；30 秒是防桥接假死把这一轮拖死。
@@ -2200,7 +2204,7 @@ if (cfg.socialV2?.tools?.generateImage !== false) {
           return {
             content: [{
               type: 'text',
-              text: `已排上（jobId=${data.jobId}，${data.style} / ${data.aspect}，${data.lora ? `LoRA ${data.lora}@${data.loraWeight}` : '原模型'}，显存空闲 ${data.freeVramMb ?? '未知'} MB）。图在后台画，第一张要先加载模型，约 25~90 秒，画好会**自动**作为图片发到这个会话——现在先回对方一句「等我一下，画好给你看」，然后该聊什么聊什么；不要在这里等，也不要再调一次。`
+              text: `已排上（jobId=${data.jobId}，${data.style} / ${data.aspect}，${data.lora ? `LoRA ${data.lora}@${data.loraWeight}` : '原模型'}${data.onImage?.length ? `，图里叠字「${data.onImage.join(' / ')}」（${data.onImageStyle}）` : ''}，显存空闲 ${data.freeVramMb ?? '未知'} MB）。图在后台画，第一张要先加载模型，约 25~90 秒，画好会**自动**作为图片发到这个会话——现在先回对方一句「等我一下，画好给你看」，然后该聊什么聊什么；不要在这里等，也不要再调一次。`
             }]
           };
         }

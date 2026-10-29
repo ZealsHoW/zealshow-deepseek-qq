@@ -1218,7 +1218,32 @@ cd D:\34825\zhuomian\youqq\_comfy\ComfyUI
 - **脚本必须带 BOM**：`train-lora.ps1` 不带 BOM 时 Windows PowerShell 5.1 按 GBK 读中文，报一串 `assignment expression is not valid`（看起来完全不相关）——和 `night-sleep-2300.ps1` 同一个坑。
 - **角色 LoRA 会带偏色调**：训练集全是蓝白冷色，挂上后别的题材也偏蓝；权重 0.8 是折中值，0.6 更淡、1.0 更「她」。
 
-**回归**：`node scripts/test-qqb-comfy.mjs`（42 项，含 LoRA 接线与 `lora:false` 分支）、`node scripts/test-audit.mjs`（71 个脚本）。
+**回归**：`node scripts/test-qqb-comfy.mjs`（42 项，含 LoRA 接线与 `lora:false` 分支）、`node scripts/test-audit.mjs`（72 个脚本）。
+
+### 生图之后加一句话：图配文（`onImage`，2026-10-29）
+
+她画出来的图经常是「空镜」——表情对了、构图也对了，但没话说。2026-10-29 起 `qq_generate_image` 支持把一句话**直接画进图里**做成梗图/表情包，不用再去求别的工具：
+
+```
+qq_generate_image(prompt="1girl, chibi, blue hair, holding a big fish, surprised", aspect="portrait",
+                  onImage="爸爸，这条鱼是我抓的", onImageStyle="bubble")
+```
+
+| 参数 | 说明 |
+| --- | --- |
+| `onImage` | 叠在图上的字，字符串或数组（最多两句，每句 60 字内）；不传就是原图 |
+| `onImageStyle` | `bubble` 白气泡（默认，带小尾巴）、`band` 底部黑字幕条、`sticker` 黄色贴纸 |
+| `caption` | 老参数，是**图下面**那句说明，和 `onImage` 不是一回事 |
+
+**怎么做的**：`src/qqb/media/annotate.mjs` 把底图内联成 `data:` URI 塞进一段 HTML，再用同一套无头 Chrome（`src/webshot.js` 的 `renderHtmlToImage`）渲染一次 → 落 `state/outbox/qq-draw-cap-<时间戳>.png` → 发给对方。整个链路是后台任务的一部分，画完叠字再发，**叠字失败就发原图**（不能让一句话把整张图毁了）。
+
+**两个坑（都踩过）**：
+
+- **`Network.setBlockedURLs(['*'])` 会把 `data:` 也拦掉**：画画链路为了防外链一直按字面 `*` 拦网络，结果内联图作为请求一样被挡，渲染出来只有一个破图图标。改成**按协议拦**（`http/https/ws/wss/ftp/file`），`data:` 是本进程自己塞进去的字节、不是网络出口，放行它不破坏口径。这是 `src/webshot.js` 的改动，改之前先看那段注释。
+- **底图不能直接塞**：832×1216 的 PNG base64 有 2.2 M 字符，而 webshot 的上限是 `DRAW_MAX_CHARS = 200000`。所以超过 150k 字符就先经 ffmpeg 压成 832 宽 jpg（质量逐档降，`state/outbox/.cap-src-*.jpg` 当临时文件——**别写 `%TEMP%`**，这台机器上 ffmpeg 往那儿写会 `Permission denied`）。
+- 另外：叠字产物的名字必须带时间戳，否则每张都覆盖 `qq-draw.png`。
+
+**回归**：`node scripts/test-qqb-annotate.mjs`（25 项：样式归一、HTML 转义、压缩口径、画完先叠字再发的接线）。手工出图可以直接 `node _comfy/annotate.mjs --image <png> --text "…" --style bubble`（本地 Chrome 版，另有 `_comfy/annotate.py` 纯 PIL 版备用）。
 
 ### 登录态（给抖音一个常驻账号）
 
