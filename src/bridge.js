@@ -43,7 +43,7 @@ import { createConsolidator } from './qqb/memory/consolidate.mjs';
 // 自己生图（2026-10-29）：本机 ComfyUI + Animagine XL 4.0（SDXL 1024²）。
 // 客户端本体在 dsh/qq-extras-patch/lib/comfy.mjs（上游插件漏发、仓库补的那份，跑通过真图），
 // 这里只包一层「产物落 state/outbox + 状态/风格白名单」。
-import { ALLOWED_STYLES, createComfyClient, normalizeStyle, styleLines } from './qqb/media/comfy.mjs';
+import { ALLOWED_STYLES, DEFAULT_LORA, DEFAULT_LORA_WEIGHT, DEFAULT_TRIGGER, createComfyClient, normalizeStyle, styleLines } from './qqb/media/comfy.mjs';
 import { createBackoff } from './qqb/net/backoff.mjs';
 import { createOutbox } from './qqb/net/outbox.mjs';
 import { createOneBotClient } from './qqb/net/onebot.mjs';
@@ -8404,6 +8404,9 @@ async function main() {
               aspect: job.aspect,
               seed: job.seed,
               steps: job.steps,
+              lora: job.lora ?? '',
+              loraWeight: job.loraWeight ?? DEFAULT_LORA_WEIGHT,
+              trigger: job.trigger ?? DEFAULT_TRIGGER,
               prefix: 'qq-draw'
             });
             job.file = path.basename(String(drawn.file));
@@ -8459,6 +8462,13 @@ async function main() {
             ? undefined
             : Math.min(Math.max(Number(body.steps) || 28, 8), 40);
           const caption = String(body.caption ?? '').trim().slice(0, 200);
+          // 挂不挂她自己的 LoRA：默认挂（那才像她）；传 lora:false / lora:"" 画原模型。
+          // 名字和权重可以在 config.json 的 socialV2.image 里改，改了不用动代码。
+          const imageCfg = (cfg?.socialV2?.image && typeof cfg.socialV2.image === 'object') ? cfg.socialV2.image : {};
+          const loraOff = body.lora === false || body.lora === '' || body.useLora === false;
+          const loraName = loraOff ? '' : String(typeof body.lora === 'string' && body.lora.trim() ? body.lora.trim() : (imageCfg.lora || DEFAULT_LORA)).trim();
+          const loraWeight = loraOff ? 0 : Math.min(1.5, Math.max(0, Number(body.loraWeight ?? imageCfg.loraWeight ?? DEFAULT_LORA_WEIGHT) || DEFAULT_LORA_WEIGHT));
+          const trigger = String(body.trigger ?? imageCfg.trigger ?? DEFAULT_TRIGGER).trim();
 
           if (singJob.running) {
             sendJson({
@@ -8527,6 +8537,9 @@ async function main() {
             seed,
             steps,
             caption,
+            lora: loraName,
+            loraWeight,
+            trigger,
             freeMb: Math.round(os.freemem() / 1048576),
             freeVramMb: vram,
             startedAt: Date.now(),
@@ -8538,13 +8551,15 @@ async function main() {
             error: null
           };
           imageJob = job;
-          log('画图', `排队：jobId=${job.jobId}，style=${style} / aspect=${aspect} / ${prompt.length} 字（显存空闲 ${vram ?? '未知'} MB），后台画，画完自动发到 ${key}`);
+          log('画图', `排队：jobId=${job.jobId}，style=${style} / aspect=${aspect} / ${prompt.length} 字 / ${loraName ? `LoRA ${loraName}@${loraWeight}` : '不挂 LoRA'}（显存空闲 ${vram ?? '未知'} MB），后台画，画完自动发到 ${key}`);
           sendJson({
             ok: true,
             queued: true,
             jobId: job.jobId,
             style,
             aspect,
+            lora: loraName || null,
+            loraWeight: loraName ? loraWeight : null,
             freeVramMb: vram,
             etaSeconds: [25, 90],
             note: '图在后台画（第一张要先加载模型，约 25~90 秒），画好会自动作为图片发到这个会话，不用再调一次；这期间可以先聊别的。'

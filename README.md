@@ -1191,7 +1191,34 @@ cd D:\34825\zhuomian\youqq\_comfy\ComfyUI
 - **`comfyui-workflow-templates` 没装**时启动日志会有一大段 ERROR，但 API 照常出图；顺手 `pip install comfyui-workflow-templates comfyui-frontend-package comfyui-embedded-docs` 就干净了。
 - **pip 并发会互相拖死**：`--no-deps` 装完还要补 `kornia_rs`、`trampoline`、`mako`、`pydantic_core`、`typing_inspection`、`python-dotenv`、`psutil` 这七个（`--no-deps` 不装依赖），缺一个都是启动期 `ModuleNotFoundError`。
 
-**代码**：客户端在 `src/qqb/media/comfy.mjs`（复用 `dsh/qq-extras-patch/lib/comfy.mjs` 那套成熟实现：探活、checkpoint 认脸、workflow 组装、`/prompt` + `/history` 轮询、取图校验），产物落 `state/outbox`；风格白名单收窄成三种。回归：`node scripts/test-qqb-comfy.mjs`（28 项）、`node scripts/test-audit.mjs`（71 个脚本）。
+**代码**：客户端在 `src/qqb/media/comfy.mjs`（复用 `dsh/qq-extras-patch/lib/comfy.mjs` 那套成熟实现：探活、checkpoint 认脸、workflow 组装、`/prompt` + `/history` 轮询、取图校验），产物落 `state/outbox`；风格白名单收窄成三种。回归：`node scripts/test-qqb-comfy.mjs`（42 项）、`node scripts/test-audit.mjs`（71 个脚本）。
+
+### 画得像她自己：角色 LoRA（`xiaojing_sdxl_lora.safetensors`，2026-10-29）
+
+只靠 prompt 画出来的「蓝白发鲸鱼娘」每次都换脸。2026-10-29 用主人出的 21 张定妆图训了一支 SDXL 角色 LoRA，**默认挂上**——现在她说「画一张我」就是同一个她。
+
+| 东西 | 路径 / 说明 |
+| --- | --- |
+| 原始素材 | `_comfy/datasets/xiaojing-raw` → 人工筛掉 3 张（风格不统一）+ 1 张（黑发）→ **17 张可用** |
+| 加工后 | `_comfy/train/xiaojing/10_xiaojing`（1024 边、无 alpha、文件名 `xiaojing_01.png`…）+ `captions/`（`qwen3-vl-plus` 写标签，统一前缀 `xiaojing, 1girl, blue hair…`） |
+| 训练脚本 | `_comfy/train-lora.ps1`（`-Smoke` 只跑 5 步验链路）→ `_comfy/kohya-sd-scripts/sd-scripts/sdxl_train_network.py` |
+| 产物 | `_comfy/models/loras/xiaojing_sdxl_lora.safetensors`（**85 MB**，最终 epoch） |
+| 对比图 | `_comfy/test-lora.mjs` → `_comfy/lora-test/`（原模型 / e3 / e4 / 最终 · 同一 seed） |
+
+**训参**：SDXL、network_dim 32 / alpha 16、lr 1e-4、800 步、batch 1、grad accum 2、`--network_train_unet_only`、`--cache_latents`、bf16、`--min_snr_gamma 5`；**1.6 s/it**，800 步约 21 分钟，显存峰值 7.78 GB（4060 Laptop 8 GB 刚好卡住）。中途 `-Smoke` 时 5 步 2.1 s/it（含首次编译）。
+
+**她怎么用**：默认就挂（`DEFAULT_LORA`，触发词 `xiaojing`，权重 0.8）。想画原模型/画别人时 `qq_generate_image(..., lora: false)`；强度用 `loraWeight`（0~1.5）。配置文件里也能改默认：`socialV2.image = { lora, loraWeight, trigger }`，改完不用动代码。
+
+**踩过的坑**：
+
+- **tokenizer 下不动**：训练第一次启动卡在 `from_pretrained("stabilityai/stable-diffusion-xl-base-1.0", subfolder="tokenizer_2")`，报 `ReadTimeout`。修法是 `$env:HF_ENDPOINT = 'https://hf-mirror.com'`（sd-scripts 的 os.environ 会吃到）。
+- **`--shuffle_caption` 和缓存 TE 输出冲突**：`cache_text_encoder_outputs` / `cache_text_encoder_outputs_to_disk` 要求关掉 shuffle，报 `--cache_text_encoder_outputs* 不支持 --shuffle_caption`。
+- **`train_text_encoder` 和缓存同样打架**：两者只能留一个，留缓存 ⇒ 加 `--network_train_unet_only`。
+- **`--persistent_workers` + `--max_data_loader_n_workers 0`**：0 个 worker 就没有可 persist 的进程，直接报错，删掉这个 flag。
+- **脚本必须带 BOM**：`train-lora.ps1` 不带 BOM 时 Windows PowerShell 5.1 按 GBK 读中文，报一串 `assignment expression is not valid`（看起来完全不相关）——和 `night-sleep-2300.ps1` 同一个坑。
+- **角色 LoRA 会带偏色调**：训练集全是蓝白冷色，挂上后别的题材也偏蓝；权重 0.8 是折中值，0.6 更淡、1.0 更「她」。
+
+**回归**：`node scripts/test-qqb-comfy.mjs`（42 项，含 LoRA 接线与 `lora:false` 分支）、`node scripts/test-audit.mjs`（71 个脚本）。
 
 ### 登录态（给抖音一个常驻账号）
 

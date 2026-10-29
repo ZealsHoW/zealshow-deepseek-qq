@@ -2163,7 +2163,7 @@ if (cfg.socialV2?.tools?.drawImage !== false) {
 if (cfg.socialV2?.tools?.generateImage !== false) {
   server.tool(
     'qq_generate_image',
-    '用本机 ComfyUI「真画」一张图（文生图：Animagine XL 4.0 / SDXL）。和 qq_draw_image 的分工：qq_draw_image 是排版/字卡/简笔（1 秒、字一定对）；这一件是画插画、画人、画场景（一张 1024² 约 25~45 秒）。**2026-10-29 起是后台任务**：调用立刻返回 queued=true 和 jobId，图在后台画，画好会**自动**作为图片发到这个会话——所以成功后先回对方一句「等我一下，画好给你看」，然后继续聊别的，不要原地等、也不要再调一次。若返回 busy=true，说明上一张还在画或正在唱歌（显卡被占），就告诉对方「我手上还画着一张，等这张出来」。prompt 用英文 Danbooru 标签效果最好（1girl, blue hair, whale tail, ...）；要画中文文字/字卡别用这件，用 qq_draw_image。',
+    '用本机 ComfyUI「真画」一张图（文生图：Animagine XL 4.0 / SDXL）。和 qq_draw_image 的分工：qq_draw_image 是排版/字卡/简笔（1 秒、字一定对）；这一件是画插画、画人、画场景（一张 1024² 约 25~45 秒）。**2026-10-29 起是后台任务**：调用立刻返回 queued=true 和 jobId，图在后台画，画好会**自动**作为图片发到这个会话——所以成功后先回对方一句「等我一下，画好给你看」，然后继续聊别的，不要原地等、也不要再调一次。若返回 busy=true，说明上一张还在画或正在唱歌（显卡被占），就告诉对方「我手上还画着一张，等这张出来」。prompt 用英文 Danbooru 标签效果最好（1girl, blue hair, whale tail, ...）；要画中文文字/字卡别用这件，用 qq_draw_image。**默认挂着她自己的 LoRA（xiaojing，0.8），所以画「她自己」时很像、蓝色调会偏重；画别人的样子或不想要这种质感时传 lora=false 用原模型。**',
     {
       key: z.string().describe('会话 key，格式 group:群号 或 private:QQ号'),
       token: z.string().describe('会话令牌（见唤醒提示中的【会话令牌】）'),
@@ -2172,9 +2172,11 @@ if (cfg.socialV2?.tools?.generateImage !== false) {
       aspect: z.enum(['square', 'portrait', 'landscape']).optional().describe('构图，默认 square（1024×1024）；portrait 竖图 832×1216、landscape 横图 1216×832'),
       seed: z.number().optional().describe('随机种子：想复刻上一张构图就传同一个 seed'),
       steps: z.number().optional().describe('采样步数 8~40（默认 28，越大越细也越慢）'),
-      caption: z.string().optional().describe('和图片一起发出去的一句话说明（可空）')
+      caption: z.string().optional().describe('和图片一起发出去的一句话说明（可空）'),
+      lora: z.union([z.boolean(), z.string()]).optional().describe('默认挂她自己的 LoRA；传 false 用原模型（画别人/不想要这份质感时），也可传具体文件名'),
+      loraWeight: z.number().optional().describe('LoRA 强度 0~1.5（默认 0.8）。接上 lora=false 时无效')
     },
-    async ({ key, token, prompt, style, aspect, seed, steps, caption }) => {
+    async ({ key, token, prompt, style, aspect, seed, steps, caption, lora, loraWeight }) => {
       try {
         const data = await agentApi('/api/socialV2/generate-image', {
           method: 'POST',
@@ -2186,7 +2188,9 @@ if (cfg.socialV2?.tools?.generateImage !== false) {
             ...(aspect ? { aspect } : {}),
             ...(seed !== undefined ? { seed } : {}),
             ...(steps !== undefined ? { steps } : {}),
-            ...(caption ? { caption } : {})
+            ...(caption ? { caption } : {}),
+            ...(lora !== undefined ? { lora } : {}),
+            ...(loraWeight !== undefined ? { loraWeight } : {})
           }),
           headers: { 'x-agent-token': token },
           // 路由立刻回 202，这里只要等它把任务排上；30 秒是防桥接假死把这一轮拖死。
@@ -2196,7 +2200,7 @@ if (cfg.socialV2?.tools?.generateImage !== false) {
           return {
             content: [{
               type: 'text',
-              text: `已排上（jobId=${data.jobId}，${data.style} / ${data.aspect}，显存空闲 ${data.freeVramMb ?? '未知'} MB）。图在后台画，第一张要先加载模型，约 25~90 秒，画好会**自动**作为图片发到这个会话——现在先回对方一句「等我一下，画好给你看」，然后该聊什么聊什么；不要在这里等，也不要再调一次。`
+              text: `已排上（jobId=${data.jobId}，${data.style} / ${data.aspect}，${data.lora ? `LoRA ${data.lora}@${data.loraWeight}` : '原模型'}，显存空闲 ${data.freeVramMb ?? '未知'} MB）。图在后台画，第一张要先加载模型，约 25~90 秒，画好会**自动**作为图片发到这个会话——现在先回对方一句「等我一下，画好给你看」，然后该聊什么聊什么；不要在这里等，也不要再调一次。`
             }]
           };
         }

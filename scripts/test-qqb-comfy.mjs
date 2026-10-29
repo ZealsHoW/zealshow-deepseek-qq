@@ -6,7 +6,10 @@ import path from 'node:path';
 import {
   ALLOWED_STYLES,
   DEFAULT_ASPECT,
+  DEFAULT_LORA,
+  DEFAULT_LORA_WEIGHT,
   DEFAULT_STYLE,
+  DEFAULT_TRIGGER,
   VERSION,
   createComfyClient,
   normalizeStyle,
@@ -40,6 +43,18 @@ console.log('自绘模块：');
   const lines = styleLines();
   eq('风格说明三行', lines.length, 3);
   ok('风格说明带中文标签', lines[0].includes('Animagine') && lines[0].startsWith('anime：'));
+}
+
+console.log('LoRA：');
+{
+  ok('默认 LoRA 是她的那支', DEFAULT_LORA === 'xiaojing_sdxl_lora.safetensors');
+  eq('默认触发词与权重', [DEFAULT_TRIGGER, DEFAULT_LORA_WEIGHT], ['xiaojing', 0.8]);
+  const probe = createComfyClient({ outDir: os.tmpdir() });
+  ok('客户端带 knownLoras 方法（查服务器上挂了哪些 LoRA）', typeof probe.knownLoras === 'function');
+  const src = fs.readFileSync(new URL('../src/qqb/media/comfy.mjs', import.meta.url), 'utf8');
+  ok('出图时挂 LoraLoader', src.includes("class_type: 'LoraLoader'"));
+  ok('两个 CLIPTextEncode 都从 LoraLoader 的 clip 出', src.includes("clip: ['2', 1]") && src.includes("class_type: 'LoraLoader'"));
+  ok('画图尺寸按 (style, aspect) 查表', src.includes('function pickSizeFor') && src.includes('realistic'));
 }
 
 console.log('探活与坏输入（不连真服务）：');
@@ -86,6 +101,16 @@ console.log('接线：');
   ok('MCP 注册了 qq_generate_image', mcp.includes("'qq_generate_image'"));
   ok('MCP 开关映射到 generateImage', mcp.includes("qq_generate_image: 'generateImage'"));
   ok('MCP 调用前后台口径写清楚（queued）', mcp.includes('已排上（jobId='));
+
+  ok('路由解析 lora / loraWeight / trigger', bridge.includes('const loraName = loraOff ?') && bridge.includes('const loraWeight = loraOff ? 0'));
+  ok('默认挂她自己的 LoRA（config 没配时用 DEFAULT_LORA）', bridge.includes('imageCfg.lora || DEFAULT_LORA'));
+  ok('job 里记着 lora 与权重', bridge.includes('lora: loraName,') && bridge.includes('loraWeight,'));
+  ok('后台画图时把 LoRA 传给客户端', bridge.includes('lora: job.lora ??') && bridge.includes('loraWeight: job.loraWeight ??'));
+  ok('202 回执带 lora 字段', bridge.includes('lora: loraName || null,'));
+
+  ok('MCP 工具带 lora 参数', mcp.includes("lora: z.union([z.boolean(), z.string()]).optional()"));
+  ok('MCP 工具带 loraWeight 参数', mcp.includes('loraWeight: z.number().optional()'));
+  ok('MCP 描述写清默认挂她自己的 LoRA', mcp.includes('默认挂着她自己的 LoRA'));
 
   const harness = fs.readFileSync(new URL('../scripts/audit-bridge-harness.mjs', import.meta.url), 'utf8');
   ok('audit 夹具补了 createComfyClient 桩', harness.includes('function createComfyClient()') && harness.includes('createComfyClient, ALLOWED_STYLES'));
