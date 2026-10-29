@@ -111,6 +111,8 @@ export function createLiveMemory({
   ollamaUrl,
   ollamaModel,
   embedTimeoutMs = 4000,
+  // 把 scope 翻成人能看懂的名字（桥接传 people.label）。没传就退化成「私聊 3482501440」。
+  describeScope = null,
 } = {}) {
   if (!root) throw new Error('createLiveMemory 需要 root');
   const rootDir = path.resolve(String(root));
@@ -126,6 +128,19 @@ export function createLiveMemory({
     logger,
   });
   let semanticFailedAt = 0;
+
+  function scopeLabel(scope) {
+    const raw = String(scope ?? '');
+    if (!raw) return '记忆库';
+    if (typeof describeScope === 'function') {
+      try {
+        const text = String(describeScope(raw) ?? '').trim();
+        if (text) return text.replace(/（[^）]*）s*$/, '');
+      } catch { /* 标签翻不出来不挡检索 */ }
+    }
+    const [kind, id] = raw.split(':');
+    return kind === 'group' ? `群聊 ${id}` : kind === 'private' ? `私聊 ${id}` : kind === 'global' ? '全局' : raw;
+  }
 
   function warn(message, detail) {
     const ts = now();
@@ -357,11 +372,18 @@ export function createLiveMemory({
         const picked = (strong.length ? strong : rows)
           .sort((a, b) => b.weight - a.weight || b.score - a.score)
           .slice(0, limit);
-        const head = '【记得的事】以下是你跨会话记住的（越靠前记得越清楚，越靠后越模糊；不是刚发生的新消息，别当成对方刚说的）：';
+        const head = '【记得的事】以下是你跨会话记住的（越靠前记得越清楚，越靠后越模糊；不是刚发生的新消息，别当成对方刚说的）。'
+          + '带「索引」的是很久以前、只记得个大概的事——需要细节就调 qq_memory_detail 去翻原文；'
+          + '带「来源」的来自别的会话，别把别人的话当成眼前这个人的：';
+        const here = canonicalScope(key);
         const lines = picked.map((row) => {
           const label = KIND_LABEL[row.kind] ?? row.kind;
           const subject = row.subject ? `${clip(row.subject, 16)}：` : '';
-          return `- （${label}）${subject}${clip(row.text, lineChars)}`;
+          // 冷数据只给一句话索引（时间+人物+核心事件+当时情绪），原文留在库里按需拉取。
+          const cold = row.tier === 'cold';
+          const body = cold ? (row.card || clip(row.text, 60)) : clip(row.text, lineChars);
+          const from = row.scope && row.scope !== here && row.scope !== 'global' ? `（来源：${scopeLabel(row.scope)}）` : '';
+          return `- （${label}${cold ? '·索引' : ''}）${subject}${body}${from}`;
         });
         return clip([head, ...lines].join('\n'), maxChars);
       }, '');
@@ -444,8 +466,55 @@ export function createLiveMemory({
           depth: row.depth,
           emotion: row.emotion,
           vector: row.vector ?? null,
+          tier: row.tier ?? 'hot',
+          card: row.card ?? null,
+          sourceLabel: scopeLabel(row.scope),
         }));
       }, []);
+    },
+
+    /** 按 id 拉全文（含 L2 原文）——「索引不够、想回忆细节」时她主动调的那一下。 */
+    detail({ id } = {}) {
+      return guard('detail', () => {
+        const st = open();
+        const num = Number(id);
+        if (!st || !Number.isFinite(num)) return null;
+        const row = st.get(num);
+        if (!row) return null;
+        return {
+          id: row.id,
+          scope: row.scope,
+          sourceLabel: scopeLabel(row.scope),
+          kind: row.kind,
+          layer: row.layer,
+          memLevel: row.memLevel ?? null,
+          subject: row.subject ?? null,
+          text: row.text,
+          sensory: row.sensory ?? null,
+          subtext: row.subtext ?? null,
+          createdAt: row.createdAt ?? row.created_at ?? null,
+          emotion: row.emotion,
+          importance: row.importance,
+          weight: row.weight,
+          card: row.card ?? null,
+          tier: row.tier ?? 'hot',
+        };
+      }, null);
+    },
+
+    /** 冷热迁移（桥接每 6 小时跑一次；面板也能手动触发）。 */
+    retier(options = {}) {
+      return guard('retier', () => {
+        const st = open();
+        return st && typeof st.retier === 'function' ? st.retier(options) : { hot: 0, cold: 0 };
+      }, { hot: 0, cold: 0 });
+    },
+
+    tierStats() {
+      return guard('tierStats', () => {
+        const st = open();
+        return st && typeof st.tierStats === 'function' ? st.tierStats() : { hot: 0, cold: 0 };
+      }, { hot: 0, cold: 0 });
     },
 
     /**
@@ -485,6 +554,9 @@ export function createLiveMemory({
           depth: row.depth,
           emotion: row.emotion,
           vector: row.vector ?? null,
+          tier: row.tier ?? 'hot',
+          card: row.card ?? null,
+          sourceLabel: scopeLabel(row.scope),
         }));
       }, []);
     },

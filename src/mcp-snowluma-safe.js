@@ -366,6 +366,7 @@ const TOOL_CONFIG_FLAGS = {
   qq_memory_query: 'memory',
   // 长期记忆库检索（FTS5）+ 知识库：都挂在记忆库同一个 state/memory.db 上。
   qq_memory_search: 'memory',
+  qq_memory_detail: 'memory',
   qq_knowledge_add: 'knowledge',
   qq_knowledge_search: 'knowledge',
   qq_memory_remove: 'memory',
@@ -1117,12 +1118,38 @@ server.tool(
       const depthText = { vivid: '记得很清楚', clear: '记得', faint: '有点模糊', deep: '只记得个大概' };
       const lines = items.map((it, i) => {
         const how = depthText[it.depth] ? `（${depthText[it.depth]}）` : '';
-        return `${i + 1}. [${it.kind}] ${how}${it.text}${it.subject ? `（${it.subject}）` : ''}${it.where ? `（来自：${it.where}）` : ''}`;
+        // 冷记忆只有一句话索引，细节要再调 qq_memory_detail 拉原文。
+        const body = it.tier === 'cold' && it.card ? `${it.card}（索引）` : it.text;
+        return `${i + 1}. [${it.kind}] ${how}${body}${it.subject ? `（${it.subject}）` : ''}${it.where ? `（来自：${it.where}）` : ''}${it.id ? `〔id:${it.id}〕` : ''}`;
       });
       const scopeHint = data?.crossScope ? '（跨会话查的，带来源）' : '';
       return { content: [{ type: 'text', text: `记忆库里关于「${query}」的有 ${items.length} 条${scopeHint}：\n${lines.join('\n')}` }] };
     } catch (error) {
       return { content: [{ type: 'text', text: `记忆检索失败：${error?.message ?? error}` }], isError: true };
+    }
+  }
+);
+
+server.tool(
+  'qq_memory_detail',
+  '把一条**冷记忆**（很久以前、平时只给你一句话索引的事）翻成原文：带上检索结果里的 id，就能看到当时到底说了什么。觉得「这件事我好像只记得个大概」、或者对方追问细节时用。（只读）',
+  {
+    key: z.string().describe('会话 key，格式 group:群号 或 private:QQ号'),
+    token: z.string().describe('会话令牌（见唤醒提示中的【会话令牌】）'),
+    id: z.number().describe('检索结果里 〔id:数字〕 那个数字')
+  },
+  async ({ key, token, id }) => {
+    try {
+      const q = new URLSearchParams({ id: String(id) });
+      const data = await agentApi(`/api/socialV2/memory-detail?${q.toString()}`, { headers: { 'x-agent-token': token } });
+      const it = data?.item;
+      if (!it) return { content: [{ type: 'text', text: `没找到 id=${id} 的记忆（可能被合并或删了）。` }] };
+      const head = `[id:${it.id}] ${it.memLevel || ''} · ${it.kind} · ${it.sourceLabel || it.scope || ''}${it.createdAt ? ` · ${new Date(Number(it.createdAt)).toISOString().slice(0, 10)}` : ''}`;
+      const extra = [it.sensory ? `感官：${it.sensory}` : '', it.subtext ? `心里想的：${it.subtext}` : ''].filter(Boolean).join('\n');
+      const body = extra ? `${it.text}\n${extra}` : it.text;
+      return { content: [{ type: 'text', text: `${head}\n${body}` }] };
+    } catch (error) {
+      return { content: [{ type: 'text', text: `翻原文失败：${error?.message ?? error}` }], isError: true };
     }
   }
 );

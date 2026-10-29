@@ -141,6 +141,8 @@ const tests = [
   // P1 潘多拉记忆核心：L2–L6 分层、关系硬过滤（群/朋友/主人）、归档清扫与复职、
   //   实体联想、分享（shares）、面板读写；含一个 v4→v5 老库迁移用例。
   'test-qqb-memory-levels.mjs',
+  // R11：冷热分层 / RRF 混合检索 / 一句话索引
+  'test-qqb-memory-tiers.mjs',
   // P1–P4 接线自检：面板静态页/静态分支/spirit 代理、记忆核心 API 是否真接进
   //   live 门面与两条提示词路线（索引卡、触景生情、100 轮锚点）。
   'test-qqb-pandora.mjs',

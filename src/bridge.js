@@ -111,9 +111,15 @@ let cfg = null;
 // R1 长期记忆库（SQLite，state/memory.db）。它只是 social-v2 轻量记忆之外的**追加层**：
 // 库坏了 / 打不开时全部静默降级（liveMemory 内部容错），桥接主流程不受影响；
 // 想整体关掉就把 config.socialV2.memoryDb.enabled 设为 false（见 memoryDbEnabled）。
+const people = createPeopleDirectory({
+  filePath: path.join(ROOT, 'state', 'memory-people.json'),
+  logger: { warn: (message, detail) => log('人名簿', message, detail ?? '') }
+});
 const liveMemory = createLiveMemory({
   root: ROOT,
   ownerQQOf: () => cfg?.ownerQQ,
+  // 冷记忆只给她一句话索引，索引里得写清「这是谁那边的事」。
+  describeScope: (scope) => people.label(scope),
   logger: { warn: (message, detail) => log('长期记忆', message, detail ?? '') }
 });
 function memoryDbEnabled() {
@@ -123,13 +129,8 @@ function memoryDbEnabled() {
     return true;
   }
 }
-// R9「人名簿」：把 private:123 / group:456 翻成「小祀」「大肥鱼之家」，跨会话检索结果才不会
-// 变成一串 QQ 号。它只是标签，不放行任何会话（准入仍然只看 config.allow）。
-// 数据来源：① 网关好友/群列表（启动后同步一次，之后 6 小时一轮）；② 私聊来消息时的昵称。
-const people = createPeopleDirectory({
-  filePath: path.join(ROOT, 'state', 'memory-people.json'),
-  logger: { warn: (message, detail) => log('人名簿', message, detail ?? '') }
-});
+// R9「人名簿」的实例在 liveMemory 之前建（见上）：记忆库里存的是 private:123 / group:456，
+// 诱导提示词和冷数据索引都要把它翻成「小祀」「大肥鱼之家」。它只是标签、不放行任何会话。
 // 预生成曲库（audio/songs/*.wav + state/song-library.json）。只读清单，音频缺失的那条会被跳过。
 const songLibrary = createSongLibrary({
   filePath: path.join(ROOT, 'state', 'song-library.json'),
@@ -298,6 +299,37 @@ function innerIndexPromptText({ key = '', text = '' } = {}) {
   } catch (error) { /* 同上 */ }
   return parts.length ? `${parts.join('\n\n')}\n\n` : '';
 }
+// 每次唤醒最上面那一行：她现在在跟谁说话、这个人在她这里算什么关系。
+// 跨会话的记忆混在一个库里之后，这一行是「别把别人的私事抖给眼前这个人」的第一道闸。
+function conversationIdentityText(key) {
+  try {
+    const raw = String(key ?? '');
+    const [kind, idRaw] = raw.split(':');
+    const id = Number(idRaw);
+    const scope = kind === 'group' ? `group:${id}` : kind === 'private' ? `private:${id}` : raw;
+    const name = people.nameOf(scope) || (kind === 'group' ? `群 ${id}` : `${id}`);
+    const owner = Number(cfg?.ownerQQ);
+    let rel = '';
+    let hint = '';
+    if (kind === 'group') {
+      rel = '群聊';
+      hint = '群里是几个人在说话，别把私聊里的细节搬过来。';
+    } else if (id === owner) {
+      rel = '主人';
+      hint = '这是你主人。你想起来的事都可以跟他说，包括别处发生的。';
+    } else {
+      rel = '朋友';
+      hint = '这是朋友。你记得的事可以聊，但别主动抖别人私聊里的隐私；他问起别处的事，说个大概就好。';
+    }
+    return `【当前对话对象】${rel}：${name}（${scope}）
+${hint}
+
+`;
+  } catch {
+    return '';
+  }
+}
+
 function peoplePromptText() {
   try {
     const lines = [];
@@ -424,6 +456,8 @@ function moodEnabled() {
 let thoughtTimer = null;
 // 心跳定时器（30 分钟一次：精神自然流失 + 饥饿 + 偶尔憋出念头）。
 let spiritTimer = null;
+// R11 冷热迁移定时器（6 小时一轮）：同样必须声明在 main() 调用 startTierLoop() 之前，否则 TDZ。
+let tierTimer = null;
 
 // R9 精神系统（2026-10-28 主人的「活人化」重构）：
 //   行为要花精神 → 精神低了她真的累、回得短 → 睡觉按指数曲线回满。
@@ -9889,6 +9923,9 @@ async function main() {
               depth: item.depth,
               vector: item.vector ?? null,
               scope: item.scope,
+              // 冷记忆只给一句话索引，细节靠 qq_memory_detail 按 id 拉。
+              tier: item.tier ?? 'hot',
+              card: item.card ?? null,
               where: people.label(item.scope)
             }));
             sendJson({
@@ -9960,6 +9997,25 @@ async function main() {
         if (req.method === 'GET' && url.pathname === '/api/socialV2/memory-vectors') {
           const ready = await liveMemory.embedderReady();
           sendJson({ ok: true, ...liveMemory.vectors(), embedder: ready });
+          return;
+        }
+        // ── 记忆的冷热分层与「翻原文」 ───────────────────────────────────────────────
+        // 面板用 tierStats 画「热 N 条 / 冷 M 条」；她（qq_memory_detail）用 detail 按 id 拉全文。
+        // 冷记忆平时只进一句话索引，要细节才走这里。
+        if (req.method === 'GET' && url.pathname === '/api/socialV2/memory-tiers') {
+          sendJson({ ok: true, ...liveMemory.tierStats() });
+          return;
+        }
+        if (req.method === 'POST' && url.pathname === '/api/socialV2/memory-tiers') {
+          // 手动跑一次冷热迁移（面板「整理一下」/ 排障用；平时桥接每 6 小时自己跑）。
+          sendJson({ ok: true, moved: liveMemory.retier() });
+          return;
+        }
+        if (req.method === 'GET' && url.pathname === '/api/socialV2/memory-detail') {
+          const id = Number(url.searchParams.get('id'));
+          const item = liveMemory.detail({ id });
+          if (!item) { sendJson({ ok: false, error: '没有这条记忆' }, 404); return; }
+          sendJson({ ok: true, item });
           return;
         }
         // ── 预生成曲库（R10）：先唱好存着，到时候按情景秒发 ──────────────────────────
@@ -13240,6 +13296,7 @@ ${memLines ? `\n记忆库里：\n${memLines}\n` : '\n记忆库最近没有新东
   startMemoryIntake();
   // R9：念头循环——她自己的小想法攒够了就主动开口（见 thoughtTick 注释）。
   startThoughtLoop();
+  startTierLoop();
   // R1：跨会话事实的 LLM 精炼 + 旧记忆归档（见 startMemoryRefine / startMemoryArchive 注释）。
   startMemoryRefine();
   startMemoryArchive();
@@ -14848,6 +14905,8 @@ ${memLines ? `\n记忆库里：\n${memLines}\n` : '\n记忆库最近没有新东
       stickerLine,
       // 「我认识谁」+「记忆是共用的」：她得起得了跨会话检索的念（见 peoplePromptText 注释）。
       peoplePromptText(),
+      // 跨会话记忆混在一个库里之后，说出口之前要先知道「眼前是谁」。
+      conversationIdentityText(key),
       ENGINE_RULES,
     ].filter(Boolean).join('\n\n'), key);
     const unread = Array.isArray(st.unread) ? st.unread.length : 0;
@@ -15235,7 +15294,25 @@ ${memLines ? `\n记忆库里：\n${memLines}\n` : '\n记忆库最近没有新东
     }
   }
 
-  function startThoughtLoop() {
+  // 冷热迁移（R11）：7 天内动过的回热，3 天没人提的转冷。每 6 小时一轮，启动后先补一次。
+// 它只改 tier/heat 标记，不动原文——热数据直接拼进提示词，冷数据等她主动查时只给索引。
+function startTierLoop() {
+  if (tierTimer) return;
+  const runOnce = (why) => {
+    try {
+      const moved = liveMemory.retier();
+      const changed = Number(moved?.promoted ?? 0) + Number(moved?.demoted ?? 0);
+      if (changed > 0) log('记忆冷热', `${why}迁移：升热 ${moved.promoted} 条 / 转冷 ${moved.demoted} 条（现热 ${moved.hot} / 冷 ${moved.cold}）`);
+    } catch (err) {
+      log('记忆冷热', '迁移失败（不影响其它功能）', String(err?.message ?? err));
+    }
+  };
+  setTimeout(() => runOnce('启动后'), 90_000)?.unref?.();
+  tierTimer = setInterval(() => runOnce('定时'), 6 * 3600_000);
+  tierTimer.unref?.();
+}
+
+function startThoughtLoop() {
     if (!thoughtsEnabled()) return;
     if (thoughtTimer) clearInterval(thoughtTimer);
     const hours = Math.max(0.2, Number(cfg.socialV2?.thoughts?.intervalHours ?? 1.5));
@@ -15544,7 +15621,10 @@ ${memLines ? `\n记忆库里：\n${memLines}\n` : '\n记忆库最近没有新东
     // 「我认识谁」+「记忆是共用的」：DSH 这条路也要有（线上默认走直连引擎，但换了模式
     // 提示词会换成这一份，两边不一致她就又不会去跨会话检索了）。
     const peopleText = peoplePromptText();
-    const peopleLine = peopleText ? `${peopleText}\n\n` : '';
+    const identityText = conversationIdentityText(key);
+    const peopleLine = (identityText ? `${identityText}` : '') + (peopleText ? `${peopleText}
+
+` : '');
     // 注意：黑话表不在这里注入，deliverPromptNow 的 withSlangContext 会统一注入，
     // 避免唤醒 prompt 出现两份黑话表。
     const participationText = formatParticipationV2(st);

@@ -93,6 +93,7 @@
     "test:qqb-compact": "node scripts/test-qqb-compact.mjs",
     "test:qqb-comfy": "node scripts/test-qqb-comfy.mjs",
     "test:qqb-memory-levels": "node scripts/test-qqb-memory-levels.mjs",
+    "test:qqb-memory-tiers": "node scripts/test-qqb-memory-tiers.mjs",
     "test:qqb-persona-evolve": "node scripts/test-qqb-persona-evolve.mjs",
     "test:qqb-directed": "node scripts/test-qqb-directed.mjs",
     "test:qqb-media": "node scripts/test-qqb-media.mjs",

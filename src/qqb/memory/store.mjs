@@ -491,8 +491,17 @@ export function openStore(options = {}) {
     CREATE INDEX IF NOT EXISTS idx_shares_memory ON shares(memory_id);
   `);
 
-  db.prepare('INSERT OR IGNORE INTO schema_meta (key, value) VALUES (?, ?)').run('schema_version', '5');
-  db.prepare('UPDATE schema_meta SET value = ? WHERE key = ? AND CAST(value AS INTEGER) < ?').run('5', 'schema_version', 5);
+  // schema v6（2026-10-29 冷热分离）：tier 是 hot/cold，heat 是热度缓存（0~1），
+  // hits/last_hit_at 记「被想起过几次、最近一次」—— 再固化（cold→hot）就看它，
+  // 冷热不是死板的「7 天」一条线，权重高/情绪深的一直留在热区（见 retier）。
+  if (!columns.includes('tier')) db.exec("ALTER TABLE memories ADD COLUMN tier TEXT NOT NULL DEFAULT 'hot'");
+  if (!columns.includes('heat')) db.exec('ALTER TABLE memories ADD COLUMN heat REAL NOT NULL DEFAULT 0.5');
+  if (!columns.includes('hits')) db.exec('ALTER TABLE memories ADD COLUMN hits INTEGER NOT NULL DEFAULT 0');
+  if (!columns.includes('last_hit_at')) db.exec('ALTER TABLE memories ADD COLUMN last_hit_at INTEGER');
+  db.exec('CREATE INDEX IF NOT EXISTS idx_memories_tier ON memories(tier, updated_at)');
+
+  db.prepare('INSERT OR IGNORE INTO schema_meta (key, value) VALUES (?, ?)').run('schema_version', '6');
+  db.prepare('UPDATE schema_meta SET value = ? WHERE key = ? AND CAST(value AS INTEGER) < ?').run('6', 'schema_version', 6);
   db.prepare('INSERT OR IGNORE INTO schema_meta (key, value) VALUES (?, ?)').run('created_at', String(nowMs(now)));
 
   const statements = {
@@ -507,6 +516,8 @@ export function openStore(options = {}) {
     // 归档与复职（§3）：archive_reason 只在归档时有意义，复职一并清掉。
     archiveStale: db.prepare("UPDATE memories SET archived_at = ?, archive_reason = ? WHERE id = ? AND archived_at IS NULL"),
     revive: db.prepare('UPDATE memories SET archived_at = NULL, archive_reason = NULL, use_count = use_count + 1, last_used_at = ? WHERE id = ?'),
+    touchHit: db.prepare('UPDATE memories SET hits = hits + 1, last_hit_at = ?, heat = MIN(1.0, heat + 0.08) WHERE id = ?'),
+    setTier: db.prepare('UPDATE memories SET tier = ?, last_hit_at = COALESCE(last_hit_at, ?) WHERE id = ?'),
     // 又被提起就说明这条事实还活着：顺手清掉 archived_at（复活）。归档不是单向门。
     // 情绪取「历史最高」：同一件事这次提起时更动情，说明它在心里更重。
     mergeTouch: db.prepare('UPDATE memories SET use_count = use_count + 1, updated_at = ?, importance = MAX(importance, ?), emotion = MAX(emotion, ?), evidence = COALESCE(?, evidence), archived_at = NULL WHERE id = ?'),
@@ -603,6 +614,19 @@ export function openStore(options = {}) {
     }
   }
 
+  /** 一句话索引卡：`[10-15] 与主人：聊到深夜…（当时心跳很快）` ≤ 80 字。 */
+  function cardText(row = {}, memory = {}) {
+    const ts = Number(row.created_at) || Number(row.updated_at) || nowMs(now);
+    const d = new Date(ts);
+    const when = `${d.getMonth() + 1}-${String(d.getDate()).padStart(2, '0')}`;
+    const who = String(row.subject ?? memory.subject ?? '').trim();
+    const raw = String(memory.text ?? '').replace(/s+/g, ' ').trim();
+    const core = raw.length > 46 ? `${raw.slice(0, 46)}…` : raw;
+    const emo = Number(row.emotion ?? memory.emotion ?? 0);
+    const mood = emo >= 0.6 ? '当时心跳很快' : emo >= 0.35 ? '当时心里发紧' : '当时情绪淡淡的';
+    return `[${when}]${who ? `与${who}：` : ''}${core}（${mood}）`.slice(0, 80);
+  }
+
   function rowToMemory(row) {
     if (!row) return null;
     let meta = null;
@@ -630,6 +654,12 @@ export function openStore(options = {}) {
       subtext: row.subtext ?? null,
       archived: Boolean(row.archived_at),
       archiveReason: row.archive_reason ?? null,
+      tier: row.tier === 'cold' ? 'cold' : 'hot',
+      heat: Number(row.heat) || 0,
+      hits: Number(row.hits) || 0,
+      lastHitAt: Number(row.last_hit_at) || null,
+      // 冷数据只把这句注进提示词（时间 + 人物 + 核心事件 + 当时情绪），原文留在库里按需拉取。
+      card: cardText(row, { text: row.text ?? '', subject: row.subject, emotion }),
       ...decay,
     };
   }
@@ -1006,18 +1036,35 @@ export function openStore(options = {}) {
     // 那种被字面筛掉正是老实现最大的漏召。索引命中的那几条另外并回候选集。
     let extraIds = null;
     if (needle) {
-      const indexed = ftsIds('memories_fts', needle);
+      // 多词查询（「阳台 下雨」）按整句 AND 找会一条都召不到：FTS 的 MATCH 是整串，
+      // LIKE 也是整串。改成「整句先试，不行就逐词并集」——她平时问的是一句话，
+      // 很少正好等于库里的原句。
+      const queryTokens = needle.split(/[\s,，、]+/).map((t) => t.trim()).filter((t) => t.length > 1);
+      const ids = new Set();
+      for (const id of ftsIds('memories_fts', needle) ?? []) ids.add(Number(id));
+      if (queryTokens.length > 1) {
+        for (const token of queryTokens) {
+          for (const id of ftsIds('memories_fts', token) ?? []) ids.add(Number(id));
+        }
+      }
+      if (!ids.size) {
+        const needles = queryTokens.length > 1 ? queryTokens : [needle];
+        const ors = needles.map(() => "(norm LIKE ? OR LOWER(COALESCE(subject, '')) LIKE ?)").join(' OR ');
+        const found = db.prepare(`SELECT id FROM memories WHERE ${ors} LIMIT 500`)
+          .all(...needles.flatMap((t) => [`%${t}%`, `%${t}%`]));
+        for (const row of found) ids.add(Number(row.id));
+      }
+      const indexed = [...ids];
       if (vectorMap) {
-        extraIds = indexed ?? [];
-      } else if (indexed?.length) {
+        extraIds = indexed;
+      } else if (indexed.length) {
         where.push(`id IN (${indexed.map(() => '?').join(',')})`);
         params.push(...indexed);
       } else {
-        where.push('(norm LIKE ? OR LOWER(COALESCE(subject, \'\')) LIKE ?)');
+        where.push("(norm LIKE ? OR LOWER(COALESCE(subject, '')) LIKE ?)");
         params.push(`%${needle}%`, `%${needle}%`);
       }
     }
-
     const rows = db.prepare(`SELECT * FROM memories WHERE ${where.join(' AND ')} ORDER BY updated_at DESC LIMIT ?`)
       .all(...params, vectorMap ? 1000 : 500);
     if (extraIds?.length) {
@@ -1036,51 +1083,75 @@ export function openStore(options = {}) {
       }
     }
     const tokens = needle ? needle.split(' ').filter((item) => item.length > 1) : [];
+    // ── RRF 混合检索（2026-10-29）：字面（命中强度）与向量各排一次名，再按 1/(k+rank)
+    // 相加融合。两路各补短处：字面抓实体名，向量抓「饿了→蛋挞」这种语义。
+    // 不用「0.6×字面 + 0.4×余弦」那种加权和，是因为两路的分数尺度根本不可比
+    // （余弦 0.42~0.55 全是噪声区），按名次融合才不会一路压倒另一路。
+    const RRF_K = 60;
+    const DAY_MS = 86400000;
+    const literalScore = (row) => {
+      if (!needle) return 0;
+      if (row.norm.includes(needle)) return 1;
+      if (tokens.length && tokens.some((token) => row.norm.includes(token))) return 0.6;
+      return 0;
+    };
+    const cosOf = (row) => (vectorMap && vectorMap.get(Number(row.id)) ? cosine(queryVector, vectorMap.get(Number(row.id))) : 0);
+    const rankOf = (list) => {
+      const map = new Map();
+      list.forEach((row, index) => map.set(Number(row.id), index + 1));
+      return map;
+    };
+    const rankLiteral = rankOf(needle ? rows.slice().sort((a, b) => literalScore(b) - literalScore(a)) : []);
+    const rankVector = rankOf(vectorMap ? rows.filter((row) => vectorMap.get(Number(row.id))).sort((a, b) => cosOf(b) - cosOf(a)) : []);
+    const rrfOf = (row) => {
+      const id = Number(row.id);
+      let sum = 0;
+      if (rankLiteral.has(id)) sum += 1 / (RRF_K + rankLiteral.get(id));
+      if (rankVector.has(id)) sum += 1 / (RRF_K + rankVector.get(id));
+      return sum;
+    };
+    const rrfMax = rows.reduce((max, row) => Math.max(max, rrfOf(row)), 0) || 1;
     const scored = rows.map((row) => {
       // 一条记忆此刻的「分量」：weight = 有效重要度 × 保留率（艾宾浩斯），
       // 情绪强度在编码时已经把重要度抬过一截（rowToMemory 里算好）。
       const memory = rowToMemory(row);
       const usage = Math.min(1, row.use_count / 5);
-      let match = needle ? 0.3 : 0.5;
-      if (needle && row.norm.includes(needle)) match = 1;
-      else if (tokens.length && tokens.some((token) => row.norm.includes(token))) match = 0.6;
-      const stored = vectorMap?.get(Number(row.id)) ?? null;
-      const cos = vectorMap ? (stored ? cosine(queryVector, stored) : 0) : null;
-      // hash-v1 认形不认意思：用 bigram 重叠判断是否沾边，余弦只参与排序；
-      // 语义模型（bge-m3）才真是按意思算，但短句余弦噪声大，bigram 仍留一份话语权。
+      const match = needle ? (literalScore(row) || 0.3) : 0.5;
+      const cos = cosOf(row);
       const lexical = vectorMap
         ? bigramOverlap(String(query.query ?? ''), `${row.subject ?? ''} ${row.text ?? ''}`)
         : null;
-      // 相关性 = 字面命中 + 向量那一路（两路互相补短：一个认字，一个认意思）。
-      // 语义模型（bge-m3）余弦的绝对值比字面命中更可信，占比更大。
-      const relevance = vectorMap
-        ? (vectorModel === HASH_MODEL
-          ? clamp01(0.6 * match + 0.4 * lexical)
-          : clamp01(0.55 * cos + 0.45 * lexical))
-        : match;
-      // 有两种场景，权重要反过来：
-      //   · 有检索词（她自己搜/控制台搜）—— 相关度为主，weight 只是轻微先验，
-      //     否则「重要度 0.95 的那几条」会永远霸榜，搜什么都返回同一批（2026-10-25 实测）。
+      const rrf = rrfOf(row) / rrfMax;
+      // 时间衰减（「拟真检索抗衰退」）：越久越淡，但深情绪 / 高重要度 / 高权重的
+      // 记忆免疫 —— 人对自己最在意的那几件事，本来就不该随时间变淡。
+      // 半衰期 30 天：一个月没提过，字面权重只剩一半。
+      const ageDays = Math.max(0, (ts - Number(row.updated_at || ts)) / DAY_MS);
+      const immune = Number(row.emotion ?? 0) >= 0.6
+        || Number(row.importance ?? 0) >= 0.85
+        || Number(memory.weight ?? 0) >= 0.6;
+      const recency = immune ? 1 : 0.5 ** (ageDays / 30);
+      // 两种场景反过来：
+      //   · 有检索词（她自己搜/控制台搜）—— 相关度为主（RRF），weight 只是轻微先验；
       //   · 没有检索词（提示词注入按分量挑）—— weight 为主，就是艾宾浩斯那套。
       const score = needle
-        ? 0.7 * relevance + 0.15 * memory.weight + 0.1 * usage + 0.05 * memory.emotion
-        : 0.6 * memory.weight + 0.3 * relevance + 0.1 * usage;
+        ? 0.6 * rrf + 0.2 * memory.weight + 0.1 * usage + 0.1 * recency
+        : 0.5 * memory.weight + 0.25 * rrf + 0.15 * usage + 0.1 * recency;
       return {
         ...memory,
         match,
         ...(vectorMap ? { vector: Math.round(cos * 10000) / 10000 } : {}),
         ...(lexical != null ? { lexical: Math.round(lexical * 10000) / 10000 } : {}),
+        rrf: Math.round(rrf * 10000) / 10000,
+        recency: Math.round(recency * 10000) / 10000,
+        immune,
         score: Math.round(score * 10000) / 10000,
         // §2 的可见性结论：rel 原样回传（没有 audience 时是 null），方便上层审计「这条为什么给她看」。
-        // 老字段一个不少，纯增量，向后兼容。
         audienceRel: rel,
       };
     })
       .filter((item) => item.score >= minScore)
       // 有关键词时，向量通道也要有个「沾边」门槛：字面没命中、又一点都不沾的，
       // 不该混进结果（否则「查什么都能查回一堆」—— 那比查不到更糟）。
-      // hash-v1 看 bigram 是否真有共享；语义模型要么余弦很近（≥ VECTOR_RELEVANCE_FLOOR），
-      // 要么至少沾一点字面 —— 光靠 0.4~0.5 的「泛泛相似」会混进一堆不相干的闲聊。
       .filter((item) => (
         !needle || !vectorMap || item.match >= 0.6
         || (vectorModel === HASH_MODEL
@@ -1091,8 +1162,7 @@ export function openStore(options = {}) {
       .slice(0, limit);
 
     // 复职（§3）：归档条目被原文精确命中 = 这次真的「想起来了」，从归档区拿回活区。
-    // 复职本身记一次使用（use_count+1、last_used_at=ts），所以这些条目不再走 touchUse，
-    // 否则同一次召回会被记两次。
+    // 复职本身记一次使用（use_count+1、last_used_at=ts），所以这些条目不再走 touchUse。
     const revived = new Set();
     if (query.markUsed !== false) {
       for (const item of scored) {
@@ -1104,7 +1174,21 @@ export function openStore(options = {}) {
         item.useCount = Number(item.useCount ?? 0) + 1;
         revived.add(Number(item.id));
       }
-      for (const item of scored) if (!revived.has(Number(item.id))) statements.touchUse.run(ts, item.id);
+      for (const item of scored) {
+        if (revived.has(Number(item.id))) continue;
+        statements.touchUse.run(ts, item.id);
+        // 命中记账：hits / last_hit_at / heat（冷热迁移看这三个数）。
+        if (typeof statements.touchHit?.run === 'function') statements.touchHit.run(ts, item.id);
+        // 动态迁移：冷记忆被反复想起（第 2 次）就自己回到热区 —— 不是一次性归档，
+        // 「她最近老想起这件事」本来就该让它更容易被想起。
+        const nextHits = Number(item.hits ?? 0) + 1;
+        if (item.tier === 'cold' && nextHits >= 2 && typeof statements.setTier?.run === 'function') {
+          statements.setTier.run('hot', ts, item.id);
+          item.tier = 'hot';
+          item.promoted = true;
+        }
+        item.hits = nextHits;
+      }
     }
     if (shareOnly.size) {
       for (const item of scored) if (shareOnly.has(String(item.scope))) item.shared = true;
@@ -1159,6 +1243,12 @@ export function openStore(options = {}) {
       retention: memory.retention,
       depth: memory.depth,
       archived: memory.archived,
+      archivedAt: memory.archivedAt ?? memory.archived_at ?? null,
+      tier: memory.tier ?? 'hot',
+      heat: memory.heat ?? 0.5,
+      hits: memory.hits ?? 0,
+      lastHitAt: memory.lastHitAt ?? null,
+      card: memory.card ?? null,
       createdAt: memory.created_at,
       updatedAt: memory.updated_at,
       useCount: memory.use_count,
@@ -1301,6 +1391,38 @@ export function openStore(options = {}) {
   }
 
   /** 知识检索：关键词走 FTS + 向量余弦混合排序，没有关键词就按重要性/新鲜度列最近的。 */
+// ── 冷热分层（R11）：热数据直拼提示词，冷数据只在被问到时给一句话索引 ──────────
+  // 规则（2026-10-29）：
+  //   · 升热：7 天内有动静、或命中过、或本身就重（重要度 ≥.85 / 情绪 ≥.6 / 用过 3 次以上）
+  //   · 转冷：3 天没人提、也没命中，且不重
+  // 深情绪和高重要度的记忆不进冷区（它们本来就该随时想得起来）。
+  function retier(options = {}) {
+    const ts = nowMs(now);
+    const hotDays = Number(options.hotDays ?? 7);
+    const idleDays = Number(options.demoteIdleDays ?? 3);
+    const hotSince = ts - hotDays * 86400000;
+    const idleSince = ts - idleDays * 86400000;
+    const promote = db.prepare(`UPDATE memories SET tier = 'hot'
+      WHERE deleted_at IS NULL AND archived_at IS NULL AND (tier IS NULL OR tier <> 'hot')
+        AND (updated_at >= ? OR COALESCE(last_hit_at, 0) >= ? OR importance >= 0.85 OR emotion >= 0.6 OR use_count >= 3)`)
+      .run(hotSince, hotSince);
+    const demote = db.prepare(`UPDATE memories SET tier = 'cold'
+      WHERE deleted_at IS NULL AND archived_at IS NULL AND tier = 'hot'
+        AND updated_at < ? AND COALESCE(last_hit_at, 0) < ?
+        AND importance < 0.85 AND emotion < 0.6`)
+      .run(idleSince, idleSince);
+    const counts = tierStats();
+    logger?.info?.('冷热迁移完成', { promoted: Number(promote.changes) || 0, demoted: Number(demote.changes) || 0, ...counts, hotDays, idleDays });
+    return { hot: counts.hot, cold: counts.cold, promoted: Number(promote.changes) || 0, demoted: Number(demote.changes) || 0 };
+  }
+
+  function tierStats() {
+    const rows = db.prepare("SELECT COALESCE(tier, 'hot') AS tier, COUNT(*) AS n FROM memories WHERE deleted_at IS NULL AND archived_at IS NULL GROUP BY 1").all();
+    const out = { hot: 0, cold: 0 };
+    for (const row of rows) out[row.tier === 'cold' ? 'cold' : 'hot'] = Number(row.n) || 0;
+    return out;
+  }
+
   function knowledgeSearch(query = {}) {
     const ts = nowMs(now);
     const scope = query.scope ? String(query.scope) : null;
@@ -1529,6 +1651,8 @@ export function openStore(options = {}) {
       consume: budgetConsume,
       peek(key) { return statements.budget.get(String(key)) ?? null; },
     },
+    retier,
+    tierStats,
     close() { try { db.close(); } catch { /* 已关就算了 */ } },
   };
 }

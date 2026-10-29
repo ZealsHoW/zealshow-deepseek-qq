@@ -109,5 +109,24 @@ console.log('审计清单：');
   ok('package.json 有 levels 脚本', typeof pkg.scripts['test:qqb-memory-levels'] === 'string');
 }
 
+console.log('跨会话记忆（R11：冷热分层 / RRF / 索引与原文）：');
+{
+  const store = read('src/qqb/memory/store.mjs');
+  const live = read('src/qqb/memory/live.mjs');
+  const bridge = read('src/bridge.js');
+  const mcp = read('src/mcp-snowluma-safe.js');
+  ok('库里存 tier/heat/last_hit_at 三列', store.includes('ADD COLUMN tier') && store.includes('ADD COLUMN heat') && store.includes('ADD COLUMN last_hit_at'));
+  ok('排序是 RRF（k=60）而不是直接相加', store.includes('RRF_K = 60') && store.includes('rrfMax'));
+  ok('高权重/深情绪的时间衰减免疫', store.includes('immune') && store.includes('0.5 ** (ageDays / 30)'));
+  ok('冷热迁移有 retier/tierStats', store.includes('function retier(') && store.includes('function tierStats('));
+  ok('冷记忆带一句话索引', live.includes('function scopeLabel(scope)') && live.includes('row.card'));
+  ok('能按 id 翻原文', live.includes('detail({ id } = {})'));
+  ok('桥接传了 describeScope', bridge.includes('describeScope: (scope) => people.label(scope)'));
+  ok('两条提示词都注入当前对话对象', bridge.includes('function conversationIdentityText(key)') && (bridge.match(/conversationIdentityText\(key\)/g) || []).length >= 2);
+  ok('每 6 小时跑一次冷热迁移', bridge.includes('function startTierLoop(') && bridge.includes('6 * 3600_000'));
+  ok('有 memory-detail / memory-tiers 路由', bridge.includes('/api/socialV2/memory-detail') && bridge.includes('/api/socialV2/memory-tiers'));
+  ok('MCP 有 qq_memory_detail 且挂到 memory 开关', mcp.includes('qq_memory_detail') && mcp.includes("qq_memory_detail: 'memory'"));
+}
+
 console.log(`\n结果：${passed} 通过 / ${failed} 失败`);
 process.exit(failed === 0 ? 0 : 1);

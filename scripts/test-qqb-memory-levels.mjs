@@ -112,7 +112,7 @@ test('六层：levelOfKind 映射、MEM_LEVELS 顺序、normalizeMemLevel 归一
 
 // ─────────────────────────── 2. 迁移回填 ───────────────────────────
 
-test('迁移：老库（v4）补列并按 kind 回填层级，schema_version 升到 5', () => {
+test('迁移：老库（v4）补列并按 kind 回填层级，schema_version 升到 6（v6 = 冷热分层）', () => {
   const root = tempRoot('migrate');
   const file = makeLegacyStore(root);
   const store = openStore({ root });
@@ -136,12 +136,12 @@ test('迁移：老库（v4）补列并按 kind 回填层级，schema_version 升
   } finally {
     store.close();
   }
-  // schema_version 必须已经写成 5（直接读库确认，不靠 store 自报）
+  // schema_version 必须已经写成 6（v6 多了冷热分层列；直接读库确认，不靠 store 自报）
   const sqlite = process.getBuiltinModule('node:sqlite');
   const db = new sqlite.DatabaseSync(file);
   try {
     const row = db.prepare("SELECT value FROM schema_meta WHERE key = 'schema_version'").get();
-    assert.equal(String(row.value), '5');
+    assert.equal(String(row.value), '6');
   } finally {
     db.close();
   }
