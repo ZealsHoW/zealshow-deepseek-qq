@@ -1220,6 +1220,10 @@ cd D:\34825\zhuomian\youqq\_comfy\ComfyUI
 
 **回归**：`node scripts/test-qqb-comfy.mjs`（42 项，含 LoRA 接线与 `lora:false` 分支）、`node scripts/test-audit.mjs`（72 个脚本）。
 
+**第二版（v2，`xiaojing_sdxl_lora.safetensors`）**：主人说第一版「有点成熟」，补了 33 张 Q 版贴纸（筛掉 21 张漫画分格/大字），数据集变 `_comfy/train/xiaojing2`（17 张原图 + 12 张 Q 版各 ×2 = 41 张、`num_repeats=8`），caption 去掉硬写的 `maid headdress, chibi`，1000 步训成 —— 身材比例还是偏正常，**想更小要靠提示词里的 `chibi, huge head, small body`**，光加步数只会更细不会更小。
+
+**续训（`-Init`，2026-10-29）**：`train-lora.ps1` 加了 `-Init <已有 LoRA>`（转成 kohya 的 `--network_weights`），不用重头训。第三版就是从 v2 接着 600 步、`lr 5e-5` 训出来的 `xiaojing_sdxl_lora_v3.safetensors`（170 MB）。注意：**dim/alpha 必须和原 LoRA 一致**，`-Steps` 是这次要跑的总步数（不是追加）。
+
 ### 生图之后加一句话：图配文（`onImage`，2026-10-29）
 
 她画出来的图经常是「空镜」——表情对了、构图也对了，但没话说。2026-10-29 起 `qq_generate_image` 支持把一句话**直接画进图里**做成梗图/表情包，不用再去求别的工具：
