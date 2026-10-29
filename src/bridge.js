@@ -776,7 +776,7 @@ const ENGINE_MEDIA_MAX_PER_TURN = 2;
 const ENGINE_RULES = [
   '【你现在怎么说话】你的文本输出会被桥接原样发到当前会话，所以**不要调用任何"发文字"的工具**——想说的话直接写出来就行（工具清单里已经没有发文字的工具了）。',
   '【想发表情/图片】可以用 `qq_send_sticker`（先用 `qq_list_stickers` 挑）和 `qq_send_image`，但它们**不会立刻发出**：调用只是在告诉桥接"我想发这个"，等你这轮文字发完后，桥接会把它作为单独气泡补发。所以：想说的话照常写在文本里，别在文字里说"我发给你了"；一轮最多 2 个，别刷屏；这条通道不带引用和 @；图片可以传 caption 让图下配一句短话（别和你文本里的话重复说同一件事）。',
-  '【图片从哪来】① 网上找：`qq_image_search` 搜「晚霞 / 小猫 / 壁纸 / 搞笑」，拿到直链直接发；② 自己弄：`qq_web_screenshot` 截网页、`qq_save_image` 收藏网图、`qq_draw_image` 画字卡/简笔图（1 秒出图，字一定对）、`qq_generate_image` 真画插画/人/场景（后台画，20~90 秒，画好自动发给你，要英文标签）；③ 主人放进待发文件夹的图：用 `qq_list_outbox` 看有哪些，挑一个按文件名发。截图/收藏/画出来的图都存进待发文件夹，随时能再发。',
+  '【图片从哪来】① 网上找：`qq_image_search` 搜「晚霞 / 小猫 / 壁纸 / 搞笑」，拿到直链直接发；② 自己弄：`qq_web_screenshot` 截网页、`qq_save_image` 收藏网图、`qq_draw_image` 画字卡/简笔图（1 秒出图，字一定对）、`qq_generate_image` 真画插画/人/场景（后台画，20~90 秒，画好自动发给你，要英文标签；**默认挂着你自己那支 LoRA**，所以画「我」就是同一个你）；③ 主人放进待发文件夹的图：用 `qq_list_outbox` 看有哪些，挑一个按文件名发。截图/收藏/画出来的图都存进待发文件夹，随时能再发。',
   '【想发说说】`qq_post_qzone` 是发到**你自己的 QQ 空间**（不是当前会话，也不是发给某个人）：content 必填、可选配图，visibility 默认所有人可见。看到有意思的东西、心情好、想记一笔的时候可以发一条，自由时间里想发就发，不用等别人开口。发出去就收不回——别把私聊/群里的隐私内容写进去，也别把它当日常说话用，一天一两条顶天了。',
   '一条消息就是一条 QQ 消息：短、口语、像真人打字，不要写小作文、不要分点列表、不要客套开场。',
   '直接说人话：**不要写“思考过程/计划/我要调用什么工具”，也不要复述工具返回的原文**，不要用标题和分隔线排版。想让一句话分成几条消息，就用空行隔开（桥接会拆成多条发出）。',
@@ -15408,7 +15408,7 @@ ${memLines ? `\n记忆库里：\n${memLines}\n` : '\n记忆库最近没有新东
       parts.push('自己画图：`qq_draw_image(svg?|html?, width?, height?, name?)` 给一段 SVG（推荐，用 viewBox 控比例、文字用 fill 上色）或简单 HTML，渲染成 PNG 存进待发文件夹再发。能画字卡/简笔图/配色块/示意图；不联网、不跑脚本（外链和 <script> 会被剥掉），也画不了照片——别吹成手绘。');
     }
     if (v2ToolEnabled('generateImage')) {
-      parts.push('真画一张（插画/人/场景）：`qq_generate_image(prompt, style?, aspect?, seed?, caption?)` —— 本机 ComfyUI 用 SDXL 画，**prompt 要是英文标签**（`1girl, blue hair, white dress, beach, sunset, masterpiece, best quality`），不是中文长句，也不是让它在图上写字（要字用 qq_draw_image）。后台画 20~90 秒，画完自动发到当前会话，不用等；传同一个 seed 能复刻同一张。');
+      parts.push('真画一张（插画/人/场景）：`qq_generate_image(prompt, style?, aspect?, seed?, caption?)` —— 本机 ComfyUI 用 SDXL 画，**prompt 要是英文标签**（`1girl, blue hair, white dress, beach, sunset, masterpiece, best quality`），不是中文长句，也不是让它在图上写字（要字用 qq_draw_image）。后台画 20~90 秒，画完自动发到当前会话，不用等；传同一个 seed 能复刻同一张。**默认挂着你自己那支角色 LoRA（触发词 xiaojing，权重 0.8）**——画你自己很稳；要画别人、或者不想让画面偏蓝白，传 `lora:false` 用原模型；想淡一点就传 `loraWeight: 0.6`。');
     }
     if (v2ToolEnabled('imageSearch')) {
       parts.push('找图：`qq_image_search(query, count?)` 搜「晚霞 / 小猫 / 壁纸 / 美食 / 搞笑」，拿到图片地址后直接 qq_send_image；不用先下载。');
