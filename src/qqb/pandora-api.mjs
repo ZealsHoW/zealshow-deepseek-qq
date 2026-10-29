@@ -80,6 +80,30 @@ function readBody(req, limit = 64 * 1024) {
   });
 }
 
+/**
+ * 去掉正文开头那些「日期复读」：`2026-10-29：`、`10月28日：`、`[20:31] 10月27日：`。
+ * 2026-10-29 主人说「日记大多只有标题，标题还被截了」——因为日记是一整段，
+ * 服务端把第一行当标题截 40 字、前端又把第一行整段删掉，结果正文空了。
+ */
+const DIARY_DATE_PREFIX = /^\s*(?:\d{4}-\d{2}-\d{2}|\d{1,2}\s*月\s*\d{1,2}\s*[日号])\s*[：:，,、]\s*/;
+const DIARY_TIME_PREFIX = /^\s*\[\d{1,2}:\d{2}\]\s*/;
+
+/** 把第一句压成标题：不硬切，切在标点上；实在没有标点才截断加省略号。 */
+export function diaryTitleOf(line, { softLimit = 24, hardLimit = 30 } = {}) {
+  const plain = String(line ?? '')
+    .replace(DIARY_TIME_PREFIX, '')
+    .replace(DIARY_DATE_PREFIX, '')
+    .trim();
+  if (!plain) return '';
+  const sentence = plain.split(/[。！？!?…]|—{2,}/)[0]?.trim() || plain;
+  const base = sentence.length > hardLimit ? sentence.slice(0, hardLimit) : sentence;
+  if (base.length <= softLimit) return base;
+  // 找 softLimit 之前最后一个停顿点，别把词切两半
+  const cut = Math.max(base.lastIndexOf('，', softLimit), base.lastIndexOf('、', softLimit), base.lastIndexOf(' ', softLimit));
+  if (cut > softLimit * 0.5) return `${base.slice(0, cut)}…`;
+  return `${base.slice(0, softLimit)}…`;
+}
+
 /** `# 2026-10-26 | 重要 | - 20:31 …` 这种头解析。第二段历史上是空的，留给分级。 */
 function parseDiary(raw, file) {
   const lines = String(raw).split(/\r?\n/);
@@ -94,19 +118,23 @@ function parseDiary(raw, file) {
     : /重要|important/i.test(gradeRaw)
       ? 'important'
       : 'daily';
-  const body = lines
+  const bodyLines = lines
     .slice(dateMatch ? 1 : 0)
     .map((l) => l.replace(/^-\s+(\d{1,2}:\d{2})\s*/, '[$1] '))
-    .join('\n')
-    .trim();
+    // 正文里也去掉开头的日期复读，卡片上不用第一行就跟标题一模一样。
+    // 注意顺序：先剥 `[20:31] ` 再剥 `10月27日：`，否则日期前缀前面还挂着时间戳，正则匹配不到。
+    .map((l) => {
+      const stamp = l.match(DIARY_TIME_PREFIX)?.[0] ?? '';
+      return stamp + l.slice(stamp.length).replace(DIARY_DATE_PREFIX, '');
+    });
+  const body = bodyLines.join('\n').trim();
   // 标题取第一条真正的正文（跳过空行、`#` 小标题与 `> ` 引用），没有就用日期兜底。
-  const titleLine = body
-    .split(/\n/)
+  const titleLine = bodyLines
     .map((l) => l.trim())
     .find((l) => l && !l.startsWith('#') && !l.startsWith('>'));
   return {
     date,
-    title: String(titleLine ?? date).replace(/^\[\d{1,2}:\d{2}\]\s*/, '').slice(0, 40),
+    title: diaryTitleOf(titleLine) || date,
     grade,
     kind: /梦|dream/i.test(gradeRaw) || /^梦/m.test(body) ? 'dream' : 'diary',
     mood: gradeRaw && !/刻骨|难忘|重要|unforgettable|important/i.test(gradeRaw) ? gradeRaw : '',
@@ -387,11 +415,15 @@ export function createPandora({ root, store, spirit, thoughts, people, consoleTo
 
       if (api === 'persona' && req.method === 'GET') return sendJson(res, 200, personaPayload()), true;
 
-      // 面板上的两个小动作：打盹 / 吃点甜的。浏览器只有 pandora_token，走不通控制台鉴权的
+      // 面板上的三个小动作：喂一顿 / 打盹 / 吃点甜的。浏览器只有 pandora_token，走不通控制台鉴权的
       // /api/socialV2/spirit，所以在这里代理一次（同一个 spirit 实例、同一套规则）。
       if (api === 'spirit' && req.method === 'POST') {
         const body = await readBody(req);
         const action = String(body?.action ?? '').trim();
+        if (action === 'eat') {
+          const r = spirit?.eat?.({ what: String(body?.what || '一顿饭') }) ?? null;
+          return sendJson(res, 200, { ok: r?.ok !== false, action, result: r, snapshot: spirit?.snapshot?.() ?? null }), true;
+        }
         if (action === 'nap') {
           const r = spirit?.nap?.({ minutes: Number(body?.minutes) || 20 }) ?? null;
           return sendJson(res, 200, { ok: r?.ok !== false, action, result: r, snapshot: spirit?.snapshot?.() ?? null }), true;

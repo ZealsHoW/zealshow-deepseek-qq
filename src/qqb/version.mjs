@@ -115,9 +115,9 @@ export const MODULES = {
     note: 'R2 情绪/状态机：mood/energy/irritation/social 四维、事件驱动 + 时间衰减、行为门控建议、跨重启持久化。0.1.1 修精力收支：warm_chat 的 energy 由 -0.02 降到 -0.005——原值下光是「被搭话」每小时 6 条就把恢复额（约 +0.12/h）吃光，精力被钉死在 0，「主动开口」的闸门（energy ≥ 0.25）永远够不着（配套改动在桥接侧：一次回复只记一次 own_reply）。0.1.2：家人的夸奖/鼓励/「爱你」开始真的补精力（praised +0.06、新增 loved +0.12），loveWords/negations 两个词表把「疼爱」和「嫌弃」分开；新增 setDim(name,value) 走实例做手动校准（直接改 state/persona-state.json 会被内存旧值盖掉），配套 POST /api/socialV2/mood 与 scripts/set-mood.mjs',
   },
   'persona/spirit': {
-    version: '0.1.1',
+    version: '0.1.2',
     files: ['src/qqb/persona/spirit.mjs'],
-    note: 'R9 精神系统（活人化）：精神/饥饿/清醒时长三件事，行为花精神、睡觉按指数曲线回满（睡满 sleepHoursToFull 才满）、清醒超 fullRestHours 消耗翻倍、甜食立刻补但更饿、打盹有日上限；只给建议（gate/replyBudget），精神低就把回复锁短，绝不拦死回复；状态落 state/spirit.json，时间推进用 lazy tick',
+    note: 'R9 精神系统（活人化）：精神/饥饿/清醒时长三件事，行为花精神、睡觉按指数曲线回满（睡满 sleepHoursToFull 才满）、清醒超 fullRestHours 消耗翻倍、甜食立刻补但更饿、打盹有日上限；只给建议（gate/replyBudget），精神低就把回复锁短，绝不拦死回复；状态落 state/spirit.json，时间推进用 lazy tick。0.1.1 修「一天掉到 0」：新增 eat()（吃饭真降饥饿，之前只有 sweet 只涨不降）、心跳里饿了自动吃饭/白天打盹 40 分钟，并把流失 0.045→0.028/h、疲劳期 12→16h、饥饿增长 0.05→0.03/h、反噬 0.05→0.02/h 调平；0.1.2 新增 setHunger()（面板/调试可单独调饥饿，不动精神）',
   },
   'persona/thoughts': {
     version: '0.1.0',

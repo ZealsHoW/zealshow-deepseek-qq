@@ -7103,7 +7103,14 @@ async function main() {
             if (action === 'nap') result = spirit.nap({ minutes: Number(body.minutes) || 20 });
             else if (action === 'sweet') result = spirit.sweet({ what: body.what ? String(body.what).slice(0, 40) : '甜的' });
             else if (action === 'eat') result = spirit.eat({ what: body.what ? String(body.what).slice(0, 40) : '一顿饭' });
-            else if (action === 'set') result = spirit.setSpirit(body.spirit, { reason: body.reason });
+            else if (action === 'set') {
+              // spirit 与 hunger 可以分开设：调饥饿（吃太饱/饿一顿）不想顺带改精神。
+              result = {};
+              if (body.spirit != null) result.spirit = spirit.setSpirit(body.spirit, { reason: body.reason });
+              if (body.hunger != null) result.hunger = spirit.setHunger(body.hunger, { reason: body.reason });
+              if (!Object.keys(result).length) { sendJson({ ok: false, error: 'set 需要 spirit 或 hunger' }, 400); return; }
+              result = { ok: true, ...result, snapshot: spiritSnapshot() };
+            }
             else if (action === 'sleep') result = spirit.sleep({ reason: body.reason || 'manual' });
             else if (action === 'wake') result = spirit.wake({ hours: Number.isFinite(Number(body.hours)) ? Number(body.hours) : null });
             else { sendJson({ ok: false, error: 'action 只能是 nap / sweet / eat / set / sleep / wake' }, 400); return; }

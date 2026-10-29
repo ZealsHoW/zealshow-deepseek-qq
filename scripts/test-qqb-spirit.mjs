@@ -182,3 +182,21 @@ test('精神：桥接自己会吃饭、白天会打盹（不再只靠面板手�
   assert.ok(src.includes("action === 'eat'"), 'POST /api/socialV2/spirit 支持 eat');
   assert.ok(src.includes('let lastInboundAt = 0;') && src.includes('lastInboundAt = Date.now();'), '要记最后一次有人说话的时间');
 });
+
+test('饥饿：能手动设（面板/调试），set 只传 hunger 不会把精神改掉', () => {
+  const c = clock();
+  const sp = createSpirit({ now: c.now, options: { drainPerHour: 0, hungerPerHour: 0, hungerPenalty: 0 } });
+  sp.setSpirit(0.66, { reason: '测试' });
+  const before = sp.snapshot();
+  const r = sp.setHunger(0.35, { reason: '测试' });
+  const after = sp.snapshot();
+  assert.equal(r.ok, true);
+  assert.ok(Math.abs(after.hunger - 0.35) < 0.01, `饥饿应设为 0.35，实际 ${after.hunger}`);
+  assert.ok(Math.abs(after.spirit - before.spirit) < 0.02, `精神不该被 hunger 带跑：${before.spirit} → ${after.spirit}`);
+  assert.equal(sp.setHunger('abc').ok, false);
+  assert.ok(Math.abs(sp.setHunger(5).hunger - 1) < 1e-6, '超界夹到 1');
+
+  const src = fs.readFileSync(new URL('../src/bridge.js', import.meta.url), 'utf8');
+  assert.ok(src.includes('spirit.setHunger(body.hunger'), 'set 动作要支持 hunger');
+  assert.ok(src.includes("if (body.spirit != null) result.spirit = spirit.setSpirit"), 'spirit 与 hunger 分开设');
+});

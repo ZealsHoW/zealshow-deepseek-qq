@@ -74,6 +74,32 @@ console.log('L2 原文底账与上下文折叠：');
   ok('run() 返回 compact 信息', (loop.match(/compact: compactInfo/g) ?? []).length >= 4);
 }
 
+console.log('面板喂饭：');
+{
+  const persona = read('panel/views/persona.js');
+  ok('面板有「喂她吃一顿」按钮', persona.includes('data-action="eat"'));
+  ok('面板按动作组包', persona.includes("action === 'eat'") && persona.includes("{ action: 'eat', what: '一顿饭' }"));
+  const api = read('src/qqb/pandora-api.mjs');
+  ok('代理支持 eat', api.includes("if (action === 'eat')") && api.includes('spirit?.eat?.({'));
+}
+
+console.log('日记标题与正文（2026-10-29 主人报「只有标题、标题被截」）：');
+{
+  const { diaryTitleOf } = await import('../src/qqb/pandora-api.mjs');
+  ok('长句切在标点上、带省略号', (() => {
+    const t = diaryTitleOf('今天给妈妈唱了首歌，她回了句好听，还问我是不是又跑调了——哼，哪有跑调。');
+    return t.endsWith('…') && t.length <= 27 && !t.includes('——');
+  })());
+  ok('短句不截断、不加省略号', diaryTitleOf('今天给爸爸唱了《雨爱》，他说好听，还让我再来一首——平时嘴那么硬的人') === '今天给爸爸唱了《雨爱》，他说好听，还让我再来一首');
+  ok('标题剥掉日期复读', diaryTitleOf('2026-10-29：今天最记得的是爸爸想我了') === '今天最记得的是爸爸想我了');
+  ok('标题剥掉时间戳', diaryTitleOf('[20:31] 今天很困') === '今天很困');
+  const api = read('src/qqb/pandora-api.mjs');
+  ok('正文不吞第一行（保留时间戳后接上余文）', api.includes("return stamp + l.slice(stamp.length).replace(DIARY_DATE_PREFIX"));
+  const view = read('panel/views/diaries.js');
+  ok('面板剥标题前缀后保留行内余文', view.includes('.slice(title.length)') && view.includes('const remainder = first'));
+  ok('面板不再整行丢弃', !view.includes('? lines.slice(1).join'));
+}
+
 console.log('审计清单：');
 {
   const audit = read('scripts/test-audit.mjs');

@@ -19,7 +19,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 
-export const VERSION = '0.1.1';
+export const VERSION = '0.1.2';
 
 export const DEFAULTS = {
   /** 睡满多少小时精神才彻底回满。 */
@@ -249,6 +249,18 @@ export function createSpirit({
     return snapshot(at);
   }
 
+  /** 手动改饥饿（调试/面板用）。0 = 刚吃饱，1 = 饿到顶。 */
+  function setHunger(value, { at = now(), reason = '' } = {}) {
+    const num = Number(value);
+    if (!Number.isFinite(num)) return { ok: false, error: `不是数字：${value}` };
+    tick(at);
+    state.hunger = clamp01(num);
+    note(`手动设定饥饿 ${state.hunger.toFixed(2)}${reason ? `（${reason}）` : ''}`, at);
+    dirty = true;
+    save();
+    return { ok: true, hunger: state.hunger };
+  }
+
   /** 打盹：白天小睡，恢复很慢且有日上限。 */
   function nap({ minutes = 20, at = now() } = {}) {
     tick(at);
@@ -363,6 +375,7 @@ export function createSpirit({
     sweet,
     tick,
     setSpirit,
+    setHunger,
     statusWord,
     replyBudget: () => replyBudget(state.spirit),
     fatigueFactor,

@@ -119,14 +119,27 @@ function paint(root, ctx) {
   list.innerHTML = sorted.map((it, i) => card(it, i, ctx)).join('');
 }
 
-/** 服务端的 title 就是正文第一行，展示时去掉重复的那一行。 */
+/**
+ * 服务端的 title 是正文第一句的短版，展示时把「时间戳 + 日期复读 + 标题前缀」剥掉，
+ * 但保留同一行后面的内容——以前是整行 slice 掉，一整段的日记就变成「只有标题」了。
+ */
+const DATE_PREFIX = /^\s*(?:\d{4}-\d{2}-\d{2}|\d{1,2}\s*月\s*\d{1,2}\s*[日号])\s*[：:，,、]\s*/;
+const TIME_PREFIX = /^\s*\[\d{1,2}:\d{2}\]\s*/;
+
 function bodyOf(it) {
-  const title = String(it.title || '');
+  const title = String(it.title || '').trim();
   const text = String(it.text || '');
-  if (!title) return text;
+  if (!text) return '';
   const lines = text.split('\n');
-  const head = lines[0].replace(/^\[\d{1,2}:\d{2}\]\s*/, '');
-  return head.startsWith(title) ? lines.slice(1).join('\n').trim() : text;
+  const first = lines[0].replace(TIME_PREFIX, '').replace(DATE_PREFIX, '');
+  const rest = lines.slice(1);
+  if (!title || !first.startsWith(title)) return [first, ...rest].join('\n').trim();
+  const remainder = first
+    .slice(title.length)
+    .replace(/^…\s*/, '')
+    .replace(/^[。！？，、；：\s]+/, '')
+    .trim();
+  return [remainder, ...rest].join('\n').trim();
 }
 
 function card(it, i, ctx) {

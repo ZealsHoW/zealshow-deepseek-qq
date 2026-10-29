@@ -20,6 +20,7 @@ function shell() {
       <div class="card pad" id="state-card">${'<div class="sk-line w40"></div><div class="sk-line"></div><div class="sk-line w60"></div>'}</div>
     </div>
     <div class="actions">
+      <button type="button" class="btn" data-action="eat">喂她吃一顿</button>
       <button type="button" class="btn" data-action="nap">打盹 20 分钟</button>
       <button type="button" class="btn" data-action="sweet">吃点甜的</button>
       <button type="button" class="btn" data-action="refresh">刷新</button>
@@ -70,13 +71,17 @@ async function act(action, ctx, root) {
   setButtons(root, true);
   try {
     // 走面板自己的代理端点：浏览器只有 pandora_token，控制台鉴权的 /api/socialV2/spirit 会 401。
-    const body = action === 'nap' ? { action: 'nap', minutes: 20 } : { action: 'sweet', what: '甜的' };
+    const body = action === 'nap'
+      ? { action: 'nap', minutes: 20 }
+      : action === 'eat'
+        ? { action: 'eat', what: '一顿饭' }
+        : { action: 'sweet', what: '甜的' };
     const data = await ctx.api('/api/pandora/spirit', { method: 'POST', body });
     if (state.data && data.snapshot) {
       state.data.state = { ...(state.data.state || {}), ...data.snapshot };
       if (data.snapshot.budget) state.data.state.budget = data.snapshot.budget;
     }
-    ctx.toast(data.summary || (action === 'nap' ? '她打了个盹' : '她吃了点甜的'));
+    ctx.toast(data.summary || (action === 'nap' ? '她打了个盹' : action === 'eat' ? '她吃了顿饭' : '她吃了点甜的'));
     await load(ctx, root);
   } catch (err) {
     ctx.toast(`没成功：${err.message}`, 'err');
