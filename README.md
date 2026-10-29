@@ -517,6 +517,25 @@ SnowLuma 同一个账号的 **HTTP token（默认 3000 端口）与 WebSocket to
 
 建议：**文字多的截图用 `mode:"both"`**；表情包用 `describe`；纯文字转录用 `ocr`。模型越小越快、越大越准；16 GB 内存机器建议保持 `3b` 级。
 
+### 识图也可以走云端（2026-10-29）
+
+本机 Ollama 的视觉模型坏了（`ollama pull` 走不通，见下）时，可以让识图走云端 OpenAI 兼容接口：
+
+```json
+"vision": {
+  "provider": "openai",
+  "chat": { "baseUrl": "https://dashscope.aliyuncs.com/compatible-mode/v1", "model": "qwen3-vl-plus", "apiKeyFile": "C:/Users/34825/.dsh/.credentials.yaml", "apiKeyEnv": "DASHSCOPE_API_KEY" },
+  "timeoutMs": 120000
+}
+```
+
+- `provider` 取 `ollama`（默认，本机）或 `openai`（任何 OpenAI 兼容的 `/chat/completions`，如阿里云百炼 `qwen3-vl-plus`）。
+- 云端模式**图片会离开本机**；`chat.apiKeyFile` 指向 YAML 凭据文件时按 `key: value` 逐行取，`chat.apiKeyEnv` 指定环境变量名，两者都没有才报错。
+- 识图结果的抬头会写清是谁识的：`【文件名｜openai·qwen3-vl-plus】` 或 `【文件名｜ollama·qwen2.5vl:3b】`——排障时不用再猜。
+- 其它调用方（截图、表情包入库）走同一套 provider，不需要各自改配置。
+
+> 2026-10-29 实测：`ollama pull qwen2.5vl:3b` 卡在拉 blob（Cloudflare R2 域名在本地不可达），本机模型文件已损坏（对任何图都回 `88888888`）；改用百炼 `qwen3-vl-plus` 后同一张抖音截图的中文 OCR 完整。
+
 ## 发图（qq_send_image）
 
 AI 也能主动发图（照片、截图、表情图、自己生成的图）。默认开启，开关是 `socialV2.tools.sendImage`（设为 `false` 即可禁用）。

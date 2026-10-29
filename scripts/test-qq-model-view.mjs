@@ -152,21 +152,10 @@ test('MCP validates/forwards read watermarks and wait purposes against an isolat
     // Descendant modules resolve the project's dependencies; no credentials,
     // live config or user runtime state are copied into this test fixture.
     fixture = await fs.mkdtemp(path.join(ROOT, '.tmp-model-view-test-'));
-    await fs.mkdir(path.join(fixture, 'src'));
-    // webshot.js 是 mcp-snowluma-safe.js 的静态依赖；漏拷会让子进程 ENOENT 退出，
-    // MCP 客户端只能看到 “Connection closed”，排查成本很高。
-    await Promise.all(['mcp-snowluma-safe.js', 'qq-model-view.js', 'sensitive.js', 'webshot.js'].map((name) =>
-      fs.copyFile(path.join(ROOT, 'src', name), path.join(fixture, 'src', name))));
-    // R6：识图已挪进 media provider 层（静态 import），同样是漏拷就 “Connection closed” 的依赖。
-    await fs.mkdir(path.join(fixture, 'src', 'qqb', 'media'), { recursive: true });
-    // 2026-10-23：qq_read_page 静态 import 了 read-login-watch.mjs（连续读到登录墙 → 桥接提醒主人）。
-    // 第三次踩同一个坑了：**mcp-snowluma-safe.js 新增静态 import 就必须来这份清单里加一行**，
-    // 否则子进程 ENOENT 退出，客户端只看到 “Connection closed”。
-    await fs.copyFile(path.join(ROOT, 'src', 'qqb', 'read-login-watch.mjs'), path.join(fixture, 'src', 'qqb', 'read-login-watch.mjs'));
-    // r5 起 providers.mjs 静态 import 了缩图模块 resize.mjs（去掉长边 >1280 的图，避开 Ollama 复读中断），
-    // 漏拷同样会让子进程 ENOENT 退出。
-    await Promise.all(['providers.mjs', 'resize.mjs'].map((name) =>
-      fs.copyFile(path.join(ROOT, 'src', 'qqb', 'media', name), path.join(fixture, 'src', 'qqb', 'media', name))));
+    // 2026-10-29：不再手工维护「要拷哪些静态依赖」的清单 —— 已经第三次因为漏拷一个
+    // 静态 import 让子进程 ENOENT 退出，客户端只看到 "Connection closed"，排查成本极高。
+    // 直接把整个 src/ 拷进夹具：多拷几 KB 换来永远不会再漏。
+    await fs.cp(path.join(ROOT, 'src'), path.join(fixture, 'src'), { recursive: true });
     await fs.writeFile(path.join(fixture, 'config.json'), JSON.stringify({ consolePort: api.address().port }));
     const transport = new StdioClientTransport({
       command: process.execPath,

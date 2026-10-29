@@ -12,6 +12,7 @@
 //       （预留能力的错误带 `code = 'MEDIA_NOT_SUPPORTED'` 与 `capability`）。
 
 import { normalizeImageForVision, DEFAULT_MAX_SIDE } from './resize.mjs';
+import { sharedKeyResolver } from '../model/client.mjs';
 
 export const VERSION = '0.1.0';
 
@@ -91,9 +92,133 @@ export function generateOptionsOf(v = {}, { retry = false } = {}) {
 /** 媒体层配置：目前只有一个「默认 provider 是谁」。 */
 export function mediaConfigOf(cfg) {
   const m = cfg && typeof cfg.media === 'object' && cfg.media ? cfg.media : {};
+  const v = cfg && typeof cfg.vision === 'object' && cfg.vision ? cfg.vision : {};
+  // 2026-10-29：加了云端视觉之后，默认 provider 也可以写在 vision.provider 上
+  // （原来只能写 media.defaultProvider —— 而那份配置根本不存在，于是永远是 ollama）。
   return {
-    defaultProvider: String(m.defaultProvider || 'ollama')
+    defaultProvider: String(m.defaultProvider || v.provider || 'ollama')
   };
+}
+
+/**
+ * 云端视觉（OpenAI 兼容的 chat/completions + image_url）。
+ *
+ * 为什么要有它：本机 Ollama 的模型文件坏了/重下不动（2026-10-29：qwen2.5vl:3b
+ * 对纯文本都只吐 `88888888…`，重下时 R2 的 blob 域名整段连不通），而她「看图」
+ * 是每天都用的能力。云端这条路只需要一个 key —— 主链路的百炼 key 本来就在。
+ *
+ * 配置（config.json 的 vision 段）：
+ *   provider: 'openai'
+ *   chat: { baseUrl, model, apiKey, apiKeyEnv: [...] }
+ * key 的解析顺序与主模型一致：vision.chat.apiKey → 环境变量 → 凭据文件同名键。
+ */
+export function createOpenAIProvider({ config, fetchImpl = fetch, logger = null, resolver = sharedKeyResolver, env = process.env } = {}) {
+  const vision = () => visionConfigOf(config);
+  const API_KEY_ENVS = ['BAILIAN_API_KEY', 'DEEPSEEK_API_KEY'];
+
+  function chatConfig() {
+    const v = config && typeof config.vision === 'object' && config.vision ? config.vision : {};
+    const c = v.chat && typeof v.chat === 'object' ? v.chat : {};
+    const m = config && typeof config.model === 'object' && config.model ? config.model : {};
+    const names = Array.isArray(c.apiKeyEnv) && c.apiKeyEnv.length
+      ? c.apiKeyEnv.map(String)
+      : (Array.isArray(m.apiKeyEnv) && m.apiKeyEnv.length ? m.apiKeyEnv.map(String) : API_KEY_ENVS);
+    let apiKey = typeof c.apiKey === 'string' ? c.apiKey.trim() : '';
+    let keyFrom = apiKey ? 'vision.chat.apiKey' : '';
+    if (!apiKey) {
+      for (const name of names) {
+        const value = env?.[name];
+        if (typeof value === 'string' && value.trim()) { apiKey = value.trim(); keyFrom = `env.${name}`; break; }
+      }
+    }
+    if (!apiKey && resolver) {
+      const got = resolver.resolve(names, typeof c.apiKeyFile === 'string' && c.apiKeyFile.trim() ? c.apiKeyFile.trim() : resolver.file);
+      apiKey = got?.apiKey || '';
+      keyFrom = apiKey ? got.keyFrom : '';
+    }
+    return {
+      baseUrl: String(c.baseUrl || 'https://dashscope.aliyuncs.com/compatible-mode/v1').replace(/\/+$/, ''),
+      model: String(c.model || v.model || 'qwen3-vl-plus'),
+      apiKey,
+      keyFrom
+    };
+  }
+
+  function contentText(content) {
+    if (typeof content === 'string') return content;
+    if (Array.isArray(content)) {
+      // 百炼有时把答案拆成多段（text / output_text），拼起来。
+      return content.map((part) => (typeof part === 'string' ? part : part?.text ?? '')).join('').trim();
+    }
+    return '';
+  }
+
+  return defineProvider({
+    name: 'openai',
+    version: VERSION,
+    note: '云端 OpenAI 兼容视觉（默认百炼 qwen3-vl-plus），图片会发到云端',
+    capabilities: { describe: true },
+    async describe({ image, mode = 'describe', focus = '', timeoutMs }) {
+      const v = vision();
+      if (!v.enabled) throw new Error('视觉未启用（config.json 里 vision.enabled=false）');
+      if (!image) throw new Error('没有拿到图片数据');
+      const c = chatConfig();
+      if (!c.apiKey) throw new Error(`没有可用的视觉 API key（找过 ${c.keyFrom || API_KEY_ENVS.join(' / ')}）`);
+      const prompt = `${PROMPTS[mode] || PROMPTS.describe}${focus ? `\n补充关注点：${focus}` : ''}`;
+      const budget = Math.max(3000, Number(timeoutMs) || v.timeoutMs);
+      // 云端模型对尺寸不敏感，但仍然缩一下：省 token、也避开超大图被拒。
+      const prepared = normalizeImageForVision(image, { maxSide: Math.max(v.maxSide, 1280) });
+      if (prepared.note) logger?.info?.('视觉输入预处理', prepared.note);
+      const MIME = { png: 'image/png', jpeg: 'image/jpeg', jpg: 'image/jpeg', webp: 'image/webp', gif: 'image/gif' };
+      const mime = MIME[String(prepared.format || '').toLowerCase()] || 'image/jpeg';
+      const body = {
+        model: c.model,
+        messages: [
+          {
+            role: 'user',
+            content: [
+              { type: 'text', text: prompt },
+              { type: 'image_url', image_url: { url: `data:${mime};base64,${prepared.base64}` } }
+            ]
+          }
+        ],
+        temperature: 0.1,
+        max_tokens: Math.max(256, Number(v.numPredict) || 2048)
+      };
+      let res;
+      try {
+        res = await fetchImpl(`${c.baseUrl}/chat/completions`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json', authorization: `Bearer ${c.apiKey}` },
+          body: JSON.stringify(body),
+          signal: AbortSignal.timeout(budget)
+        });
+      } catch (error) {
+        logger?.warn?.('云端视觉请求失败', `${c.baseUrl} ${error?.message ?? error}`);
+        throw new Error(`连接云端视觉失败（${c.baseUrl}）：${error?.message ?? error}`);
+      }
+      const payload = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        const detail = payload?.error?.message || payload?.message || res.status;
+        throw new Error(`云端视觉调用失败：${detail}（模型 ${c.model}）`);
+      }
+      const text = contentText(payload?.choices?.[0]?.message?.content).trim();
+      if (!text) throw new Error('云端视觉返回了空结果');
+      return {
+        text,
+        model: c.model,
+        raw: payload,
+        options: { temperature: 0.1, max_tokens: body.max_tokens },
+        image: {
+          width: prepared.width,
+          height: prepared.height,
+          resized: prepared.resized,
+          note: prepared.note,
+          format: prepared.format
+        }
+      };
+    }
+  });
 }
 
 /**
@@ -209,7 +334,10 @@ export function createMediaRegistry({ config, logger = null, fetchImpl = fetch, 
     cfg = nextCfg ?? cfg;
     list = new Map();
     defaultName = mediaConfigOf(cfg).defaultProvider;
-    const seeded = providers ?? [createOllamaProvider({ config: cfg, fetchImpl, logger })];
+    const seeded = providers ?? [
+      createOpenAIProvider({ config: cfg, fetchImpl, logger }),
+      createOllamaProvider({ config: cfg, fetchImpl, logger })
+    ];
     for (const p of seeded) register(p);
     if (!list.has(defaultName)) defaultName = [...list.keys()][0] ?? '';
   }

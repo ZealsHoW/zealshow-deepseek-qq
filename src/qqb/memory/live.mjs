@@ -223,7 +223,7 @@ export function createLiveMemory({
      * 召回那边默认把 L2 排除掉了（`includeOriginals` 才看得见），所以不怕多。
      * 同一句重复发按 hash 合并，桥接重放同一段时间不会把库撑爆。
      */
-    recordOriginal({ key, role = 'user', text, at = null } = {}) {
+    recordOriginal({ key, role = 'user', text, at = null, subject = null } = {}) {
       return guard('recordOriginal', () => {
         const st = open();
         if (!st) return null;
@@ -237,13 +237,16 @@ export function createLiveMemory({
           scope: canonicalScope(key),
           kind: 'message',
           memLevel: 'L2',
-          subject: who,
+          // 回填历史时能把「谁说的」带上（群里的 🍇、私聊里的爸爸），面板才看得懂。
+          subject: String(subject ?? '').trim() || who,
           text: body.slice(0, 500),
           emotion: emotionFromText(body),
           // 原文的重要度压到最低：它只在巩固时被读，永远不该靠权重挤进提示词。
           importance: 0.2,
           confidence: 0.9,
           source: 'origin-log',
+          // 回填历史时把原始时间带进库里，时间轴才不是「全都发生在此刻」。
+          at: Number(at) || null,
           meta: { role: String(role ?? ''), at: Number(at) || null },
         });
       }, null);

@@ -60,7 +60,7 @@ console.log('L2 原文底账与上下文折叠：');
   const store = read('src/qqb/memory/store.mjs');
   ok('召回默认排除 L2 原文', store.includes("(mem_level IS NULL OR mem_level <> 'L2')") && store.includes('includeOriginals'));
   const live = read('src/qqb/memory/live.mjs');
-  ok('live 有 recordOriginal（L2 写入）', /recordOriginal\(\{ key, role = 'user', text, at = null \}/.test(live) && live.includes("memLevel: 'L2'"));
+  ok('live 有 recordOriginal（L2 写入）', /recordOriginal\(\{ key, role = 'user', text, at = null/.test(live) && live.includes("memLevel: 'L2'"));
   ok('太短的原文不记', live.includes('if (body.length < 4) return null;'));
   const bridge = read('src/bridge.js');
   ok('收消息时记原文', bridge.includes('liveMemory.recordOriginal?.({ key, role: \'user\''));

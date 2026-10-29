@@ -5,6 +5,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
+import { DatabaseSync } from 'node:sqlite';
 
 import { VERSION, canonicalScope, createLiveMemory, layerForKey, layersForSession } from '../src/qqb/memory/live.mjs';
 
@@ -175,4 +176,33 @@ test('L2 原文底账：recordOriginal 写得进、召回默认看不见、显�
   const recent = mem.recall({ key, query: '', limit: 20 });
   assert.ok(!recent.some((row) => row.kind === 'message'), '不带关键词的召回也不该吐原文');
   mem.close();
+});
+test('L2 回填：可以指定原始时间与说话人，时间轴不会全挤在「现在」', () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'qqb-origin-at-'));
+  const mem = createLiveMemory({ root: tmp, ownerQQOf: () => '3482501440' });
+  const key = 'group:851489980';
+  const at = Date.parse('2026-10-19T13:04:58+08:00');
+
+  const r = mem.recordOriginal({ key, role: 'user', text: '这是我们最早的一句话', at, subject: '🍇' });
+  assert.equal(r.action, 'inserted');
+
+  mem.recordOriginal({ key, role: 'user', text: '这是一句没有时间戳的话' });
+  mem.recordOriginal({ key, role: 'user', text: '时间参数是垃圾也要能记', at: 'not-a-number' });
+  mem.close();
+
+  // recall 的行里不带 created_at（读侧裁剪过），验收直接翻库最可靠。
+  const db = new DatabaseSync(path.join(tmp, 'state', 'memory.db'));
+  const pick = (needle) => db.prepare('SELECT kind, mem_level, subject, created_at FROM memories WHERE text = ?').get(needle);
+  const first = pick('这是我们最早的一句话');
+  assert.equal(first.kind, 'message');
+  assert.equal(first.mem_level, 'L2');
+  assert.equal(first.subject, '🍇');
+  assert.equal(first.created_at, at, '回填要写进原始时间');
+
+  const later = pick('这是一句没有时间戳的话');
+  assert.ok(later.created_at > Date.now() - 60000, '缺时间回落当前时间');
+
+  const broken = pick('时间参数是垃圾也要能记');
+  assert.ok(broken.created_at > Date.now() - 60000, '垃圾时间也要回落当前时间');
+  db.close();
 });

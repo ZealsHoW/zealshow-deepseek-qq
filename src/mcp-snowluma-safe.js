@@ -1515,7 +1515,18 @@ function getVisionConfig() {
 
 async function callLocalVision(imageBase64, mode = 'describe', focus = '') {
   const result = await getMedia().describeImage({ image: imageBase64, mode, focus });
-  return result.text;
+  // 2026-10-29：本机模型坏了之后，「是谁识的图」必须一眼看得出来 —— 之前抬头统一写
+  // config.vision.model，云端接管时仍然显示 qwen2.5vl:3b，排障时会误判成「本地修好了」。
+  return { text: result.text, provider: result.provider || '', model: result.model || '' };
+}
+
+/** 识图结果的抬头：「文件名｜provider·模型」。 */
+function visionHeader(label) {
+  const via = (() => { try { return getMedia().defaultName(); } catch { return ''; } })();
+  const chatModel = (() => { try { return getConfig()?.vision?.chat?.model || ''; } catch { return ''; } })();
+  const localModel = (() => { try { return getVisionConfig().model || ''; } catch { return ''; } })();
+  const shown = via === 'ollama' ? localModel : (chatModel || localModel);
+  return `【${label}｜${via || 'vision'}${shown ? `·${shown}` : ''}】`;
 }
 
 async function fetchImageBytesFromUrl(url, maxBytes) {
@@ -1680,8 +1691,8 @@ if (cfg.socialV2?.tools?.getImages !== false) {
         let failed = 0;
         for (const img of images) {
           try {
-            const text = await callLocalVision(img.data, mode, focus);
-            parts.push(`【${img.label}｜${getVisionConfig().model}】\n${text}`);
+            const vision = await callLocalVision(img.data, mode, focus);
+            parts.push(`${visionHeader(img.label)}\n${vision.text}`);
           } catch (error) {
             failed++;
             parts.push(`【${img.label}】识别失败：${error?.message ?? error}`);

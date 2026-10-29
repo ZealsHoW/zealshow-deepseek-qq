@@ -657,7 +657,10 @@ export function openStore(options = {}) {
     const text = raw.length > MAX_TEXT ? raw.slice(0, MAX_TEXT) : raw;
     const norm = normalizeText(text);
     const hash = hashOf(layer, scope, kind, norm);
-    const ts = nowMs(now);
+    // 允许调用方指定时间（回填历史时用）：非法值一律回落当前时间，
+    // 免得把整库的 created_at 写成 1970 —— 时间轴面板靠这个字段排序。
+    const askedAt = Number(entry.at);
+    const ts = Number.isFinite(askedAt) && askedAt > 0 ? Math.floor(askedAt) : nowMs(now);
     // 情绪强度决定「这条事在心里有多重」：写入时由调用方给（桥接拿当前心情 + 文本信号估），
     // 没给就是平静。它只影响遗忘曲线的 S 和有效重要度，不影响准入。
     const emotion = clamp01(entry.emotion, 0);

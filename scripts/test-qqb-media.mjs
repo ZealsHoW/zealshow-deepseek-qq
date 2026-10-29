@@ -13,6 +13,7 @@ import {
   generateOptionsOf,
   defineProvider,
   createOllamaProvider,
+  createOpenAIProvider,
   createMediaRegistry
 } from '../src/qqb/media/providers.mjs';
 import {
@@ -128,10 +129,11 @@ test('Ollama provider：四类失败都给得出人话（未启用 / 连不上 /
 test('注册表：默认 provider、未知 provider、能力表与统计', async () => {
   const fetchImpl = fakeFetch(jsonResponse({ response: '看图结果' }));
   const registry = createMediaRegistry({ config: CFG, fetchImpl });
-  assert.deepEqual(registry.names(), ['ollama']);
+  // 2026-10-29 起注册表里默认就有两家：云端 openai + 本机 ollama（默认仍是配置里指定的那个）。
+  assert.deepEqual(registry.names(), ['openai', 'ollama']);
   assert.equal(registry.defaultName(), 'ollama');
   const caps = registry.capabilities();
-  assert.deepEqual(caps.capabilities.describe, ['ollama']);
+  assert.deepEqual(caps.capabilities.describe, ['openai', 'ollama']);
   assert.deepEqual(caps.capabilities.image2image, [], '预留能力此刻没有实现者');
   assert.deepEqual(caps.reserved, RESERVED);
 
@@ -351,4 +353,88 @@ test('Ollama provider：大图在发送前自动缩小（避免 token repeat lim
   const sent = imageSize(Buffer.from(ff.calls[0].body.images[0], 'base64'));
   assert.equal(sent.width, 1280);
   assert.equal(sent.height, 960);
+});
+
+// ---- 云端视觉（2026-10-29）：本机 qwen2.5vl 模型文件坏了之后的第二条路 ----
+
+const CLOUD_CFG = {
+  vision: {
+    enabled: true,
+    provider: 'openai',
+    baseUrl: 'http://127.0.0.1:11434',
+    model: 'qwen2.5vl:3b',
+    maxSide: DEFAULT_MAX_SIDE,
+    chat: { baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1', model: 'qwen3-vl-plus', apiKey: 'sk-test' }
+  }
+};
+
+function tinyPng() {
+  const png = new PNG({ width: 8, height: 8 });
+  for (let i = 0; i < png.data.length; i += 4) { png.data[i] = 200; png.data[i + 1] = 40; png.data[i + 2] = 40; png.data[i + 3] = 255; }
+  return PNG.sync.write(png).toString('base64');
+}
+
+test('默认 provider 可以写在 vision.provider 上（不再只认 media.defaultProvider）', () => {
+  assert.equal(mediaConfigOf(CLOUD_CFG).defaultProvider, 'openai');
+  assert.equal(mediaConfigOf({ vision: { provider: 'x' } }).defaultProvider, 'x');
+  assert.equal(mediaConfigOf({}).defaultProvider, 'ollama', '两个都没写时仍然是本机');
+  assert.equal(mediaConfigOf({ media: { defaultProvider: 'a' }, vision: { provider: 'b' } }).defaultProvider, 'a', 'media 优先');
+});
+
+test('云端 provider：走 chat/completions + image_url，能解析出文字', async () => {
+  const fetchImpl = fakeFetch({
+    ok: true,
+    status: 200,
+    json: async () => ({ choices: [{ message: { content: '这是一张红色方块。' } }] })
+  });
+  const provider = createOpenAIProvider({ config: CLOUD_CFG, fetchImpl });
+  const out = await provider.describe({ image: tinyPng(), mode: 'both' });
+
+  const call = fetchImpl.calls[0];
+  assert.match(call.url, /\/chat\/completions$/);
+  assert.equal(call.opts.headers.authorization, 'Bearer sk-test');
+  assert.equal(call.body.model, 'qwen3-vl-plus');
+  const parts = call.body.messages[0].content;
+  assert.equal(parts[0].type, 'text');
+  assert.match(parts[0].text, /逐字转录/, 'both 模式用 both 提示词');
+  assert.equal(parts[1].type, 'image_url');
+  assert.match(parts[1].image_url.url, /^data:image\/png;base64,/);
+  assert.equal(out.text, '这是一张红色方块。');
+  assert.equal(out.model, 'qwen3-vl-plus');
+});
+
+test('云端 provider：没有 key 时明确报错，不说「看不清」', async () => {
+const noKey = { vision: { ...CLOUD_CFG.vision, chat: { ...CLOUD_CFG.vision.chat, apiKey: '', apiKeyEnv: ['NOT_SET_ANYWHERE'] } } };
+  const provider = createOpenAIProvider({ config: noKey, fetchImpl: fakeFetch({ ok: true }), env: {}, resolver: null });
+  await assert.rejects(() => provider.describe({ image: tinyPng() }), /没有可用的视觉 API key/);
+});
+
+test('云端 provider：接口报错翻成人话，HTTP 200 但空结果也算失败', async () => {
+  const denied = createOpenAIProvider({
+    config: CLOUD_CFG,
+    fetchImpl: fakeFetch({ ok: false, status: 403, json: async () => ({ error: { message: 'Access denied.' } }) })
+  });
+  await assert.rejects(() => denied.describe({ image: tinyPng() }), /云端视觉调用失败：Access denied\./);
+
+  const empty = createOpenAIProvider({
+    config: CLOUD_CFG,
+    fetchImpl: fakeFetch({ ok: true, status: 200, json: async () => ({ choices: [{ message: { content: '' } }] }) })
+  });
+  await assert.rejects(() => empty.describe({ image: tinyPng() }), /空结果/);
+});
+
+test('云端 provider：注册表里能被选为默认，调用点不用改', async () => {
+  const fetchImpl = fakeFetch({
+    ok: true,
+    status: 200,
+    json: async () => ({ choices: [{ message: { content: '（图片里是一行字）' } }] })
+  });
+  const cloud = createOpenAIProvider({ config: CLOUD_CFG, fetchImpl });
+  const registry = createMediaRegistry({ config: CLOUD_CFG, fetchImpl, providers: [cloud] });
+  assert.equal(registry.defaultName(), 'openai');
+  const out = await registry.describeImage({ image: tinyPng(), mode: 'ocr' });
+  assert.equal(out.ok, true);
+  assert.equal(out.provider, 'openai');
+  assert.equal(out.text, '（图片里是一行字）');
+  assert.match(fetchImpl.calls[0].body.messages[0].content[0].text, /只做一件事/);
 });
