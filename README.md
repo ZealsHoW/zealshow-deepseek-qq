@@ -1245,6 +1245,23 @@ qq_generate_image(prompt="1girl, chibi, blue hair, holding a big fish, surprised
 
 **回归**：`node scripts/test-qqb-annotate.mjs`（25 项：样式归一、HTML 转义、压缩口径、画完先叠字再发的接线）。手工出图可以直接 `node _comfy/annotate.mjs --image <png> --text "…" --style bubble`（本地 Chrome 版，另有 `_comfy/annotate.py` 纯 PIL 版备用）。
 
+### 颜色太淡：默认怎么「压深」（2026-10-29）
+
+主人一句「颜色变淡了，要深一点」之后，画的图默认走一套提色口径，三件事一起做：
+
+| 环节 | 做法 | 参数 |
+| --- | --- | --- |
+| 提示词 | 末尾补 `vivid colors, saturated colors, rich color, deep blue, strong contrast`（她已经写过的 tag 不重复加） | `withVivid()`，`COLOR_SUFFIX` |
+| 负向词 | 在原负向串后追加 `washed out, pale, pastel, low saturation, faded, flat colors, overexposed, low contrast` | `mergeDullNegative()`，`DULL_NEGATIVE` |
+| 采样 | 风格表 cfg +0.8（6.5 → 7.3） | `DEFAULT_CFG_BOOST` |
+| 出图后 | ffmpeg `eq=saturation=1.12:contrast=1.04` 直接重写原图 | `DEFAULT_SATURATION = 1.12` |
+
+**怎么调**：`socialV2.image = { vivid: false }` 回到原来的淡图；`saturation: 1.25` 更深（主人看的两张样片就是 1.12 与 1.25）；`cfg: 7.8` 单独调采样。改了 config 要重启桥接。
+
+**踩过的坑**：`clamp()` 里有 `Math.round()`，`1.12` 会被圆成 `1`、`7.3` 圆成 `7`——第一版提色完全不生效，就是因为饱和度参数被取整成了 1（等于不提色）。颜色/采样这种小数量必须走 `clampFloat()`。
+
+**回归**：`node scripts/test-qqb-color.mjs`（12 项：标签补充/去重、负向词合并、浮点 clamp、提色失败只记日志、config 透传）。
+
 ### 登录态（给抖音一个常驻账号）
 
 识别和读网页共用同一个持久化浏览器 profile（`state/browser-profile`），所以**扫码登录一次，之后无头读取一直带着登录态**：

@@ -10,6 +10,8 @@
 //   - 2026-10-29 起支持挂 LoRA（她自己的 SDXL LoRA：`xiaojing_sdxl_lora.safetensors`）。
 //     上游 generate() 的图里没有 LoraLoader，所以挂 LoRA 的那条路在这里自己组装图，
 //     但「提交 / 轮询 / 取图 / 落盘」仍用同一套口径，避免两套行为。
+import { execFileSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import fs from 'node:fs';
 import path from 'node:path';
 import {
@@ -23,7 +25,7 @@ import {
   styleKey,
 } from '../../../dsh/qq-extras-patch/lib/comfy.mjs';
 
-export const VERSION = '0.2.0';
+export const VERSION = '0.3.0';
 
 /** 默认画风：二次元（她的人设就是蓝白鲸鱼娘，动漫风最贴）。 */
 export const DEFAULT_STYLE = 'anime';
@@ -39,6 +41,80 @@ export const DEFAULT_LORA = 'xiaojing_sdxl_lora.safetensors';
 export const DEFAULT_TRIGGER = 'xiaojing';
 /** LoRA 权重：0.8 是有她没有训糊的平衡点（1.0 会生硬地往训练图的构图靠）。 */
 export const DEFAULT_LORA_WEIGHT = 0.8;
+/**
+ * 颜色口径（2026-10-29 主人反馈「颜色变淡了，要深一点」）。
+ * Animagine 出了一版偏灰的图 + 训练集大量白底浅色调，光靠 prompt 压不住，
+ * 所以默认做两件事：①提示词末尾补鲜艳标签、负向词里压掉发灰的描述；②出图后
+ * 用 ffmpeg 轻微提饱和度/对比度（1.12 是「看得出更深、又不假」的位置）。
+ * 想回到原来的淡图：draw({ vivid: false, saturation: 1 })。
+ */
+export const COLOR_SUFFIX = 'vivid colors, saturated colors, rich color, deep blue, strong contrast';
+/** 压发灰：这些词会让模型主动往淡里画。 */
+export const DULL_NEGATIVE = 'washed out, pale, pastel, low saturation, faded, flat colors, overexposed, low contrast';
+/** 默认后处理强度：1 = 不动，>1 更浓。 */
+export const DEFAULT_SATURATION = 1.12;
+/** cfg 相对风格表的抬升量：6.5 → 7.3，颜色更实但没到过曝。 */
+export const DEFAULT_CFG_BOOST = 0.8;
+
+/** 提示词去重地补上鲜艳标签（她本来就写了 vivid/saturated 就不重复）。 */
+export function withVivid(prompt, suffix = COLOR_SUFFIX) {
+  const text = String(prompt ?? '').trim();
+  if (!text) return text;
+  const low = text.toLowerCase();
+  const missing = String(suffix || '')
+    .split(',')
+    .map((x) => x.trim())
+    .filter(Boolean)
+    .filter((tag) => !low.includes(tag.toLowerCase().split(' ')[0]));
+  return missing.length ? `${text}, ${missing.join(', ')}` : text;
+}
+
+/** 负向词去重合并：底色仍是风格表那串，只在末尾补「压发灰」。 */
+export function mergeDullNegative(negative, dull = DULL_NEGATIVE) {
+  const base = String(negative ?? '').trim();
+  const low = base.toLowerCase();
+  const add = String(dull || '')
+    .split(',')
+    .map((x) => x.trim())
+    .filter(Boolean)
+    .filter((tag) => !low.includes(tag.toLowerCase()));
+  return add.length ? `${base ? `${base}, ` : ''}${add.join(', ')}` : base;
+}
+
+/** 找 ffmpeg（随包的 _gptsovits 里有，PATH 里没有）。 */
+function findFfmpeg() {
+  const base = path.dirname(fileURLToPath(import.meta.url));
+  return [
+    path.resolve(base, '..', '..', '..', '..', '_gptsovits', 'ffmpeg', 'ffmpeg-master-latest-win64-gpl-shared', 'bin', 'ffmpeg.exe'),
+    path.resolve(base, '..', '..', '..', '_gptsovits', 'ffmpeg', 'ffmpeg-master-latest-win64-gpl-shared', 'bin', 'ffmpeg.exe'),
+    'ffmpeg'
+  ].find((p) => p === 'ffmpeg' || fs.existsSync(p)) || null;
+}
+
+/**
+ * 出图后提色：直接在原文件上重写（先写同目录临时文件再改名，避免半张图）。
+ * 失败不致命 —— 颜色淡一点也比发不出去强，所以只记日志。
+ */
+function recolor(file, saturation, contrast = 1.04) {
+  if (!(saturation > 1.001)) return false;
+  const ffmpeg = findFfmpeg();
+  if (!ffmpeg) {
+    loggerWarn('画图：找不到 ffmpeg，跳过提色');
+    return false;
+  }
+  const tmp = `${file}.sat.png`;
+  try {
+    execFileSync(ffmpeg, ['-y', '-loglevel', 'error', '-i', file, '-vf', `eq=saturation=${saturation.toFixed(2)}:contrast=${contrast.toFixed(2)}`, tmp], { timeout: 60_000 });
+    fs.renameSync(tmp, file);
+    return true;
+  } catch (error) {
+    try { fs.rmSync(tmp, { force: true }); } catch { /* 清理失败无所谓 */ }
+    loggerWarn('画图：提色失败，发原图', error?.message ?? String(error));
+    return false;
+  }
+}
+
+let loggerWarn = (message) => console.warn(message);
 
 /** 给提示词/工具描述用：一行一个风格的说明。 */
 export function styleLines() {
@@ -61,6 +137,13 @@ export function withTrigger(prompt, trigger = DEFAULT_TRIGGER) {
   const tag = String(trigger ?? '').trim();
   if (!tag) return text;
   return new RegExp(`(^|[,\\s])${tag}([,\\s]|$)`, 'i').test(text) ? text : `${tag}, ${text}`;
+}
+
+/** 和 clamp 一样，但不取整：饱和度 1.12 / cfg 7.3 这种必须保留小数（clamp 会圆成 1 和 7）。 */
+function clampFloat(value, min, max, fallback) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.min(max, Math.max(min, n));
 }
 
 function clamp(value, min, max, fallback) {
@@ -91,6 +174,8 @@ function looksLikeImage(buffer) {
 export function createComfyClient({ outDir = null, baseUrl = comfyUrl(), timeoutMs = DEFAULT_TIMEOUT_MS, logger = null } = {}) {
   const url = String(baseUrl || DEFAULT_COMFY_URL).replace(/\/+$/, '');
   const budget = Math.max(10_000, Number(timeoutMs) || DEFAULT_TIMEOUT_MS);
+  // 提色/压缩这类「顺带做的事」失败只该记日志，不该把这张图搞没。
+  loggerWarn = (message, detail) => logger?.warn?.(message, detail);
 
   /** ComfyUI 里现有哪些 LoRA（读 LoraLoader 的枚举；服务没起就返回空）。 */
   async function knownLoras({ timeoutMs: probeMs = 5000 } = {}) {
@@ -132,7 +217,7 @@ export function createComfyClient({ outDir = null, baseUrl = comfyUrl(), timeout
   }
 
   /** 挂 LoRA 的那条路：自己组图（CheckpointLoader → LoraLoader → 两个 CLIPTextEncode → KSampler → VAE）。 */
-  async function drawWithLora({ prompt, style, aspect, seed, steps, width, height, negative, prefix, lora, loraWeight, trigger }) {
+  async function drawWithLora({ prompt, style, aspect, seed, steps, cfg, width, height, negative, prefix, lora, loraWeight, trigger }) {
     const key = normalizeStyle(style);
     const spec = STYLE_TABLE[key];
     const name = String(lora).trim();
@@ -155,7 +240,8 @@ export function createComfyClient({ outDir = null, baseUrl = comfyUrl(), timeout
     const size = pickSizeFor(spec, aspect, width, height);
     const realSeed = Number.isFinite(Number(seed)) ? Math.round(Number(seed)) : Math.floor(Math.random() * 2 ** 31);
     const realSteps = clamp(steps, 1, 60, spec.steps);
-    const realCfg = clamp(spec.cfg, 1, 20, spec.cfg);
+    // 2026-10-29 前的 bug：这里写死成 spec.cfg，调用方传的 cfg 从来没生效过。
+    const realCfg = clampFloat(cfg, 1, 20, spec.cfg);
     const text = withTrigger(prompt, trigger);
     const graph = {
       1: { class_type: 'CheckpointLoaderSimple', inputs: { ckpt_name: spec.preferred } },
@@ -247,16 +333,26 @@ export function createComfyClient({ outDir = null, baseUrl = comfyUrl(), timeout
   async function draw({
     prompt, style = DEFAULT_STYLE, aspect = DEFAULT_ASPECT, seed, steps, width, height, negative,
     prefix = 'qq-draw', lora = DEFAULT_LORA, loraWeight = DEFAULT_LORA_WEIGHT, trigger = DEFAULT_TRIGGER,
+    vivid = true, saturation = DEFAULT_SATURATION, cfg,
   } = {}) {
     const text = String(prompt ?? '').trim();
     if (!text) throw new Error('prompt 不能为空（英文 Danbooru 标签或英文描述效果最好）');
+    const key = normalizeStyle(style);
+    const spec = STYLE_TABLE[key];
+    // 颜色口径：默认补鲜艳标签 + 压发灰 + 抬 cfg；vivid:false 就原样。
+    const wantVivid = vivid !== false;
+    const finalPrompt = wantVivid ? withVivid(text) : text;
+    const finalNegative = wantVivid ? mergeDullNegative(negative ?? spec.negative) : negative;
+    const realCfg = clampFloat(cfg, 1, 20, spec.cfg + (wantVivid ? DEFAULT_CFG_BOOST : 0));
+    const realSat = clampFloat(saturation, 1, 2, wantVivid ? DEFAULT_SATURATION : 1);
     const result = lora
-      ? await drawWithLora({ prompt: text, style, aspect, seed, steps, width, height, negative, prefix, lora, loraWeight, trigger })
+      ? await drawWithLora({ prompt: finalPrompt, style: key, aspect, seed, steps, cfg: realCfg, width, height, negative: finalNegative, prefix, lora, loraWeight, trigger })
       : await generate({
-        prompt: text,
-        style: normalizeStyle(style),
+        prompt: finalPrompt,
+        style: key,
         aspect: String(aspect || DEFAULT_ASPECT),
-        negative,
+        negative: finalNegative,
+        cfg: realCfg,
         width,
         height,
         steps,
@@ -267,6 +363,12 @@ export function createComfyClient({ outDir = null, baseUrl = comfyUrl(), timeout
         prefix,
         filenamePrefix: prefix,
       });
+    // 出图后提色（同一次调用里做掉，调用方不用管）
+    if (result?.file && realSat > 1.001) {
+      result.saturation = realSat;
+      result.recolored = recolor(result.file, realSat);
+      try { result.bytes = fs.statSync(result.file).size; } catch { /* 取不到大小不影响发图 */ }
+    }
     const rel = outDir && result.file ? path.basename(result.file) : null;
     logger?.warn?.(`[comfy] 画好了 ${result.file}（${result.width}×${result.height}，${result.elapsedMs}ms，seed=${result.seed}${result.lora ? `，LoRA ${result.lora}@${result.loraWeight}` : ''}）`);
     return { ...result, rel, url };

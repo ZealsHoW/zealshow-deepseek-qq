@@ -12,8 +12,12 @@ import {
   DEFAULT_TRIGGER,
   VERSION,
   createComfyClient,
+  DEFAULT_CFG_BOOST,
+  DEFAULT_SATURATION,
+  mergeDullNegative,
   normalizeStyle,
   styleLines,
+  withVivid,
 } from '../src/qqb/media/comfy.mjs';
 
 let passed = 0;

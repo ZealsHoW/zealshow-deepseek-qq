@@ -8397,6 +8397,8 @@ async function main() {
         // 后台画一张：响应之后继续跑，所以它绝不能再碰 res / sendJson（结果只写日志 + imageJob）。
         async function runDrawJobInBackground(job) {
           try {
+            // 颜色口径从 config 读（这里和路由不在同一个作用域，不能直接用路由里的 imageCfg）
+            const imageCfg = (cfg?.socialV2?.image && typeof cfg.socialV2.image === 'object') ? cfg.socialV2.image : {};
             const outboxDir = path.join(ROOT, 'state', 'outbox');
             fs.mkdirSync(outboxDir, { recursive: true });
             const info = await comfy.status();
@@ -8411,6 +8413,11 @@ async function main() {
               lora: job.lora ?? '',
               loraWeight: job.loraWeight ?? DEFAULT_LORA_WEIGHT,
               trigger: job.trigger ?? DEFAULT_TRIGGER,
+              // 颜色口径（2026-10-29 主人：颜色变淡了，要深一点）：默认补鲜艳标签 + 提饱和度，
+              // 在 socialV2.image 里能改；vivid:false / saturation:1 就回到原来的淡图。
+              vivid: imageCfg.vivid !== false,
+              saturation: Number(imageCfg.saturation) > 0 ? Number(imageCfg.saturation) : undefined,
+              cfg: Number(imageCfg.cfg) > 0 ? Number(imageCfg.cfg) : undefined,
               prefix: 'qq-draw'
             });
             job.file = path.basename(String(drawn.file));
@@ -8594,6 +8601,8 @@ async function main() {
             style,
             aspect,
             lora: loraName || null,
+            vivid: imageCfg.vivid !== false,
+            saturation: Number(imageCfg.saturation) > 0 ? Number(imageCfg.saturation) : null,
             loraWeight: loraName ? loraWeight : null,
             onImage,
             onImageStyle: onImage.length ? onImageStyle : null,
