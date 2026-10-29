@@ -999,6 +999,9 @@ function ensureEngine() {
     return null;
   }
 }
+/** 由 main() 注入的读历史函数（readHistoryRecords 是 main 内部的闭包）。 */
+let readHistoryForEngine = null;
+
 /**
  * 给直连引擎拼一段最近的原始对话（不折叠，折叠交给 loop 里的 foldHistory）。
  *
@@ -1011,7 +1014,9 @@ function ensureEngine() {
  */
 function engineHistoryV2(key, { limit = 80 } = {}) {
   try {
-    const records = readHistoryRecords(key, { limit });
+    // readHistoryRecords 定义在 main() 里面，模块顶层拿不到 —— 由 main() 注入。
+    if (typeof readHistoryForEngine !== 'function') return [];
+    const records = readHistoryForEngine(key, { limit });
     let lastUser = -1;
     for (let i = records.length - 1; i >= 0; i -= 1) {
       if (records[i] && records[i].self !== true) { lastUser = i; break; }
@@ -8413,10 +8418,12 @@ async function main() {
               lora: job.lora ?? '',
               loraWeight: job.loraWeight ?? DEFAULT_LORA_WEIGHT,
               trigger: job.trigger ?? DEFAULT_TRIGGER,
-              // 颜色口径（2026-10-29 主人：颜色变淡了，要深一点）：默认补鲜艳标签 + 提饱和度，
-              // 在 socialV2.image 里能改；vivid:false / saturation:1 就回到原来的淡图。
-              vivid: imageCfg.vivid !== false,
+              // 颜色口径（2026-10-29 主人最终选定：「身体周围淡淡的，头发深一点」）：
+              // 全局不提饱和（vivid 默认关），只靠 hair-depth.py 把蓝色相（头发）压深。
+              // socialV2.image 里能改：vivid 想艳就开、saturation>1 全局提色、hairDepth 0~2。
+              vivid: imageCfg.vivid === true,
               saturation: Number(imageCfg.saturation) > 0 ? Number(imageCfg.saturation) : undefined,
+              hairDepth: Number(imageCfg.hairDepth) >= 0 ? Number(imageCfg.hairDepth) : undefined,
               cfg: Number(imageCfg.cfg) > 0 ? Number(imageCfg.cfg) : undefined,
               prefix: 'qq-draw'
             });
@@ -8601,7 +8608,7 @@ async function main() {
             style,
             aspect,
             lora: loraName || null,
-            vivid: imageCfg.vivid !== false,
+            vivid: imageCfg.vivid === true,
             saturation: Number(imageCfg.saturation) > 0 ? Number(imageCfg.saturation) : null,
             loraWeight: loraName ? loraWeight : null,
             onImage,
@@ -12117,6 +12124,7 @@ async function main() {
   }
 
   /** 读归档：可选关键词过滤与时间窗，返回按时间升序的记录。 */
+  readHistoryForEngine = readHistoryRecords;
   function readHistoryRecords(key, { q = '', limit = 40, before = 0, after = 0 } = {}) {
     const file = historyFilePath(key);
     const chunks = [];

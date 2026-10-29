@@ -55,6 +55,13 @@ export const DULL_NEGATIVE = 'washed out, pale, pastel, low saturation, faded, f
 export const DEFAULT_SATURATION = 1.12;
 /** cfg 相对风格表的抬升量：6.5 → 7.3，颜色更实但没到过曝。 */
 export const DEFAULT_CFG_BOOST = 0.8;
+/**
+ * 头发专属加深（2026-10-29 主人第二句：「身体周围颜色淡淡的就好，但是头发深一点」）。
+ * 全局提饱和会把皮肤、白衣一起弄艳，所以改成只动「蓝色相」的像素：
+ * `scripts/hair-depth.py` 按 HSV 挑 185°~265° 的蓝、羽化后 S×1.12、V×0.86。
+ * 1 = 默认力度，0 = 关掉，2 = 很浓。
+ */
+export const DEFAULT_HAIR_DEPTH = 1;
 
 /** 提示词去重地补上鲜艳标签（她本来就写了 vivid/saturated 就不重复）。 */
 export function withVivid(prompt, suffix = COLOR_SUFFIX) {
@@ -115,6 +122,41 @@ function recolor(file, saturation, contrast = 1.04) {
 }
 
 let loggerWarn = (message) => console.warn(message);
+
+/** 找能跑 hair-depth.py 的 python（优先 _rvc/env，那里有 numpy + Pillow）。 */
+function findPython() {
+  const base = path.dirname(fileURLToPath(import.meta.url));
+  return [
+    process.env.QQB_PYTHON,
+    path.resolve(base, '..', '..', '..', '..', '_rvc', 'env', 'Scripts', 'python.exe'),
+    path.resolve(base, '..', '..', '..', '_rvc', 'env', 'Scripts', 'python.exe'),
+  ].filter(Boolean).find((p) => p === 'python' || fs.existsSync(p)) || null;
+}
+
+/**
+ * 只把蓝色相（头发）压深：交给 `scripts/hair-depth.py`（numpy + Pillow）。
+ * 找不到 python 或脚本失败都不致命 —— 图照发，只是头发浅一点。
+ */
+function deepenHair(file, depth) {
+  if (!(depth > 0.01)) return false;
+  const python = findPython();
+  if (!python) {
+    loggerWarn('画图：找不到 python，跳过头发加深');
+    return false;
+  }
+  const script = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', '..', 'scripts', 'hair-depth.py');
+  if (!fs.existsSync(script)) {
+    loggerWarn('画图：缺 scripts/hair-depth.py，跳过头发加深');
+    return false;
+  }
+  try {
+    execFileSync(python, [script, file, '--strength', String(Number(depth).toFixed(2))], { timeout: 120_000, stdio: 'ignore' });
+    return true;
+  } catch (error) {
+    loggerWarn('画图：头发加深失败，发原图', error?.message ?? String(error));
+    return false;
+  }
+}
 
 /** 给提示词/工具描述用：一行一个风格的说明。 */
 export function styleLines() {
@@ -333,7 +375,7 @@ export function createComfyClient({ outDir = null, baseUrl = comfyUrl(), timeout
   async function draw({
     prompt, style = DEFAULT_STYLE, aspect = DEFAULT_ASPECT, seed, steps, width, height, negative,
     prefix = 'qq-draw', lora = DEFAULT_LORA, loraWeight = DEFAULT_LORA_WEIGHT, trigger = DEFAULT_TRIGGER,
-    vivid = true, saturation = DEFAULT_SATURATION, cfg,
+    vivid = true, saturation = DEFAULT_SATURATION, cfg, hairDepth = DEFAULT_HAIR_DEPTH,
   } = {}) {
     const text = String(prompt ?? '').trim();
     if (!text) throw new Error('prompt 不能为空（英文 Danbooru 标签或英文描述效果最好）');
@@ -368,6 +410,15 @@ export function createComfyClient({ outDir = null, baseUrl = comfyUrl(), timeout
       result.saturation = realSat;
       result.recolored = recolor(result.file, realSat);
       try { result.bytes = fs.statSync(result.file).size; } catch { /* 取不到大小不影响发图 */ }
+    }
+    // 头发单独压深：只动蓝色相，皮肤/白衣/背景保持淡
+    const realHair = clampFloat(hairDepth, 0, 2, DEFAULT_HAIR_DEPTH);
+    if (result?.file && realHair > 0.01) {
+      result.hairDepth = realHair;
+      result.hairDeepened = deepenHair(result.file, realHair);
+      if (result.hairDeepened) {
+        try { result.bytes = fs.statSync(result.file).size; } catch { /* 同上 */ }
+      }
     }
     const rel = outDir && result.file ? path.basename(result.file) : null;
     logger?.warn?.(`[comfy] 画好了 ${result.file}（${result.width}×${result.height}，${result.elapsedMs}ms，seed=${result.seed}${result.lora ? `，LoRA ${result.lora}@${result.loraWeight}` : ''}）`);

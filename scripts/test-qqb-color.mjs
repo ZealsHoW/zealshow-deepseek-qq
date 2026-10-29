@@ -2,6 +2,7 @@
 import fs from 'node:fs';
 import {
   DEFAULT_CFG_BOOST,
+  DEFAULT_HAIR_DEPTH,
   DEFAULT_SATURATION,
   mergeDullNegative,
   withVivid,
@@ -35,8 +36,17 @@ console.log('颜色口径：');
 
   const bridge = fs.readFileSync(new URL('../src/bridge.js', import.meta.url), 'utf8');
   ok('桥接把 vivid/saturation/cfg 从 config 传下去',
-    bridge.includes('vivid: imageCfg.vivid !== false') && bridge.includes('saturation: Number(imageCfg.saturation) > 0'));
+    bridge.includes('vivid: imageCfg.vivid === true') && bridge.includes('saturation: Number(imageCfg.saturation) > 0'));
   ok('202 回执带颜色口径', bridge.includes('saturation: Number(imageCfg.saturation) > 0 ? Number(imageCfg.saturation) : null,'));
+  // 2026-10-29 晚：主人选「身体淡淡的、头发深一点」⇒ 全局提饱和默认关，改成只动蓝色相
+  ok('默认头发加深力度 1', DEFAULT_HAIR_DEPTH, 1);
+  ok('头发加深：按 HSV 蓝色相挑像素（不碰皮肤和白衣）',
+    src.includes('function deepenHair(') && src.includes('hair-depth.py'));
+  ok('头发加深失败只记日志，不毁图', src.includes('画图：头发加深失败，发原图'));
+  ok('桥接把 hairDepth 从 config 传下去', bridge.includes('hairDepth: Number(imageCfg.hairDepth) >= 0'));
+  ok('配置默认：vivid 关、饱和 1、头发 1',
+    (() => { const c = JSON.parse(fs.readFileSync(new URL('../config.json', import.meta.url), 'utf8')); const i = c.socialV2?.image ?? {}; return i.vivid === false && Number(i.saturation) === 1 && Number(i.hairDepth) === 1; })());
+  ok('加深脚本在仓库里（scripts/hair-depth.py）', fs.existsSync(new URL('./hair-depth.py', import.meta.url)));
 }
 
 console.log(`\n结果：${passed} 通过 / ${failed} 失败`);

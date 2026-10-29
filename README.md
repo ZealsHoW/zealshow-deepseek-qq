@@ -1264,7 +1264,19 @@ qq_generate_image(prompt="1girl, chibi, blue hair, holding a big fish, surprised
 
 **踩过的坑**：`clamp()` 里有 `Math.round()`，`1.12` 会被圆成 `1`、`7.3` 圆成 `7`——第一版提色完全不生效，就是因为饱和度参数被取整成了 1（等于不提色）。颜色/采样这种小数量必须走 `clampFloat()`。
 
-**回归**：`node scripts/test-qqb-color.mjs`（12 项：标签补充/去重、负向词合并、浮点 clamp、提色失败只记日志、config 透传）。
+**回归**：`node scripts/test-qqb-color.mjs`（18 项：标签补充/去重、负向词合并、浮点 clamp、提色失败只记日志、config 透传、头发加深）。
+
+**最终口径（2026-10-29 晚，主人第二句「身体周围颜色淡淡的就好，但是头发深一点」）**
+
+全局提饱和会把皮肤和白衣一起弄艳，所以默认改成**只动头发**：
+
+| 环节 | 做法 |
+| --- | --- |
+| 提示词 | **不再**默认补鲜艳标签（`vivid` 默认关） |
+| 出图后 | 先跑 ffmpeg 提色（`saturation ≤ 1` 就跳过），再跑 `scripts/hair-depth.py` |
+| `hair-depth.py` | HSV 里挑蓝色相 185°~265°、`S>0.22` 的像素做掩膜 → 1/4 缩图上算完再羽化 → `S×1.12`、`V×0.86`；皮肤/白衣/白底都不在掩膜里 |
+
+配置：`socialV2.image = { vivid: false, saturation: 1, hairDepth: 1 }`（`hairDepth` 0 关掉、2 很浓；想整体艳再开 `vivid: true` + `saturation: 1.12`）。脚本靠 `_rvc/env/Scripts/python.exe`（numpy + Pillow）跑，找不到 python 就跳过加深、图照发。
 
 ### 登录态（给抖音一个常驻账号）
 
