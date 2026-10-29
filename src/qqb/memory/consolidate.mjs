@@ -31,6 +31,28 @@ function dayKey(ts) {
 }
 
 /** 从模型输出里捞出第一个 JSON 对象（容忍 ```json 包裹和前后废话）。 */
+/** 给被截断的 JSON 补齐括号：扫一遍，把没闭合的 { [ 按栈补上（字符串里的括号不算）。 */
+function closeBrackets(text) {
+  const stack = [];
+  let inString = false;
+  let escaped = false;
+  for (const ch of text) {
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (ch === '\\') escaped = true;
+      else if (ch === '"') inString = false;
+      continue;
+    }
+    if (ch === '"') inString = true;
+    else if (ch === '{' || ch === '[') stack.push(ch === '{' ? '}' : ']');
+    else if (ch === '}' || ch === ']') stack.pop();
+  }
+  let out = text;
+  if (inString) out += '"';
+  // 结尾停在半截（"sensory": "手机屏 之外的各种悬空）时，砍到最后一个逗号/方括号再补。
+  return out + stack.reverse().join('');
+}
+
 export function extractJson(text) {
   const raw = String(text ?? '');
   const fenced = raw.match(/```(?:json)?\s*([\s\S]*?)```/i);
@@ -43,6 +65,24 @@ export function extractJson(text) {
       return JSON.parse(body.slice(start, end));
     } catch {
       /* 继续往前找一个能解析的 } */
+    }
+  }
+  // 2026-10-29：模型被 maxTokens 截断时（真实案例：1961 字、三段 episode 写完就断了），
+  // 整份 JSON 解析失败 ⇒ 巩固白跑。先试整体补括号，再退而求其次逐个截断点补。
+  try {
+    const whole = JSON.parse(closeBrackets(body.slice(start)));
+    if (whole && typeof whole === 'object') return whole;
+  } catch {
+    /* 整体补不回来，往下逐个截断点试 */
+  }
+  for (let end = body.length; end > start; end -= 1) {
+    const ch = body[end - 1];
+    if (ch !== '}' && ch !== ']' && ch !== ',' && ch !== '"') continue;
+    try {
+      const value = JSON.parse(closeBrackets(body.slice(start, end)));
+      if (value && typeof value === 'object') return value;
+    } catch {
+      /* 继续往前 */
     }
   }
   return null;
@@ -67,8 +107,12 @@ export function buildConsolidateMessages({ key = '', date = '', records = [], ma
   const lines = [];
   let used = 0;
   for (const rec of records) {
+    // 2026-10-29：历史记录里正文键叫 `x`（不是 text/content），之前这里恒为空 ⇒ 巩固永远
+    // 「lines: 0」，模型收到的是空清单。顺带按日期过滤：夜间复盘只该看当天的话。
+    const recDate = rec?.t ? dayKey(rec.t) : '';
+    if (date && recDate && recDate !== date) continue;
     const who = rec?.senderName || rec?.sender || rec?.role || '?';
-    const text = String(rec?.text ?? rec?.content ?? '').replace(/\s+/g, ' ').trim();
+    const text = String(rec?.text ?? rec?.content ?? rec?.x ?? '').replace(/\s+/g, ' ').trim();
     if (!text) continue;
     const line = `${who}: ${text}`;
     if (used + line.length > maxChars) break;
@@ -152,7 +196,7 @@ export function createConsolidator({
   readRecords = null,
   logger = null,
   now = () => Date.now(),
-  maxTokens = 900,
+  maxTokens = 2400, // 900 会截断（2026-10-29 实测：三段 episode 就用掉 1961 字）
 } = {}) {
   const rootDir = path.resolve(String(root ?? '.'));
   const stateFile = path.join(rootDir, 'state', 'consolidate.json');

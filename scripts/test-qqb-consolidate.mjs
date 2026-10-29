@@ -51,10 +51,26 @@ console.log('记忆巩固：');
   ok('超长输入被截断在 maxChars 内', messages[1].content.length < 300);
 }
 {
+  // 2026-10-29：真实历史记录的正文键是 `x`，且夜间只该复盘当天的话。
+  const records = [
+    { senderName: '爸爸', x: '昨天的旧事', t: new Date('2026-10-27T21:00:00+08:00').getTime() },
+    { senderName: '爸爸', x: '今天吃火锅', t: new Date('2026-10-29T12:00:00+08:00').getTime() },
+    { senderName: '小鲸', x: '好耶', t: new Date('2026-10-29T12:01:00+08:00').getTime() },
+  ];
+  const { messages, lineCount } = buildConsolidateMessages({ key: 'k', date: '2026-10-29', records });
+  eq('x 键的正文能进提示词', lineCount, 2);
+  ok('只取当天的记录', !messages[1].content.includes('昨天的旧事') && messages[1].content.includes('今天吃火锅'));
+}
+{
   eq('extractJson 直接对象', extractJson('{"a":1}'), { a: 1 });
   eq('extractJson 带 ```json 包裹', extractJson('前言\n```json\n{"a":2}\n```\n后记'), { a: 2 });
   eq('extractJson 前后有废话', extractJson('好的，结果如下 {"a":3} 完毕'), { a: 3 });
   eq('extractJson 没有 JSON', extractJson('没有'), null);
+  // 2026-10-29：真实翻车现场——模型写了两段半 episode 就撞 maxTokens，整份 JSON 不合语法。
+  const cut = extractJson('{"episodes":[{"title":"a","text":"b"},{"title":"c","text":"d');
+  ok('extractJson 能救回被截断的 JSON', Array.isArray(cut?.episodes) && cut.episodes.length === 2);
+  const cut2 = extractJson('{"episodes":[{"title":"a","sensory":"夜里很冷');
+  ok('截断在字符串中间也能救', cut2?.episodes?.[0]?.sensory === '夜里很冷');
 }
 {
   const parsed = parseConsolidation(`\`\`\`json
