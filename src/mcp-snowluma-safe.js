@@ -404,6 +404,8 @@ const TOOL_CONFIG_FLAGS = {
   qq_list_outbox: 'listOutbox',
   qq_save_message_image: 'saveMessageImage',
   qq_draw_image: 'drawImage',
+  // 文生图（ComfyUI）：重动作，单张 25~45 秒并独占显卡，开关跟 qq_sing 同一档性质。
+  qq_generate_image: 'generateImage',
 };
 const disabledTools = [];
 {
@@ -2151,6 +2153,59 @@ if (cfg.socialV2?.tools?.drawImage !== false) {
         return { content: [{ type: 'text', text: lines.join('\n') }] };
       } catch (error) {
         return { content: [{ type: 'text', text: `画图失败：${error?.message ?? error}` }], isError: true };
+      }
+    }
+  );
+}
+
+// 用本机 ComfyUI 真画一张（文生图）。和 qq_draw_image 分工：那个是排版/字卡，
+// 这个是插画/人/场景；后台任务（2026-10-29 起），画完自动把图发到会话里。
+if (cfg.socialV2?.tools?.generateImage !== false) {
+  server.tool(
+    'qq_generate_image',
+    '用本机 ComfyUI「真画」一张图（文生图：Animagine XL 4.0 / SDXL）。和 qq_draw_image 的分工：qq_draw_image 是排版/字卡/简笔（1 秒、字一定对）；这一件是画插画、画人、画场景（一张 1024² 约 25~45 秒）。**2026-10-29 起是后台任务**：调用立刻返回 queued=true 和 jobId，图在后台画，画好会**自动**作为图片发到这个会话——所以成功后先回对方一句「等我一下，画好给你看」，然后继续聊别的，不要原地等、也不要再调一次。若返回 busy=true，说明上一张还在画或正在唱歌（显卡被占），就告诉对方「我手上还画着一张，等这张出来」。prompt 用英文 Danbooru 标签效果最好（1girl, blue hair, whale tail, ...）；要画中文文字/字卡别用这件，用 qq_draw_image。',
+    {
+      key: z.string().describe('会话 key，格式 group:群号 或 private:QQ号'),
+      token: z.string().describe('会话令牌（见唤醒提示中的【会话令牌】）'),
+      prompt: z.string().describe('画什么：英文 Danbooru 标签或英文描述，越具体越好（主体、动作、构图、光线、风格）'),
+      style: z.enum(['anime', 'anime-sd15', 'realistic']).optional().describe('画风，默认 anime（二次元）；anime-sd15 省显存但尺寸小；realistic 写实'),
+      aspect: z.enum(['square', 'portrait', 'landscape']).optional().describe('构图，默认 square（1024×1024）；portrait 竖图 832×1216、landscape 横图 1216×832'),
+      seed: z.number().optional().describe('随机种子：想复刻上一张构图就传同一个 seed'),
+      steps: z.number().optional().describe('采样步数 8~40（默认 28，越大越细也越慢）'),
+      caption: z.string().optional().describe('和图片一起发出去的一句话说明（可空）')
+    },
+    async ({ key, token, prompt, style, aspect, seed, steps, caption }) => {
+      try {
+        const data = await agentApi('/api/socialV2/generate-image', {
+          method: 'POST',
+          body: JSON.stringify({
+            key,
+            token,
+            prompt,
+            ...(style ? { style } : {}),
+            ...(aspect ? { aspect } : {}),
+            ...(seed !== undefined ? { seed } : {}),
+            ...(steps !== undefined ? { steps } : {}),
+            ...(caption ? { caption } : {})
+          }),
+          headers: { 'x-agent-token': token },
+          // 路由立刻回 202，这里只要等它把任务排上；30 秒是防桥接假死把这一轮拖死。
+          timeoutMs: 30000
+        });
+        if (data?.queued) {
+          return {
+            content: [{
+              type: 'text',
+              text: `已排上（jobId=${data.jobId}，${data.style} / ${data.aspect}，显存空闲 ${data.freeVramMb ?? '未知'} MB）。图在后台画，第一张要先加载模型，约 25~90 秒，画好会**自动**作为图片发到这个会话——现在先回对方一句「等我一下，画好给你看」，然后该聊什么聊什么；不要在这里等，也不要再调一次。`
+            }]
+          };
+        }
+        if (data?.busy) {
+          return { content: [{ type: 'text', text: `这会儿画不了：${data.error || '显卡被占着（上一张还在画或在唱歌）'}。等它结束再画。` }] };
+        }
+        return { content: [{ type: 'text', text: `没排上：${data?.error || '桥接没有返回原因'}` }], isError: true };
+      } catch (error) {
+        return { content: [{ type: 'text', text: `画图请求失败：${error?.message ?? error}` }], isError: true };
       }
     }
   );

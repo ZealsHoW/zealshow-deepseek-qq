@@ -118,6 +118,26 @@ function createConsolidator() {
   };
 }
 
+// 自绘（qq_generate_image）：桩。夹具里不连 ComfyUI、不出图、不占显存；
+// 真行为由 scripts/test-qqb-comfy.mjs 回归。桥接顶层会用 ALLOWED_STYLES /
+// styleLines / normalizeStyle 拼提示词，缺一个就是整片 ReferenceError。
+const ALLOWED_STYLES = Object.freeze(['anime', 'anime-sd15', 'realistic']);
+function styleLines() {
+  return [];
+}
+function normalizeStyle() {
+  return 'anime';
+}
+function createComfyClient() {
+  return {
+    VERSION: '0.1.0',
+    url: 'http://127.0.0.1:8188',
+    budget: 300000,
+    status: async () => ({ up: false, url: 'http://127.0.0.1:8188', checkpoints: [], style: 'anime', reason: 'audit-stub' }),
+    draw: async () => { throw new Error('audit-stub：夹具里不真画图'); },
+  };
+}
+
 // 摄入层同样是惰性桩：夹具里不能真去开库（同上，EPERM）。
 function openStore() {
   return null;
@@ -504,6 +524,8 @@ export async function bridgeHarness({ config = {}, savedState, files = {}, globa
     createSongLibrary,
     emotionFromText,
     createConsolidator,
+    // 自绘（qq_generate_image）：见上面 createComfyClient 的桩注释。
+    createComfyClient, ALLOWED_STYLES, normalizeStyle, styleLines,
     openStore,
     createIntake,
     discoverDshLaunchToken: () => '', unwrap, createTurnCollector,

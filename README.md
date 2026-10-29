@@ -1149,6 +1149,50 @@ node -e "import('./src/webshot.js').then(m => console.log(m.launchLoginBrowser('
 - 风控/登录页会读不到正文，此时返回的 `note` 会提示「可能要求登录或触发了风控验证」，别把验证页当内容转述。
 - 只读文字，不下视频、不绕登录。
 
+### 自己画图：本机 ComfyUI（`qq_generate_image`，2026-10-29）
+
+她以前只有 `qq_draw_image`：把 SVG/HTML 用无头 Chrome 渲染成 PNG（1 秒、零成本、**字一定对**，但只能画字卡/简笔/配色块，画不了人）。2026-10-29 装了 **ComfyUI + Animagine XL 4.0（SDXL）**，多了一条真·文生图。
+
+**装在哪**（都在 `D:\34825\zhuomian\youqq\_comfy\`，不进 git）：
+
+| 东西 | 路径 / 说明 |
+| --- | --- |
+| ComfyUI 源码 | `_comfy/ComfyUI`（`git -c http.curloptResolve="github.com:443:140.82.112.4" clone --depth 1 https://github.com/comfyanonymous/ComfyUI.git` —— ghfast/kkgithub/gitclone 当天全不通，钉 IP 才成） |
+| Python 环境 | `_comfy/env`（venv，3.12.15）；里面放 `rvc-shared.pth` 指向 `_rvc/env/Lib/site-packages`，**复用 RVC 那套 torch 2.7.1+cu128**，省下 2.6 GB 下载 |
+| 模型 | `_comfy/models/checkpoints/animagine-xl-4.0.safetensors`（6.94 GB，`hf-mirror.com` 实测 3 MB/s ≈ 37 分钟） |
+| 模型路径映射 | `_comfy/ComfyUI/extra_model_paths.yaml`（模型放 ComfyUI 目录外，靠这个文件认） |
+| 日志 | `_comfy/comfy.log` |
+
+**怎么起**（看门狗已经管了：`qq-bridge-keepalive.ps1` 里 `Test-ComfyPort 8188` → `Start-ComfyUI`，当脚本不在时静默跳过。它只在「装了但掉了」时拉起来，10 分钟最多试一次——ComfyUI 空闲也占 ~700 MB 内存，不值得强保活）：
+
+```powershell
+cd D:\34825\zhuomian\youqq\_comfy\ComfyUI
+..\env\Scripts\python.exe main.py --listen 127.0.0.1 --port 8188 --disable-auto-launch --extra-model-paths-config extra_model_paths.yaml
+```
+
+想手工看一眼：`curl http://127.0.0.1:8188/system_stats`。
+
+**她怎么用**：`qq_generate_image(key, token, prompt, style?, aspect?, seed?, steps?, caption?)` → 桥接立刻回 202 + jobId，图在后台画，画完**自动**作为图片发到那个会话（和 `qq_sing` 同一套「先回一句、做好补发」的口径）。prompt 用**英文 Danbooru 标签**（`1girl, blue hair, whale hair ornament, white dress, sea, sunset, masterpiece, best quality`），别拿它画中文文字——那是 `qq_draw_image` 的活。
+
+| 旋钮 | 默认 / 可选 |
+| --- | --- |
+| `style` | `anime`（Animagine XL，1024 系）/ `anime-sd15`（Counterfeit，512 系，省显存）/ `realistic`（Realistic Vision，写实） |
+| `aspect` | `square` 1024×1024 / `portrait` 832×1216 / `landscape` 1216×832 |
+| `steps` / `seed` | 28（8~40）/ 想复刻同一张就传同一个 seed |
+| 开关 | `socialV2.tools.generateImage`（**默认 true**，控制台可关） |
+
+**实测数字（4060 Laptop 8 GB / 16 GB 内存）**：第一张 38.4 秒（含加载模型，1.46 MB），之后 32.1 秒；后台任务总耗时约 33 秒出图 + 发出去。
+
+**踩过的坑**：
+
+- **8188 起来了但 checkpoint 列表是空的**：模型放在 `_comfy/models`，ComfyUI 只认自己的 `models/`；要么挪进去，要么 `--extra-model-paths-config`（本项目用后者，见上）。
+- **显存守卫不能盯「空闲显存」**：ComfyUI 第一次画完会把 checkpoint 常驻在卡上，`nvidia-smi` 的 free 从 6.6 GB 掉到 3.2 GB。按 4.5 GB 拦，等于「画过一张以后永远不给画」（真踩到，第一次就 503）。现在只在 `< 1200 MB`（连模型都放不下）时才拦，剩下的交给 ComfyUI 自己在显存/内存之间倒；真 OOM 走失败路径给她回一句「没画成」。
+- **和唱歌抢卡**：`singJob.running` 时直接 409（`busyWith: 'sing'`），反过来唱歌前也不会等画图。
+- **`comfyui-workflow-templates` 没装**时启动日志会有一大段 ERROR，但 API 照常出图；顺手 `pip install comfyui-workflow-templates comfyui-frontend-package comfyui-embedded-docs` 就干净了。
+- **pip 并发会互相拖死**：`--no-deps` 装完还要补 `kornia_rs`、`trampoline`、`mako`、`pydantic_core`、`typing_inspection`、`python-dotenv`、`psutil` 这七个（`--no-deps` 不装依赖），缺一个都是启动期 `ModuleNotFoundError`。
+
+**代码**：客户端在 `src/qqb/media/comfy.mjs`（复用 `dsh/qq-extras-patch/lib/comfy.mjs` 那套成熟实现：探活、checkpoint 认脸、workflow 组装、`/prompt` + `/history` 轮询、取图校验），产物落 `state/outbox`；风格白名单收窄成三种。回归：`node scripts/test-qqb-comfy.mjs`（28 项）、`node scripts/test-audit.mjs`（71 个脚本）。
+
 ### 登录态（给抖音一个常驻账号）
 
 识别和读网页共用同一个持久化浏览器 profile（`state/browser-profile`），所以**扫码登录一次，之后无头读取一直带着登录态**：

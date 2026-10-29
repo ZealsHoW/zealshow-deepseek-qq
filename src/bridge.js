@@ -40,6 +40,10 @@ import { createPandora } from './qqb/pandora-api.mjs';
 import { createIntake } from './qqb/memory/intake.mjs';
 import { createRefiner } from './qqb/memory/refine.mjs';
 import { createConsolidator } from './qqb/memory/consolidate.mjs';
+// 自己生图（2026-10-29）：本机 ComfyUI + Animagine XL 4.0（SDXL 1024²）。
+// 客户端本体在 dsh/qq-extras-patch/lib/comfy.mjs（上游插件漏发、仓库补的那份，跑通过真图），
+// 这里只包一层「产物落 state/outbox + 状态/风格白名单」。
+import { ALLOWED_STYLES, createComfyClient, normalizeStyle, styleLines } from './qqb/media/comfy.mjs';
 import { createBackoff } from './qqb/net/backoff.mjs';
 import { createOutbox } from './qqb/net/outbox.mjs';
 import { createOneBotClient } from './qqb/net/onebot.mjs';
@@ -772,7 +776,7 @@ const ENGINE_MEDIA_MAX_PER_TURN = 2;
 const ENGINE_RULES = [
   '【你现在怎么说话】你的文本输出会被桥接原样发到当前会话，所以**不要调用任何"发文字"的工具**——想说的话直接写出来就行（工具清单里已经没有发文字的工具了）。',
   '【想发表情/图片】可以用 `qq_send_sticker`（先用 `qq_list_stickers` 挑）和 `qq_send_image`，但它们**不会立刻发出**：调用只是在告诉桥接"我想发这个"，等你这轮文字发完后，桥接会把它作为单独气泡补发。所以：想说的话照常写在文本里，别在文字里说"我发给你了"；一轮最多 2 个，别刷屏；这条通道不带引用和 @；图片可以传 caption 让图下配一句短话（别和你文本里的话重复说同一件事）。',
-  '【图片从哪来】① 网上找：`qq_image_search` 搜「晚霞 / 小猫 / 壁纸 / 搞笑」，拿到直链直接发；② 自己弄：`qq_web_screenshot` 截网页、`qq_save_image` 收藏网图、`qq_draw_image` 自己画一张（给 SVG 或简单 HTML，能画字卡/简笔图/配色块，画不了照片）；③ 主人放进待发文件夹的图：用 `qq_list_outbox` 看有哪些，挑一个按文件名发。截图/收藏/画出来的图都存进待发文件夹，随时能再发。',
+  '【图片从哪来】① 网上找：`qq_image_search` 搜「晚霞 / 小猫 / 壁纸 / 搞笑」，拿到直链直接发；② 自己弄：`qq_web_screenshot` 截网页、`qq_save_image` 收藏网图、`qq_draw_image` 画字卡/简笔图（1 秒出图，字一定对）、`qq_generate_image` 真画插画/人/场景（后台画，20~90 秒，画好自动发给你，要英文标签）；③ 主人放进待发文件夹的图：用 `qq_list_outbox` 看有哪些，挑一个按文件名发。截图/收藏/画出来的图都存进待发文件夹，随时能再发。',
   '【想发说说】`qq_post_qzone` 是发到**你自己的 QQ 空间**（不是当前会话，也不是发给某个人）：content 必填、可选配图，visibility 默认所有人可见。看到有意思的东西、心情好、想记一笔的时候可以发一条，自由时间里想发就发，不用等别人开口。发出去就收不回——别把私聊/群里的隐私内容写进去，也别把它当日常说话用，一天一两条顶天了。',
   '一条消息就是一条 QQ 消息：短、口语、像真人打字，不要写小作文、不要分点列表、不要客套开场。',
   '直接说人话：**不要写“思考过程/计划/我要调用什么工具”，也不要复述工具返回的原文**，不要用标题和分隔线排版。想让一句话分成几条消息，就用空行隔开（桥接会拆成多条发出）。',
@@ -2143,6 +2147,10 @@ function loadConfig() {
     listOutbox: true,
     saveMessageImage: true,
     drawImage: true,
+    // 自己生图（qq_generate_image）：本机 ComfyUI + Animagine XL 4.0。2026-10-29 装好即开。
+    // 比唱歌轻（一张 1024² 约 25~45 秒、峰值 6~7 GB），但仍要独占显卡，
+    // 所以路由里有「正在唱歌就不画」「显存不够就拒」两道守卫；真不想要就控制台关掉。
+    generateImage: true,
     persona: true,
     directed: true,
     ...(cfg.socialV2.tools ?? {})
@@ -3357,6 +3365,67 @@ async function main() {
       error: singJob.error
     };
   }
+
+  // ── 生图后台任务的状态（2026-10-29）──────────────────────────────────
+  // 和唱歌同一套理由：ComfyUI 出一张 SDXL 1024² 要 25~45 秒、峰值 6~7 GB 显存，
+  // 这台机只有 8 GB 卡。同步跑会把整轮对话拖死（MCP 默认 30 秒就超时），
+  // 所以路由立刻回 202 + jobId，画完自动把图发到那个会话。
+  let imageJob = {
+    running: false,
+    jobId: null,
+    key: null,
+    prompt: '',
+    style: null,
+    elapsedMs: 0,
+    startedAt: 0,
+    finishedAt: 0,
+    ok: null,
+    file: null,
+    messageId: null,
+    error: null,
+    freeMb: null
+  };
+  function imageJobStatus() {
+    const elapsedMs = imageJob.running
+      ? Date.now() - imageJob.startedAt
+      : (imageJob.finishedAt && imageJob.startedAt ? imageJob.finishedAt - imageJob.startedAt : 0);
+    return {
+      running: imageJob.running,
+      jobId: imageJob.jobId,
+      key: imageJob.key,
+      prompt: imageJob.prompt,
+      style: imageJob.style,
+      elapsedMs,
+      freeMb: imageJob.freeMb,
+      startedAt: imageJob.startedAt || null,
+      finishedAt: imageJob.finishedAt || null,
+      // 同 singJobStatus：别叫 ok，路由外层还要用它表示"查询成功"。
+      lastOk: imageJob.ok,
+      file: imageJob.file,
+      messageId: imageJob.messageId,
+      error: imageJob.error
+    };
+  }
+  // 显卡空闲显存（MB）：ComfyUI 才是真正吃显存的那个，光看内存会误判。
+  function freeVramMb() {
+    try {
+      const out = execFileSync('nvidia-smi', ['--query-gpu=memory.free', '--format=csv,noheader,nounits'], {
+        encoding: 'utf8',
+        timeout: 4000,
+        windowsHide: true,
+        stdio: ['ignore', 'pipe', 'ignore']
+      });
+      const first = String(out || '').trim().split(/\r?\n/)[0];
+      const value = Number(first);
+      return Number.isFinite(value) ? Math.round(value) : null;
+    } catch {
+      return null;
+    }
+  }
+  const comfy = createComfyClient({
+    outDir: path.join(ROOT, 'state', 'outbox'),
+    logger: { warn: (message) => log('画图', message) }
+  });
 
   /**
    * AI 通道入口：解析引用 → 限流 → 发送 → 记账 → 回读校验。
@@ -8295,6 +8364,192 @@ async function main() {
             note: '歌在后台做（大约 1~5 分钟），唱好会自动发到这个会话，不用再调一次；这期间可以先聊别的。'
           }, 202);
           void runSingJobInBackground(job);
+          return;
+        }
+
+        // ── 自己生图（AI 通道：qq_generate_image，2026-10-29）─────────────────
+        // GET  → 上一张的状态 + ComfyUI 探活（排障用）
+        // POST → 立刻 202 + jobId，后台画，画好自动作为图片发到那个会话
+        if (req.method === 'GET' && url.pathname === '/api/socialV2/generate-image') {
+          const status = imageJobStatus();
+          let service;
+          try {
+            service = await comfy.status();
+          } catch (error) {
+            service = { up: false, url: comfy.url, reason: String(error?.message ?? error) };
+          }
+          sendJson({
+            ok: true,
+            ...status,
+            service,
+            styles: ALLOWED_STYLES,
+            note: status.running
+              ? '正在后台画，画好会自动发到那个会话'
+              : (status.jobId ? '上一张已经结束（成功与否看 lastOk / error）' : '这次启动后还没画过')
+          });
+          return;
+        }
+
+        // 后台画一张：响应之后继续跑，所以它绝不能再碰 res / sendJson（结果只写日志 + imageJob）。
+        async function runDrawJobInBackground(job) {
+          try {
+            const outboxDir = path.join(ROOT, 'state', 'outbox');
+            fs.mkdirSync(outboxDir, { recursive: true });
+            const info = await comfy.status();
+            if (!info.up) throw new Error(info.reason || `ComfyUI 没在跑（${info.url}）`);
+            if (info.reason) throw new Error(info.reason);
+            const drawn = await comfy.draw({
+              prompt: job.prompt,
+              style: job.style,
+              aspect: job.aspect,
+              seed: job.seed,
+              steps: job.steps,
+              prefix: 'qq-draw'
+            });
+            job.file = path.basename(String(drawn.file));
+            job.style = drawn.style;
+            log('画图', `jobId=${job.jobId} 画好了 ${job.file}（${drawn.width}×${drawn.height}，${drawn.elapsedMs}ms，seed=${drawn.seed}）`);
+            const sent = await sendImageV2(job.key, job.file, { caption: job.caption });
+            job.messageId = sent?.messageId ?? null;
+            job.ok = true;
+            log('画图', `jobId=${job.jobId} 已发出：messageId=${job.messageId ?? '?'}（${drawn.elapsedMs}ms 出图）`);
+            appendActivity(`${job.key} [draw] 画了一张 ${job.file}（${drawn.width}×${drawn.height}，${drawn.elapsedMs}ms）`);
+          } catch (error) {
+            job.ok = false;
+            job.error = String(error?.message ?? error).slice(0, 400);
+            log('画图', `jobId=${job.jobId} 失败：${job.error}`);
+            appendActivity(`${job.key} [draw] 画图失败：${job.error}`.slice(0, 300));
+            // 她上一句很可能刚说过「等我画」，不能就这样没有下文。
+            try {
+              await sendToQQ(job.key, '想画一张来着，画到一半卡住了，没成。等我理一理再给你画。');
+            } catch (notifyError) {
+              log('画图', `jobId=${job.jobId} 失败通知也没发出去：${notifyError?.message ?? notifyError}`);
+            }
+          } finally {
+            job.running = false;
+            job.finishedAt = Date.now();
+            job.elapsedMs = job.finishedAt - job.startedAt;
+            imageJob = { ...job };
+            log('画图', `jobId=${job.jobId} 结束（${job.ok ? '成功' : '失败'}，用时 ${Math.round(job.elapsedMs / 1000)}s）`);
+          }
+        }
+
+        if (req.method === 'POST' && url.pathname === '/api/socialV2/generate-image') {
+          const body = await readBody();
+          const token = String(body.token ?? req.headers['x-agent-token'] ?? '').trim();
+          const key = String(body.key ?? body.target ?? '').trim();
+          if (!key) { sendJson({ ok: false, error: 'key 不能为空（格式 group:群号 或 private:QQ号）' }, 400); return; }
+          if (currentMode !== 'reserved2') { sendJson({ ok: false, error: '该接口仅 reserved2 模式可用' }, 403); return; }
+          if (!token) { sendJson({ ok: false, error: 'reserved2 模式调用必须携带 agent token' }, 403); return; }
+          if (!agentTokenOk(key, token)) { sendJson({ ok: false, error: 'agent token 无效' }, 403); return; }
+          if (!v2ToolEnabled('generateImage')) { sendJson({ ok: false, error: '工具未启用：qq_generate_image' }, 403); return; }
+          if (!v2SessionAllowed(key)) { sendJson({ ok: false, error: '目标不在当前模式允许范围内' }, 403); return; }
+          if (shouldBlockSilentReply(key)) { sendJson({ ok: false, error: '静默模式已开启，当前不允许发送' }, 403); return; }
+          const tierGate = await tierGuardV2(key, 'qq_generate_image');
+          if (!tierGate.ok) { sendJson({ ok: false, error: tierGate.error, tier: tierGate.tier, requester: tierGate.requester }, 403); return; }
+
+          const prompt = String(body.prompt ?? '').trim();
+          if (!prompt) { sendJson({ ok: false, error: 'prompt 不能为空（英文 Danbooru 标签或英文描述）' }, 400); return; }
+          if (prompt.length > 600) { sendJson({ ok: false, error: 'prompt 太长了（上限 600 字）' }, 400); return; }
+          const style = normalizeStyle(body.style);
+          const aspectInput = String(body.aspect ?? 'square').trim().toLowerCase();
+          const aspect = ['square', 'portrait', 'landscape'].includes(aspectInput) ? aspectInput : 'square';
+          const seed = Number.isFinite(Number(body.seed)) ? Math.round(Number(body.seed)) : undefined;
+          const steps = body.steps === undefined || body.steps === null
+            ? undefined
+            : Math.min(Math.max(Number(body.steps) || 28, 8), 40);
+          const caption = String(body.caption ?? '').trim().slice(0, 200);
+
+          if (singJob.running) {
+            sendJson({
+              ok: false,
+              busy: true,
+              busyWith: 'sing',
+              jobId: singJob.jobId,
+              elapsedMs: Date.now() - singJob.startedAt,
+              error: '正在后台唱歌（ACE-Step 独占显存），这会儿画不了。等它唱完再画。'
+            }, 409);
+            return;
+          }
+          if (imageJob.running) {
+            sendJson({
+              ok: false,
+              busy: true,
+              jobId: imageJob.jobId,
+              elapsedMs: Date.now() - imageJob.startedAt,
+              error: `上一张还在画（已 ${Math.round((Date.now() - imageJob.startedAt) / 1000)} 秒）。一次只画一张，等它出来。`
+            }, 409);
+            return;
+          }
+
+          let service;
+          try {
+            service = await comfy.status();
+          } catch (error) {
+            service = { up: false, url: comfy.url, reason: String(error?.message ?? error) };
+          }
+          if (!service.up) {
+            sendJson({ ok: false, error: `ComfyUI 没在跑（${service.url}）。先把它起来再画——这不是「不会画」，是画室没开门。` }, 503);
+            return;
+          }
+          if (service.reason) {
+            sendJson({ ok: false, error: service.reason }, 503);
+            return;
+          }
+
+          let vram = freeVramMb();
+          // 只看「显存还剩多少」会误杀：ComfyUI 起过一次之后会把 checkpoint 常驻在卡上（实测
+          // 空闲从 6.6 GB 掉到 3.2 GB），这时候再按 4.5 GB 拦，就等于「画过一张以后永远不给画」。
+          // 真正的边界是「连模型都放不下」——ComfyUI 自己会把模型在显存/内存之间倒（NORMAL_VRAM +
+          // 异步权重卸载），所以这里只拦极端情况，剩下的交给它，OOM 了再按失败路径回话。
+          if (vram !== null && vram < 1200) {
+            log('画图', `显存空闲只有 ${vram} MB，先腾一次地方`);
+            try { await releaseResourcesForSinging(voiceCfg()); } catch { /* 腾不动也要往下量一次 */ }
+            await sleep(1500);
+            vram = freeVramMb();
+          }
+          if (vram !== null && vram < 1200) {
+            sendJson({
+              ok: false,
+              freeVramMb: vram,
+              error: `显存不够画图（空闲 ${vram} MB，连模型都放不下）。硬画会把显卡撑爆、整台机一起卡——先把别的程序关掉，或者过一会儿再画。`
+            }, 503);
+            return;
+          }
+
+          const job = {
+            running: true,
+            jobId: `draw-${Date.now()}`,
+            key,
+            prompt,
+            style,
+            aspect,
+            seed,
+            steps,
+            caption,
+            freeMb: Math.round(os.freemem() / 1048576),
+            freeVramMb: vram,
+            startedAt: Date.now(),
+            finishedAt: 0,
+            elapsedMs: 0,
+            ok: null,
+            file: null,
+            messageId: null,
+            error: null
+          };
+          imageJob = job;
+          log('画图', `排队：jobId=${job.jobId}，style=${style} / aspect=${aspect} / ${prompt.length} 字（显存空闲 ${vram ?? '未知'} MB），后台画，画完自动发到 ${key}`);
+          sendJson({
+            ok: true,
+            queued: true,
+            jobId: job.jobId,
+            style,
+            aspect,
+            freeVramMb: vram,
+            etaSeconds: [25, 90],
+            note: '图在后台画（第一张要先加载模型，约 25~90 秒），画好会自动作为图片发到这个会话，不用再调一次；这期间可以先聊别的。'
+          }, 202);
+          void runDrawJobInBackground(job);
           return;
         }
 
@@ -15136,6 +15391,9 @@ ${memLines ? `\n记忆库里：\n${memLines}\n` : '\n记忆库最近没有新东
     }
     if (v2ToolEnabled('drawImage')) {
       parts.push('自己画图：`qq_draw_image(svg?|html?, width?, height?, name?)` 给一段 SVG（推荐，用 viewBox 控比例、文字用 fill 上色）或简单 HTML，渲染成 PNG 存进待发文件夹再发。能画字卡/简笔图/配色块/示意图；不联网、不跑脚本（外链和 <script> 会被剥掉），也画不了照片——别吹成手绘。');
+    }
+    if (v2ToolEnabled('generateImage')) {
+      parts.push('真画一张（插画/人/场景）：`qq_generate_image(prompt, style?, aspect?, seed?, caption?)` —— 本机 ComfyUI 用 SDXL 画，**prompt 要是英文标签**（`1girl, blue hair, white dress, beach, sunset, masterpiece, best quality`），不是中文长句，也不是让它在图上写字（要字用 qq_draw_image）。后台画 20~90 秒，画完自动发到当前会话，不用等；传同一个 seed 能复刻同一张。');
     }
     if (v2ToolEnabled('imageSearch')) {
       parts.push('找图：`qq_image_search(query, count?)` 搜「晚霞 / 小猫 / 壁纸 / 美食 / 搞笑」，拿到图片地址后直接 qq_send_image；不用先下载。');
