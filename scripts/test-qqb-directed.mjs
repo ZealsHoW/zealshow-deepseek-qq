@@ -54,6 +54,22 @@ test('解析：日常闲聊不误判', () => {
   assert.equal(parseDirective('我去给花浇点水').matched, false);
 });
 
+test('解析：问她「记不记得」不是托付（2026-10-30 主人反馈「机制太僵硬」）', () => {
+  // 原样复现：这句被当成「给妈妈传话」派出去，她照办还回一句「我跟妈妈说的是：「…」」
+  const q1 = parseDirective('你记得刚刚你跟妈妈说好什么不');
+  assert.equal(q1.matched, false);
+  assert.match(q1.reason, /问她记不记得/);
+  // 同族的问句都不该被派单
+  assert.equal(parseDirective('你还记得跟妈妈说好的事吗').matched, false);
+  assert.equal(parseDirective('你记得昨天妈妈说啥了么').matched, false);
+  assert.equal(parseDirective('刚才跟妈妈说好的是什么').matched, false);
+  // 真有授权（帮我/你去）就还是托付，护栏不能把正常派活挡掉
+  const ok = parseDirective('你去跟妈妈说一声晚上不回去吃饭');
+  assert.equal(ok.matched, true);
+  assert.equal(ok.target.name, '妈妈');
+  assert.equal(parseDirective('帮我问问妈妈记得不记得这事').matched, true);
+});
+
 test('只有主人能创建；任务落盘并能读回', () => {
   const root = tmpRoot('create');
   const q = createDirected({ root, logger: { warn() {} } });
@@ -188,9 +204,27 @@ test('追办：控制台下托付也挂追办，待办带「已经等了N分钟�
   const src = fs.readFileSync(path.join(import.meta.dirname, '..', 'src', 'bridge.js'), 'utf8');
   // 控制台 /api/directives/create 原来只落盘、不挂追办 —— 聊天路径有、这条路径没有。
   assert.ok(src.includes('runtimeHooks.directiveNudge(originKey, created.directive.id)'));
-  // 只列待办会被当成背景板：每一条都得带上等了多久
-  assert.ok(src.includes('⏰已经等了 ${Math.round(waitedMs / 60000)} 分钟还没动手'));
+  // 只列待办会被当成背景板：每一条都得带上等了多久（2026-10-30 起措辞改成「还挂着」，
+  // 原来的「⏰已经等了 N 分钟还没动手」像催工单）
+  assert.ok(src.includes('（还挂着，等了 ${Math.round(waitedMs / 60000)} 分钟）'));
   // 追办提示词原来只写在 DSH 路径（buildWakePromptV2），直连引擎的 buildEnginePrompts 没有
   assert.equal(src.split("reason.startsWith('directiveFollowUp')").length - 1, 2);
   assert.ok(src.includes('const followUpLine = reason.startsWith'));
+});
+
+test('回执与人设：不再念原文、不再空口答应（2026-10-30 主人「机制太僵硬」）', () => {
+  const src = fs.readFileSync(path.join(import.meta.dirname, '..', 'src', 'bridge.js'), 'utf8');
+  // 写死的「好，我记着了，回头跟X说一声～」删掉了：收下这件事由她自己这一轮接话
+  // （注释里会提到这句话，所以按「真发出去的那一行」判断，不看整份文件）
+  const callLines = src.split('\n').filter((line) => line.includes('directedReceipt(') && !line.trim().startsWith('//'));
+  assert.equal(callLines.some((line) => line.includes('我记着了')), false);
+  // 送达回执不再复述原文（原样「说好了，我跟妈妈说的是：「…」」）
+  assert.equal(callLines.some((line) => line.includes('说的是：「')), false);
+  assert.ok(src.includes('问过${item.target.kind'));
+  // 三条铁律进系统提示词
+  assert.ok(src.includes('【别把问话当差事】'));
+  assert.ok(src.includes('【报告别念原文】'));
+  assert.ok(src.includes('【别空口答应】'));
+  // 被问「记不记得」要先查库，而不是凭空否认
+  assert.ok(src.includes('记不清就说「我记不太清，是不是…」'));
 });

@@ -32,6 +32,10 @@ const TRIGGER = /(你去|帮我|替我|代我|给我去|去给|去跟|去和|去
 const URGENT = /(马上|立刻|赶紧|现在就|快点|尽快)/;
 const LATER = /(一会儿|待会|等会|晚点|不急|有空)/;
 const NOISE = /^(你|你去|帮我|替我|代我|给我|给我去|去|去给|去跟|去和|去问|去说|给|跟|和|向|对|请)+/;
+// 2026-10-30 主人：「你记得刚刚你跟妈妈说好什么不」被当成「给妈妈传话」派出去了，
+// 她照办还回一句「我跟妈妈说的是：「…」」，机制太僵硬。
+// 这是在**问她还记不记得**，不是让她去转达；带明确授权词（帮我/替我/你去）才算托付。
+const RECALL_ASK = /(记不记得|还记得|记得|想得起来|想不起来|什么不$|啥不$|是什么|说了什么|说了啥)/;
 
 function clampText(value, max = 500) {
   const text = String(value ?? '').replace(/\s+/g, ' ').trim();
@@ -71,6 +75,11 @@ export function parseDirective(text, options = {}) {
   const hasVerb = SEND_VERB.test(raw);
   const hasTrigger = TRIGGER.test(raw);
   if (!hasVerb && !hasTrigger) return { matched: false, reason: '不像托付' };
+  // 问句形态（「你还记得跟妈妈说好什么不」）是问她记不记得，不是派活——
+  // 真派活会带「帮我/替我/你去」这类授权词，那就放行。
+  if (!hasTrigger && RECALL_ASK.test(raw)) {
+    return { matched: false, reason: '是在问她记不记得，不是托付' };
+  }
   // 光有对象 + 动词还不够：日常聊天里「妈妈说…」也会命中「说」。要求明显的托付语气。
   if (!hasTrigger && !/(给|跟|和|向|对)\s*\S{0,6}(发|说|讲|问|聊|转告|带话|告诉|知会|道个|打个招呼)/.test(raw)) {
     return { matched: false, reason: '没有「托付给谁」的语气' };

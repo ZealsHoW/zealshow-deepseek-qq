@@ -740,7 +740,7 @@ function directedBlock() {
     const followUpMs = Math.max(30_000, Number(cfg?.socialV2?.directed?.followUpMs) || 180_000);
     const lines = pending.slice(0, 5).map((d) => {
       const waitedMs = Math.max(0, Date.now() - (Number(d.ts) || 0));
-      const stale = waitedMs >= followUpMs ? ` ⏰已经等了 ${Math.round(waitedMs / 60000)} 分钟还没动手` : '';
+      const stale = waitedMs >= followUpMs ? `（还挂着，等了 ${Math.round(waitedMs / 60000)} 分钟）` : '';
       return `- #${d.id} 给${d.target.kind === 'group' ? '群' : ''}${d.target.name}：${d.intent}${d.urgency === 'high' ? '（他催得急）' : ''}${stale}`;
     });
     // 「答应了但没动手」是这套托付最容易出的岔子（2026-10-27 12:49「给妈妈发首歌」只回了句
@@ -823,7 +823,11 @@ const ENGINE_RULES = [
   '【记忆库 / 知识库】聊天里提到某件以前的具体的事、你记不准了，用 `qq_memory_search(query="...")` 去自己的长期记忆库里查（不是翻本会话聊天记录，别硬编）；今天在外面看到/学到/想明白了什么，用 `qq_knowledge_add(text="...")` 存一条（记忆是"我们之间的事"，知识是"世界上的事"），以后想翻用 `qq_knowledge_search(query="...")`。',
   '【记忆是共用的】库里的记忆不分会话：别人跟你发生过的事，你搜得到（结果会标出来源，比如「小祀（私聊 private:…）」）。**要不要说出来由你自己拿分寸**：当事人问起、或主人问起，可以照实讲；跟不相干的人聊时别主动抖别人私聊里的隐私，也别把 A 的原话当谈资转给 B。拿不准就先不说，或者只说你自己的感受。',
   '【做过才许说做过】只有工具**真的返回了成功**，才能说「发了/发出去了/他回我了」。只在心里想、只在文字里答应，一律不能说成已经发生；没办成、忘了办，就直说没办。编一个「对方回我什么」比不做更糟——2026-10-27 就出过一次（说要给妈妈发歌、其实没发，还说妈妈回了「好听」）。',
-  // 2026-10-27 主人反馈「不要总是揪着妈妈背单词，可以多几种」：记忆里一堆「七点五十四抽查单词」
+  // 2026-10-30 主人反馈「机制太僵硬」：「你记得刚刚你跟妈妈说好什么不」被她当成派单照办，
+  // 还回一句「我跟妈妈说的是：「…」」；被问记不记得时又答「好，我记着了，回头跟妈妈说一声～」。
+  '【别把问话当差事】别人问「你还记得…吗」「我们说过什么」是在问你，不是让你去传话、也不是给你派活。先 `qq_memory_search` 查一下，再照实答：记得就说什么，记不清就说「我记不太清，是不是…」，别一口否认「我啥时候说过」。只有带「帮我 / 替我 / 你去」这种明确授权，才是让你去办。',
+  '【报告别念原文】说过、发过什么，一句话带过就行（「我问过妈了」「歌发出去了」），别复述原文、别说「我跟X说的是：「…」」——那是工单回执，不是人说话。',
+  '【别空口答应】别说「好，我记着了」「回头我跟X说一声」这种话：要么这一轮就办，要么直说办不了、不想办。',
   // 的约定被反复注入，她每轮都往这上面拐，像复读。约定可以记着，但**话题要轮换**。
   '【别揪着一件事】同一件事（尤其是催妈妈背单词、抽查单词这种）别每轮都提。答应过的事记着，但一天自然提一次就够；她明显不想聊、在上班/上课/看剧、或者已经岔开话题了，就先别提。关心一个人有很多种方式，换着来：吃没吃饭、上班路上顺不顺、今天累不累、肩膀酸不酸、想不想听我唱一首、要不要一起看个剧、天冷了加衣服、周末想去哪、别熬太晚……同一个话题连着出现两三轮，就换个新角度，别往上叠。',
   // R9（2026-10-28 主人「活人化」重构）：单句、停顿、自主、念头、记忆留感受。
@@ -1167,7 +1171,8 @@ function noteDirectiveText(key, text, options = {}) {
       return null;
     }
     log('定向投递', `收到主人的托付 #${created.directive.id}：给 ${created.directive.target.name}（${created.directive.target.kind}）——${created.directive.intent}`);
-    directedReceipt(key, `好，我记着了，回头跟${created.directive.target.kind === 'group' ? '群里' : created.directive.target.name}说一声～`).catch(() => {});
+    // 不再自动回「好，我记着了，回头跟X说一声～」：主人 2026-10-30 反馈这句像系统回执、
+    // 而且是个空头承诺。收下这件事由她自己这一轮用话接（真办了/办不了都她说）。
     // 到点还没定夺就再叫醒她一次：文字里答应得很好、工具一次没调，是这套托付最常见的漏。
     if (typeof runtimeHooks.directiveNudge === 'function') {
       try {
@@ -1192,7 +1197,9 @@ async function dispatchDirective(id, text) {
     await sendToSession(directedTargetKey(item.target), [finalText]);
     directed.markSent({ id, text: finalText, result: { ok: true } });
     log('定向投递', `已送达 #${id} → ${directedTargetKey(item.target)}：${finalText.slice(0, 60)}`);
-    directedReceipt(item.originKey, `说好了，我跟${item.target.kind === 'group' ? '群里' : item.target.name}说的是：「${finalText}」`).catch(() => {});
+    // 回执只说到「问过没」，不复述原文：主人 2026-10-30 反馈「说好了，我跟妈妈说的是：「…」」
+    // 这种引号复读像工单回执，太僵硬（原文他只该从对面那边听到）。
+    directedReceipt(item.originKey, `问过${item.target.kind === 'group' ? '群里' : item.target.name}啦～`).catch(() => {});
     return { ok: true, directive: directed.get(id) };
   } catch (error) {
     // 落盘待补发（SnowLuma 抖动）：算她说了，补发链路会负责送出去，不判失败。
@@ -7322,7 +7329,7 @@ async function main() {
               log('定向投递', `追办提醒没挂上 #${created.directive.id}：${error?.message ?? error}`);
             }
           }
-          directedReceipt(originKey, `好，我记着了，回头跟${created.directive.target.kind === 'group' ? '群里' : created.directive.target.name}说一声～`).catch(() => {});
+          // 控制台下的托付也不回那句「好，我记着了，回头跟X说一声～」（同 2026-10-30 反馈）
           sendJson({ ok: true, directive: created.directive });
           return;
         }
