@@ -110,9 +110,9 @@ export const MODULES = {
     note: 'R4 入站去重：message_id/seq 引用记忆 + TTL + 上限，防止重连重放被处理两遍',
   },
   'persona/mood': {
-    version: '0.1.2',
+    version: '0.1.3',
     files: ['src/qqb/persona/mood.mjs'],
-    note: 'R2 情绪/状态机：mood/energy/irritation/social 四维、事件驱动 + 时间衰减、行为门控建议、跨重启持久化。0.1.1 修精力收支：warm_chat 的 energy 由 -0.02 降到 -0.005——原值下光是「被搭话」每小时 6 条就把恢复额（约 +0.12/h）吃光，精力被钉死在 0，「主动开口」的闸门（energy ≥ 0.25）永远够不着（配套改动在桥接侧：一次回复只记一次 own_reply）。0.1.2：家人的夸奖/鼓励/「爱你」开始真的补精力（praised +0.06、新增 loved +0.12），loveWords/negations 两个词表把「疼爱」和「嫌弃」分开；新增 setDim(name,value) 走实例做手动校准（直接改 state/persona-state.json 会被内存旧值盖掉），配套 POST /api/socialV2/mood 与 scripts/set-mood.mjs',
+    note: 'R2 情绪/状态机：mood/energy/irritation/social 四维、事件驱动 + 时间衰减、行为门控建议、跨重启持久化。0.1.1 修精力收支：warm_chat 的 energy 由 -0.02 降到 -0.005——原值下光是「被搭话」每小时 6 条就把恢复额（约 +0.12/h）吃光，精力被钉死在 0，「主动开口」的闸门（energy ≥ 0.25）永远够不着（配套改动在桥接侧：一次回复只记一次 own_reply）。0.1.2：家人的夸奖/鼓励/「爱你」开始真的补精力（praised +0.06、新增 loved +0.12），loveWords/negations 两个词表把「疼爱」和「嫌弃」分开；新增 setDim(name,value) 走实例做手动校准（直接改 state/persona-state.json 会被内存旧值盖掉），配套 POST /api/socialV2/mood 与 scripts/set-mood.mjs。0.1.3：睡一整夜原来只走 rest（+0.25），睡前精力 0.03 时醒来只有 0.28，她一早说「我一晚上没睡好」——新增 slept 事件（energy +0.68）与 restoreEnergy(floor)（只升不降，醒来按睡够的时长兜底到 0.95）',
   },
   'persona/spirit': {
     version: '0.1.2',

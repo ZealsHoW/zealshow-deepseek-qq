@@ -15160,8 +15160,20 @@ ${memLines ? `\n记忆库里：\n${memLines}\n` : '\n记忆库最近没有新东
     // 醒了：看门狗该回来了，醒来兜底任务也可以撤了。
     setSleepQuietTasks(false, '睡醒了');
     clearNightWakeTask();
-    // R2：睡够了她才有力气——醒了先回血（时间衰减也会补，这里给一次确定的「休息」）。
-    noteMood('rest');
+    // R2/R11：睡够了她才有力气——醒了先回血。
+    // 2026-10-30 修：原来只记一次 rest（+0.25），她睡前精力 0.03，醒来 0.28，
+    // 一早就在说「我一晚上没睡好」。现在按睡眠时长给 slept 事件，睡满一半以上再兜底抬到 0.9。
+    try {
+      const energyBefore = Number(mood.snapshot?.()?.dims?.energy ?? NaN);
+      noteMood('slept');
+      const fullHours = Math.max(1, Number(cfg.socialV2?.spirit?.sleepHoursToFull ?? 8));
+      const sleptHours = sleptMs / 3600000;
+      if (sleptHours >= fullHours * 0.5) mood.restoreEnergy(Math.min(0.95, 0.55 + 0.4 * (sleptHours / fullHours)));
+      const energyAfter = Number(mood.snapshot?.()?.dims?.energy ?? NaN);
+      log('情绪', `醒来回精力：${Number.isFinite(energyBefore) ? energyBefore.toFixed(2) : '?'} → ${Number.isFinite(energyAfter) ? energyAfter.toFixed(2) : '?'}（睡 ${sleptHours.toFixed(1)}h）`);
+    } catch (error) {
+      log('情绪', `醒来回精力失败：${error?.message ?? error}`);
+    }
     // R9：精神值按「睡了多少小时」用指数曲线结算——睡满 sleepHoursToFull 才回满。
     try {
       if (spiritEnabled()) spirit.wake({ hours: sleptMs / 3600000 });

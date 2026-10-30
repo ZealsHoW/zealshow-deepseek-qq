@@ -55,7 +55,7 @@ test('接线：睡觉/醒来会结算精神（进入晚安休眠 → 醒来按�
   assert.ok(startBlock.includes('spirit.sleep({ reason: source })'), 'startNightSleep 没有记入睡');
 
   const wakeAt = bridge.indexOf('function finishNightSleep(');
-  const finishBlock = bridge.slice(wakeAt, wakeAt + 1200);
+  const finishBlock = bridge.slice(wakeAt, wakeAt + 2600);
   assert.ok(finishBlock.includes('spirit.wake({ hours: sleptMs / 3600000 })'), 'finishNightSleep 没有按睡了多久结算');
 
   const cancelAt = bridge.indexOf('function cancelNightSleep(');

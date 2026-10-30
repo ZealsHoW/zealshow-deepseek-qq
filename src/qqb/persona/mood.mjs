@@ -15,7 +15,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 
-export const VERSION = '0.1.2';
+export const VERSION = '0.1.3';
 
 export const BASELINE = { mood: 0.62, energy: 0.7, irritation: 0.05, social: 0.55 };
 export const DIMS = Object.keys(BASELINE);
@@ -38,6 +38,9 @@ export const EVENTS = {
   late_night: { energy: -0.05, mood: -0.01 },
   own_reply: { energy: -0.04, social: -0.02 },
   rest: { energy: 0.25, irritation: -0.08, mood: 0.03, social: 0.05 },
+  // 2026-10-30：睡一整夜原来只走 rest（+0.25），她睡前 0.03，醒来 0.28 ⇒ 一早说「我一晚上没睡好」。
+  // 睡够一晚必须真的回血，这条按「从见底拉起、醒来接近满格」标定（再配合 restoreEnergy 兜底）。
+  slept: { energy: 0.68, irritation: -0.15, mood: 0.08, social: 0.05 },
 };
 
 /** 衰减速度（毫秒）。数值越大衰减越慢。 */
@@ -291,5 +294,25 @@ export function createMood({
 
   load();
   decay();
-  return { version: VERSION, observe, classify, gate, summary, snapshot, setDim, irritationFor, decay, save, events: () => state.events.slice(), path: target };
+  /**
+   * 把某个维度抬到至少 floor（只升不降）。睡觉醒来用它兜底：
+   * 就算睡前是 0.03、事件表加起来也不够，醒来也该是「睡饱了」的样子。
+   * @returns {{ok:boolean, dims:object}|{ok:false, error:string}}
+   */
+  function restoreEnergy(floor = 0.9, { at = now() } = {}) {
+    const num = Number(floor);
+    if (!Number.isFinite(num)) return { ok: false, error: `不是数字：${floor}` };
+    const want = Math.max(0, Math.min(1, num));
+    if (state.dims.energy >= want) return { ok: true, dims: { ...state.dims } };
+    decay(at);
+    state.dims.energy = want;
+    state.events.push({ t: at, event: restore_energy, delta: { energy: want } });
+    if (state.events.length > maxEvents) state.events.splice(0, state.events.length - maxEvents);
+    state.updatedAt = at;
+    dirty = true;
+    save();
+    return { ok: true, dims: { ...state.dims } };
+  }
+
+  return { version: VERSION, observe, classify, gate, summary, snapshot, setDim, restoreEnergy, irritationFor, decay, save, events: () => state.events.slice(), path: target };
 }

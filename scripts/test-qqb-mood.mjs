@@ -249,3 +249,27 @@ test('手动校准：setDim 是绝对值、会 clamp、也跨重启（0.1.2）',
   const again = createMood({ root, now: () => clock });
   assert.equal(again.snapshot().dims.energy, 0, '最后设的是 0，要原样读回 0');
 });
+test('睡一夜醒来该有精神：slept 事件 + restoreEnergy 兜底（2026-10-30）', () => {
+  const root = tmpRoot();
+  let clock = Date.parse('2026-10-29T23:00:00+08:00');
+  const mood = createMood({ root, now: () => clock });
+  // 睡前精力见底（她那天真的是 0.03）
+  for (let i = 0; i < 20; i++) { clock += 1000; mood.observe('own_reply', { at: clock }); }
+  const before = mood.snapshot().dims.energy;
+  assert.ok(before < 0.3, `睡前应该很累，实际 ${before}`);
+
+  // 睡 8 小时，醒来只记事件还不够满 —— 这正是「一晚上没睡好」的来路
+  clock = Date.parse('2026-10-30T07:00:00+08:00');
+  mood.observe('slept', { at: clock });
+  const afterEvent = mood.snapshot().dims.energy;
+  assert.ok(afterEvent > before + 0.4, `slept 该把精力拉起来，实际 ${before} → ${afterEvent}`);
+
+  // 兜底：按睡够的时长抬到 0.95（只升不降）
+  const r = mood.restoreEnergy(0.95, { at: clock });
+  assert.equal(r.ok, true);
+  assert.ok(mood.snapshot().dims.energy >= 0.95, '兜底抬到至少 0.95');
+  const floor = mood.snapshot().dims.energy;
+  assert.equal(mood.restoreEnergy(0.5, { at: clock }).dims.energy, floor, '只升不降');
+  assert.ok(mood.snapshot().events.some((e) => e.event === 'restore_energy' || e.event === 'slept'), '事件里能看到这次回血');
+  assert.equal(mood.restoreEnergy('abc').ok, false);
+});
