@@ -128,5 +128,21 @@ console.log('跨会话记忆（R11：冷热分层 / RRF / 索引与原文）：'
   ok('MCP 有 qq_memory_detail 且挂到 memory 开关', mcp.includes('qq_memory_detail') && mcp.includes("qq_memory_detail: 'memory'"));
 }
 
+// 2026-10-30 主人复现：「妈妈会话里说过去北边玩，群里问却查不到」。
+// 三层原因各钉一条：L2 原话默认进主动检索、中文连写按二字组捞、路由/MCP 标出原话。
+console.log('跨会话检索的漏召修复（2026-10-30）：');
+{
+  const store = read('src/qqb/memory/store.mjs');
+  const live = read('src/qqb/memory/live.mjs');
+  const bridge = read('src/bridge.js');
+  const mcp = read('src/mcp-snowluma-safe.js');
+  ok('主动检索默认带 L2 原话', live.includes('includeOriginals = true') && live.includes('includeOriginals: includeOriginals === true'));
+  ok('提示词注入仍排除 L2', store.includes("mem_level <> 'L2'"));
+  ok('中文连写按二字组捞候选', store.includes('function cjkBigrams(text') && store.includes('cjkBigrams(needle)'));
+  ok('多词里短词被滤掉后仍按 token 找', store.includes('const needles = queryTokens.length ? queryTokens : [needle]'));
+  ok('路由把 memLevel 标出来', bridge.includes("memLevel: item.memLevel ?? item.mem_level ?? null"));
+  ok('工具里把原话标成「（原话）」', mcp.includes("'（原话）'"));
+}
+
 console.log(`\n结果：${passed} 通过 / ${failed} 失败`);
 process.exit(failed === 0 ? 0 : 1);

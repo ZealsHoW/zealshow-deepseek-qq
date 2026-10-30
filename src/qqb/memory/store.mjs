@@ -753,6 +753,23 @@ export function openStore(options = {}) {
   }
 
   /**
+   * 中文没有分词、也没有空格：整句「北边玩」当 LIKE 条件一条都匹配不上，
+   * 但「北边」「边玩」这样的二字组能命中。候选词只用来「捞」条目，最终打分仍按整句算。
+   */
+  function cjkBigrams(text, limit = 12) {
+    const runs = String(text ?? '').match(/[\u4e00-\u9fff]{2,}/g) ?? [];
+    const out = [];
+    for (const run of runs) {
+      for (let i = 0; i + 2 <= run.length; i += 1) {
+        const gram = run.slice(i, i + 2);
+        if (!out.includes(gram)) out.push(gram);
+        if (out.length >= limit) return out;
+      }
+    }
+    return out;
+  }
+
+  /**
    * 用全文索引拿一批候选 id。返回 null 表示「索引不可用/太短，调用方回落 LIKE」；
    * 返回空数组表示「索引确实查了，但没有一条命中」——两者对调用方含义不同。
    */
@@ -1048,11 +1065,23 @@ export function openStore(options = {}) {
         }
       }
       if (!ids.size) {
-        const needles = queryTokens.length > 1 ? queryTokens : [needle];
+        // 2026-10-30 修：「北边 玩」这种两词查询里若有一个词太短（「玩」只有 1 字）会被滤掉，
+        // 只剩一个 token 时原来又退回整串 LIKE，于是照样 0 条。只要还有 token 就按 token 找。
+        const needles = queryTokens.length ? queryTokens : [needle];
         const ors = needles.map(() => "(norm LIKE ? OR LOWER(COALESCE(subject, '')) LIKE ?)").join(' OR ');
         const found = db.prepare(`SELECT id FROM memories WHERE ${ors} LIMIT 500`)
           .all(...needles.flatMap((t) => [`%${t}%`, `%${t}%`]));
         for (const row of found) ids.add(Number(row.id));
+        // 中文连写（「北边玩」「妈妈他们说去北边」）整串匹配不到时，再按二字组捞一遍。
+        if (!ids.size) {
+          const grams = cjkBigrams(needle);
+          if (grams.length) {
+            const gors = grams.map(() => 'norm LIKE ?').join(' OR ');
+            const gfound = db.prepare(`SELECT id FROM memories WHERE ${gors} LIMIT 500`)
+              .all(...grams.map((t) => `%${t}%`));
+            for (const row of gfound) ids.add(Number(row.id));
+          }
+        }
       }
       const indexed = [...ids];
       if (vectorMap) {

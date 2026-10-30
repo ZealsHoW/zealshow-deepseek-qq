@@ -9926,6 +9926,8 @@ async function main() {
               // 冷记忆只给一句话索引，细节靠 qq_memory_detail 按 id 拉。
               tier: item.tier ?? 'hot',
               card: item.card ?? null,
+              // 主动检索会连 L2 原话一起给（2026-10-30），标出来，免得把原话当提炼过的事实。
+              memLevel: item.memLevel ?? item.mem_level ?? null,
               where: people.label(item.scope)
             }));
             sendJson({

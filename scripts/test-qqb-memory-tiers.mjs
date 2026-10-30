@@ -25,6 +25,21 @@ function clock(start) {
   return { now: () => ts, advance: (ms) => { ts += ms; return ts; } };
 }
 
+// 2026-10-30 主人复现的 bug：妈妈会话里说过「去北边玩」，她在群里问「北边玩」却查不到。
+// 三个原因叠加（只存了 L2 原话 / L2 被默认排除 / 中文连写匹配不上），这里逐个钉住。
+test('中文连写与多词查询都该查得到（「北边玩」「北边 玩」）', () => {
+  const c = clock(Date.UTC(2026, 9, 30, 5));
+  const store = openStore({ root: tempRoot('cjk'), now: c.now });
+  const mom = 'private:3250968635';
+  const hit = store.remember({ scope: mom, kind: 'message', memLevel: 'L2', text: '你爸爸更想去北边玩，青岛或者大连都行', importance: 0.2, source: 'origin-log' });
+  const stage = store.recall({ query: '北边玩', allScopes: true, includeOriginals: true, limit: 5, minScore: 0, markUsed: false });
+  assert.ok(stage.some((row) => row.id === hit.id), '整串中文（无空格）要能捞到原话');
+  const spaced = store.recall({ query: '北边 玩', allScopes: true, includeOriginals: true, limit: 5, minScore: 0, markUsed: false });
+  assert.ok(spaced.some((row) => row.id === hit.id), '带空格的多词也要能捞到');
+  const hidden = store.recall({ query: '北边玩', allScopes: true, limit: 5, minScore: 0, markUsed: false });
+  assert.ok(!hidden.some((row) => row.id === hit.id), '提示词注入那条路（不带 includeOriginals）仍不看 L2');
+});
+
 test('新记忆默认是热的，retier 会把久不动的转冷', () => {
   const c = clock(Date.UTC(2026, 9, 30, 12));
   const store = openStore({ root: tempRoot('demote'), now: c.now });

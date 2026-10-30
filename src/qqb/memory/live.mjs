@@ -566,7 +566,7 @@ export function createLiveMemory({
      * 优先用本机 Ollama 的语义向量；模型没装/服务没起/超时 → 退回 hash-v1，结果照样给。
      * 它不参与提示词拼装（那条路是同步的），只给「她自己主动查」和控制台排障用。
      */
-    async search({ kind = 'memory', query, limit = 12, kinds, scope = null, markUsed = true } = {}) {
+    async search({ kind = 'memory', query, limit = 12, kinds, scope = null, markUsed = true, includeOriginals = true } = {}) {
       const st = open();
       if (!st) return { results: [], model: HASH_MODEL, semantic: false, embedded: 0 };
       const text = String(query ?? '').trim();
@@ -599,6 +599,9 @@ export function createLiveMemory({
       }
       const rows = st.recall({
         ...(scope ? { scope } : { allScopes: true }),
+        // 2026-10-30：她主动查的时候要把 L2 原话算进来。不然「北边玩」这种只进过原文、还没被巩固成情节的事，
+        // 在群里问就查不到（主人复现的就是这一条）。提示词注入那条路（block()）仍然排除 L2。
+        includeOriginals: includeOriginals === true,
         kinds: Array.isArray(kinds) && kinds.length ? kinds : null,
         query: text,
         limit,
