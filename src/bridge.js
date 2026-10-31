@@ -756,6 +756,14 @@ function directedBlock() {
  * 由 main() 启动时挂上；没挂上就说明还没起完，定向投递会明确失败而不是静默丢消息。
  */
 const runtimeHooks = { send: null, quietNow: null, sessionState: null, recordSent: null, enginePrompts: null, sendMediaIntent: null, directiveNudge: null };
+// 2026-10-31：晚安休眠的「模块级标志」。
+// 事故：10-31 凌晨 02:06/02:36/03:06 她被「自己刷一会儿」唤醒、03:15 起被主动机会唤醒，
+// 在 2~5 点给爸爸、妈妈、哥哥都发了消息 —— 而 night-sleep.json 明明记着 23:00→06:00 在睡。
+// 原因：`nightSleep` 对象定义在 main() 靠后（:15063），唤醒定时器与发送链路都在它前面/旁边，
+// 两条定时器（browse / proactiveCheck）根本没查这个状态，只查了情绪门控；门控的「这个点了，困」
+// 又依赖精力值 —— 睡到一半精力回上来就放行了。这里用一个早于所有发送链路就位的标志当中转，
+// 让「在睡就不许唤醒、不许发」变成一条谁都能读的硬开关（也避开 TDZ）。
+const nightFlag = { sleeping: false };
 function sendToSession(key, texts) {
   if (typeof runtimeHooks.send !== 'function') throw new Error('发送链路未就绪');
   return runtimeHooks.send(key, texts);
@@ -11386,6 +11394,12 @@ async function main() {
   }
 
   function sendMessagesV2(key, messages, delays, replyToMessageId, atUserId = null) {
+    // 2026-10-31：休眠期间一条都不出门（醒来兜底问安走 sendToQQ，不经过这里）。
+    // 挡的是「定时器把她叫起来说话」这种事故路径 —— 见 nightFlag 定义处的注释。
+    if (nightFlag.sleeping) {
+      log(`[night] ${key} 在休眠中，这 ${Array.isArray(messages) ? messages.length : 1} 条不发了`);
+      return { skipped: 'night-sleep' };
+    }
     const assertSendAllowed = captureSendGuard(key);
     const [kind, id] = key.split(':');
     // 这一批（= 一次回复的分条）共用一个批次号：同一批里每条一个 dedupKey，
@@ -15122,6 +15136,8 @@ ${memLines ? `\n记忆库里：\n${memLines}\n` : '\n记忆库最近没有新东
   }
 
   function persistNightSleep() {
+    // 任何一次状态变化都同步模块级标志（start / cancel / finish 都走这里）。
+    nightFlag.sleeping = Boolean(nightSleep.active);
     try {
       atomicWriteJson(NIGHT_SLEEP_FILE, nightSleep.active
         ? { active: true, startAt: nightSleep.startAt, wakeAt: nightSleep.wakeAt, savedAt: Date.now() }
@@ -15555,6 +15571,7 @@ function startThoughtLoop() {
     nightSleep.active = true;
     nightSleep.startAt = Number(data.startAt) || Date.now();
     nightSleep.wakeAt = wakeAt;
+    nightFlag.sleeping = true;
     armNightWakeTimer();
     // 桥接中途重启也要把「睡着=看门狗停用」这件事重新落实（任务状态不跟着进程走）。
     setSleepQuietTasks(true, '恢复晚安休眠');
@@ -15785,6 +15802,12 @@ function startThoughtLoop() {
   async function sendWakePromptV2(key, reason) {
     if (cfg.socialV2?.enabled === false) return;
     if (currentMode !== 'reserved2' || socialV2.paused) return;
+    // 2026-10-31：休眠期间不投递唤醒（除了醒来那一刻的 nightWake）。
+    // 这里是所有唤醒的统一入口：browse / proactiveCheck / thought / 追办全从这儿过。
+    if (nightFlag.sleeping && reason !== 'nightWake') {
+      log(`[reserved2] 休眠中不唤醒 ${key}（${reason}）`);
+      return;
+    }
     if (!isSessionAllowedInCurrentMode(key)) {
       log(`[reserved2] 跳过唤醒 ${key}（${reason}）：会话已不在当前模式允许范围内`);
       return;
@@ -16254,6 +16277,8 @@ function startThoughtLoop() {
     const firstDelayMs = Math.max(30 * 1000, Number(b.firstDelayMs) || 10 * 60 * 1000);
     const tick = () => {
       try {
+        // 2026-10-31：睡着就别挑人去「刷一会儿」了 —— 她本来会因此爬起来说话。
+        if (nightFlag.sleeping || nightSleep.active) return;
         const now = Date.now();
         const target = pickBrowseTargetV2(now);
         if (!target) return;

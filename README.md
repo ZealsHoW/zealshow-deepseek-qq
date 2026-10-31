@@ -1576,6 +1576,34 @@ L1–L6 里最容易做错的一层是 **L2（原文）**：如果每句话都�
 
 验证：`parseDirective('你记得刚刚你跟妈妈说好什么不').matched === false`（`scripts/test-qqb-directed.mjs` 的「问她记不记得不是托付」用例），「你去跟妈妈说一声晚上不回去吃饭」仍 `matched === true`；「回执与人设」用例按「真发出去的那一行」断言（注释里会提到那两句老话术，不能拿整份文件判断）。
 
+### 她在睡觉，却半夜爬起来发消息（2026-10-31）
+
+主人问「她昨晚真的睡了吗」。查 `state/bridge.log`：晚安休眠本身是对的——`23:00:02` 开始、`06:00:02` 到期醒来，期间计划任务也确实停用了。但**她 2 点到 5 点一直在说话**：
+
+```
+02:06:45 行为模块：让 private:704183420 自己刷一会儿（安静了 866min，今天第 1 次）
+02:06:46 唤醒 private:704183420（browse）→ 02:06:48 已发言（8 字 / 2 条）
+03:06:46 唤醒 private:3482501440（browse）→ 「这个点没人在，我先睡了。」
+03:15:23 唤醒 group:851489980（proactiveCheck）→ 「爸妈都晚安了，那我也睡了，晚安」
+03:28:01 唤醒 private:3482501440（proactiveCheck）→ 「爸爸，都三点半了，你怎么还没睡呀」
+```
+
+根因不是「她不听指令」，是**两条定时器压根没查睡眠状态**：
+
+1. `startBrowseBehavior()` 的 tick 只挑「安静最久的会话」，不看 `nightSleep`；
+2. `scheduleProactiveCheckV2()` 的定时器只看情绪门控。而门控里那句 `这个点了，困` 的条件是 `night && energy < 0.55`——她睡着、精力回上来（`rest`/`slept` 会加），门就开了。
+3. 唯一查了睡眠的 `thoughtTick()` / `spiritHeartbeat()` 反而没什么机会触发。
+
+改法（`src/bridge.js`）：
+
+- 新增模块级 `const nightFlag = { sleeping: false }`。`nightSleep` 对象定义在 `main()` 靠后（`:15063`），而 `sendMessagesV2()` 在 `:11388` 就要能读到它——用标志中转，也避开 `const` 的 TDZ。
+- `persistNightSleep()` 里同步 `nightFlag.sleeping`（start / cancel / finish 都会调它）；`loadNightSleepState()` 恢复睡眠时也点亮，桥接半夜重启照样生效。
+- `sendWakePromptV2()` 开头硬拦：`if (nightFlag.sleeping && reason !== 'nightWake')` → 记一行 `休眠中不唤醒` 就返回。所有唤醒（browse / proactiveCheck / thought / 追办）都从这里过，一处挡住全部。
+- `sendMessagesV2()` 开头再兜一层：睡着时一条都不出门（醒来兜底问安走 `sendToQQ`，不经过这里）。
+- `startBrowseBehavior()` 的 tick 也直接 `return`，省得白挑人。
+
+回归：`node scripts/test-night-quiet.mjs`（34 项，含上面每条断言）。真机验证用 `POST /api/socialV2/night-sleep {"action":"start","hours":0.02}` 进睡后打 `POST /api/socialV2/wake`，日志应出现 `休眠中不唤醒`、且没有 `直连引擎 已发言`；验完 `{"action":"cancel"}` 退出。
+
 ### 记得住、忘得对、按意思找得回：遗忘曲线 + 向量索引（2026-10-25）
 
 主人的要求是两条合起来的效果：**记忆要像人一样会淡**（艾宾浩斯 + 情绪挂钩权重，淡的沉到底、重的摆最前），**又要按意思找得回来**（RAG 向量检索）。拆成三层，各管一件事：

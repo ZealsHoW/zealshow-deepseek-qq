@@ -67,6 +67,22 @@ ok(bridgeSrc.includes('New-ScheduledTaskTrigger -Once'), '兜底任务是一次�
 ok(bridgeSrc.includes('New-ScheduledTaskAction'), '兜底任务的动作是 powershell 跑 night-wake.ps1');
 ok(/runSchtasks\(\[[^\]]*'\/delete', '\/tn', NIGHT_WAKE_TASK/.test(bridgeSrc), '有删除兜底任务（/delete）');
 
+// ── 睡着期间不许被叫起来说话（2026-10-31 的事故）─────────────────────────────
+// 事故：23:00 入睡到 06:00，她却 02:06/02:36/03:06 被「自己刷一会儿」唤醒、03:15 起被主动机会
+// 唤醒，在 2~5 点给爸爸、妈妈、哥哥都发了消息。两条定时器只查情绪门控，而门控的「困」依赖精力值 ——
+// 睡到一半精力回上来就放行了。修法：模块级 nightFlag + 唤醒/发送两处硬开关。
+ok(bridgeSrc.includes('const nightFlag = { sleeping: false };'), '有模块级 nightFlag（早于发送链路就位，避开 TDZ）');
+ok(bodyOf(bridgeSrc, 'function persistNightSleep(').includes('nightFlag.sleeping = Boolean(nightSleep.active)'),
+  'persistNightSleep 同步 nightFlag（start/cancel/finish 都走它）');
+ok(bodyOf(bridgeSrc, 'function loadNightSleepState(').includes('nightFlag.sleeping = true'),
+  '桥接重启后接着睡时 nightFlag 也得亮起来');
+const wakePrompt = bodyOf(bridgeSrc, 'async function sendWakePromptV2(');
+ok(wakePrompt.includes("nightFlag.sleeping && reason !== 'nightWake'"), '唤醒统一入口：睡着就不投递（醒来那一刻除外）');
+ok(wakePrompt.includes('休眠中不唤醒'), '被拦下时留一条日志，好复盘');
+ok(bodyOf(bridgeSrc, 'function sendMessagesV2(').includes('if (nightFlag.sleeping)'), '发送链路：睡着一条都不出门');
+ok(bodyOf(bridgeSrc, 'function startBrowseBehavior(').includes('if (nightFlag.sleeping || nightSleep.active) return;'),
+  '「自己刷一会儿」睡着时不挑人');
+
 // ── scripts/night-wake.ps1 ──────────────────────────────────────────────────
 const wakeBytes = fs.existsSync(wakeScriptPath) ? fs.readFileSync(wakeScriptPath) : Buffer.alloc(0);
 ok(wakeBytes.length > 0, 'scripts/night-wake.ps1 存在');
