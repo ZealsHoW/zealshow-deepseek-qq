@@ -1568,6 +1568,23 @@ L1–L6 里最容易做错的一层是 **L2（原文）**：如果每句话都�
 
 补数据：巩固是「每天跑一次、按会话」的，历史会话可以用 `POST /api/socialV2/consolidate {key,date,dream:false}` 逐天补。这次补了 `private:3250968635`（10-29/10-30）、`private:704183420`（10-29）、`group:851489980`（10-29/10-30）、`private:3482501440`（10-30），妈妈那边一天就沉淀出 20 条 L3/L4，其中就包括这次「北边 / 威海 / 嵛山岛」的选择过程。
 
+### 她看不清图：prompt 里只有「[图片]」三个字（2026-11-01）
+
+主人问「为什么现在看不清图」。查下来**视觉模型没坏**——拿早上那两条消息直接调 `qq_describe_image`，12~22 秒回来，连蘸料碗上的「盛香亭 SHINING TASTE」、饮料瓶上的「桂花米酿」都读得出来。坏的是**她手上的信息**：
+
+1. `state/history/*.jsonl` 里图片消息长这样：`{"x":"[图片]","m":["[图片]"]}` —— 只有占位符，没有 messageId；
+2. `buildEnginePrompts` 拼「最近的聊天记录」时又只取 `text/plain`，于是 prompt 里就是一行 `私聊：[图片]`；
+3. 她能看到的工具说明写着「看图：`qq_describe_image` 支持 messageId」，可**她没有 messageId**，`state/tool-calls.jsonl` 里 11-01 一整天 0 次看图调用。
+
+结果就是两种反应：猜（「是不是早安表情包？」）或者推脱（「图没刷出来，你发的啥啊」）。
+
+改法（`src/bridge.js`）：
+
+- `appendSocialV2Message` 收图后 `void describeInboundImage(key, messageId)`：后台走引擎工具箱调 `qq_describe_image`，结果按 `key|messageId` 缓存在 `inboundImageNotes`（上限 80 条），不阻塞收消息；
+- `buildEnginePrompts` 在最后一条是图片时多给一段：看完了就贴 `【X发来的图，你已经看过图了】<描述前 600 字>`；还没看完就贴 `【X发来一张图，你还没看清】` + `qq_describe_image(messageId=…, key=…)`，并明说**真看不清就直说看不清，别猜**。
+
+回归：`scripts/test-qqb-vision-notes.mjs`（6 项静态断言），audit 75/75。
+
 ### 「机制太僵硬」：一句问话被当成派单（2026-10-30）
 
 主人复现两个症状，其实是**两处写死的机制**，不是她「不想好好说」：

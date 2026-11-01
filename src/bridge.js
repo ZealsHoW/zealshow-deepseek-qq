@@ -1051,6 +1051,53 @@ let readHistoryForEngine = null;
 let lastInboundAt = 0;
 
 /**
+ * 收图后后台拉到的「图里是什么」：`${key}|${messageId}` → { text, at, pending }。
+ *
+ * 为什么要这一步：别人发来的消息在 prompt 里只有「[图片]」两个字，也没有 messageId，
+ * 她手上没有任何抓手 —— 2026-11-01 早上主人发了两张火锅照，她先回「我看看你发的啥」，
+ * 半小时后又回「图没刷出来，你发的啥啊」；同一天妈妈发的早安图她也只能说「这图我看不太清」。
+ * 现在收图就在后台调一次 qq_describe_image（云端 qwen3-vl-plus，十几秒、不占显存），
+ * 下一轮开跑前把描述贴进 prompt，她是真的看过图再说话。
+ */
+const inboundImageNotes = new Map();
+
+async function describeInboundImage(key, messageId) {
+  const id = `${key}|${messageId}`;
+  const known = inboundImageNotes.get(id);
+  if (known) return;
+  inboundImageNotes.set(id, { text: '', at: Date.now(), pending: true });
+  try {
+    const rt = ensureEngine();
+    if (!rt) return;
+    const res = await rt.toolbox.call('qq_describe_image', { messageId, key });
+    const text = String(res?.text ?? '').replace(/\s+/g, ' ').trim();
+    if (res?.ok && text) {
+      inboundImageNotes.set(id, { text, at: Date.now(), pending: false });
+      log('看图', `${key} messageId=${messageId} 看完了（${text.length} 字，${res.ms ?? 0}ms）`);
+    } else {
+      inboundImageNotes.delete(id);
+      log('看图', `${key} messageId=${messageId} 没看成：${res?.error ?? '空结果'}`);
+    }
+  } catch (error) {
+    inboundImageNotes.delete(id);
+    log('看图', `${key} messageId=${messageId} 失败：${error?.message ?? error}`);
+  } finally {
+    if (inboundImageNotes.size > 80) {
+      const stale = [...inboundImageNotes.entries()].sort((a, b) => (a[1]?.at ?? 0) - (b[1]?.at ?? 0));
+      for (const [oldId] of stale.slice(0, inboundImageNotes.size - 80)) inboundImageNotes.delete(oldId);
+    }
+  }
+}
+
+/** 把某条消息的看图结果取出来（已经看完才算）。 */
+function inboundImageNote(key, messageId) {
+  if (!messageId) return '';
+  const hit = inboundImageNotes.get(`${key}|${messageId}`);
+  if (!hit || hit.pending || !hit.text) return '';
+  return String(hit.text);
+}
+
+/**
  * 给直连引擎拼一段最近的原始对话（不折叠，折叠交给 loop 里的 foldHistory）。
  *
  * 截到「最后一条对方消息」之前：最后那条就是本轮 prompt.user 里已经写进去的触发消息，
@@ -14387,6 +14434,13 @@ ${memLines ? `\n记忆库里：\n${memLines}\n` : '\n记忆库最近没有新东
       const participantHit = Array.isArray(t.participants) && t.participants.some((p) => p && lowerPlain.includes(String(p)));
       if (topicHit || participantHit) t.lastMentionAt = Date.now();
     }
+    // 别人发来的图，她其实「看不见」：prompt 里只有「[图片]」两个字，连 messageId 都没写，
+    // 于是她要么瞎猜（「是不是早安表情包」）要么推脱（「图没刷出来，你发的啥啊」——2026-11-01
+    // 早上主人连发两张火锅照片就是这个结果）。收图就在后台拉一次视觉描述，下一轮开跑前
+    // 把结果贴进 prompt（见 inboundImageNote / buildEnginePrompts）。
+    // 只给「真图」花这一次调用：QQ 表情（face）没有像素可看、市场表情（sticker）自带
+    // summary 文字，把预算花在照片/截图上就够了。
+    if (msg.messageId && (msg.media || []).some((m) => m && m.kind === 'image')) void describeInboundImage(key, msg.messageId);
     saveSocialV2State();
   }
 
@@ -14955,6 +15009,18 @@ ${memLines ? `\n记忆库里：\n${memLines}\n` : '\n记忆库最近没有新东
       `【此刻状态】${statusBits.join('；')}`,
     ];
     if (recentText) bits.push(`【最近的聊天记录（直接接着这些话说，不用再翻一遍）】\n${recentText}`);
+    // 图片：光有「[图片]」三个字她等于在用指尖读盲文 —— 要么猜（「是不是早安表情包」），
+    // 要么推脱（「图没刷出来」）。后台已经调视觉模型看完的，直接把内容贴进来；
+    // 还没看完的，把 messageId 给她，让她自己调 qq_describe_image，并明说看不了就直说。
+    if (lastMsg && lastMsg.hasMedia) {
+      const seen = inboundImageNote(key, lastMsg.messageId);
+      const mid = lastMsg.messageId ? `messageId=${lastMsg.messageId}` : '';
+      if (seen) {
+        bits.push(`【${String(lastMsg.sender || '他')}发来的图，你已经看过图了】${seen.slice(0, 600)}`);
+      } else {
+        bits.push(`【${String(lastMsg.sender || '他')}发来一张图，你还没看清】要看就调 qq_describe_image(${[mid, `key="${key}"`].filter(Boolean).join(', ')})；真看不清就直说看不清，别猜图里是什么。`);
+      }
+    }
     // 定时唤醒（主动机会 / 自己刷一会儿 / 写日记）在 DSH 路径有专门的行为口径，直连路径也得有：
     // 她一睁眼只看到「唤醒原因：proactiveCheck」，不知道这是一次可以主动开口、可以自己去刷的机会；
     // diaryRitual 更糟 —— 落到空分支时她把「日记时间」当成一次普通聊天，回了三句话、一个工具没调。
