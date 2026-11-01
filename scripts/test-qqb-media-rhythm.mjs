@@ -83,6 +83,11 @@ check('内置表情也出现在 qq_list_stickers 的返回里', () => {
   assert.ok(routeLists.length >= 3, `合并本地表情的调用点只有 ${routeLists.length} 处`);
 });
 
+check('source 放行 local（否则列表里显示成 QQ 收藏表情）', () => {
+  const lib = fs.readFileSync(path.join(root, 'src', 'sticker-lib.js'), 'utf8');
+  assert.ok(lib.includes("['manual', 'ai', 'local'].includes(entry.source)"), 'sticker-lib 没有放行 local');
+});
+
 check('自带表情发完，消息记录里带名字而不是「表情包」', () => {
   assert.match(src, /if \(entry\.source === 'local'\) \{\s*\n\s*return \{ entry, messageId: data\?\.message_id \?\? null \};/);
 });

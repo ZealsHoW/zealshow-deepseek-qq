@@ -63,7 +63,8 @@ export function normalizeStickerEntry(raw) {
     localNote: sanitizeStickerText(entry.localNote, 200),
     tags,
     usage: sanitizeStickerText(entry.usage, 200),
-    source: entry.source === 'manual' ? 'manual' : (entry.source === 'ai' ? 'ai' : 'qq'),
+    // source：qq=从收藏同步来的，manual=人工加备注，ai=模型自己记的，local=桥接自带（assets/*.png）。
+    source: ['manual', 'ai', 'local'].includes(entry.source) ? entry.source : 'qq',
     useCount: Math.max(0, Number(entry.useCount) || 0),
     lastUsedAt: Number(entry.lastUsedAt) || 0,
     lastContext: sanitizeStickerText(entry.lastContext, 200),
