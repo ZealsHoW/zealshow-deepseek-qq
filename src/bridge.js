@@ -3836,7 +3836,11 @@ async function main() {
       }
     });
     const data = await sendResult;
-    // 更新本地使用统计
+    // 更新本地使用统计。自带表情不在 QQ 收藏库里，markStickerUsed 找不到它（会回 null），
+    // 直接返回原条目，否则调用方拿不到 desc，消息记录里就退化成「[表情包:表情包]」。
+    if (entry.source === 'local') {
+      return { entry, messageId: data?.message_id ?? null };
+    }
     const updated = markStickerUsed(stickerEntries, entry.id, 'sticker');
     stickerEntries = updated.entries;
     saveStickerStoreSafe();
@@ -9326,7 +9330,7 @@ async function main() {
           if (req.headers['x-agent-token'] && !v2ToolEnabled('listStickers')) { sendJson({ ok: false, error: '工具未启用：qq_list_stickers' }, 403); return; }
           try {
             const synced = await syncStickerLibrary(force);
-            const list = formatStickerList(synced?.entries ?? stickerEntries, query, count);
+            const list = formatStickerList([...localStickerEntries(), ...(synced?.entries ?? stickerEntries)], query, count);
             sendJson({ ok: true, key, ...list, syncedAt: synced?.syncedAt ?? stickerSyncedAt, fromCache: synced?.fromCache ?? false });
           } catch (error) {
             sendJson({ ok: false, error: `获取表情列表失败：${error?.message ?? error}` }, 500);
@@ -9353,7 +9357,7 @@ async function main() {
           }
           try {
             const synced = await syncStickerLibrary(force);
-            const list = formatStickerList(synced?.entries ?? stickerEntries, query, count);
+            const list = formatStickerList([...localStickerEntries(), ...(synced?.entries ?? stickerEntries)], query, count);
             sendJson({ ok: true, key, ...list, syncedAt: synced?.syncedAt ?? stickerSyncedAt, fromCache: synced?.fromCache ?? false });
           } catch (error) {
             sendJson({ ok: false, error: `获取表情列表失败：${error?.message ?? error}` }, 500);
@@ -9368,7 +9372,7 @@ async function main() {
           // GET 不再触发强制同步（写副作用不能挂在读接口上）：请用 POST /api/stickers/sync。
           try {
             const synced = await syncStickerLibrary(false);
-            const list = formatStickerList(synced?.entries ?? stickerEntries, query, count);
+            const list = formatStickerList([...localStickerEntries(), ...(synced?.entries ?? stickerEntries)], query, count);
             sendJson({ ok: true, ...list, syncedAt: synced?.syncedAt ?? stickerSyncedAt, fromCache: synced?.fromCache ?? false, writable: stickerStoreWritable });
           } catch (error) {
             sendJson({ ok: false, error: `获取表情失败：${error?.message ?? error}` }, 500);

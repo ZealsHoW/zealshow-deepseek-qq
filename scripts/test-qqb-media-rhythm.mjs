@@ -78,6 +78,13 @@ check('自带表情能发出去：收藏库找不到时回落本地文件（不�
 
 check('内置表情也出现在 qq_list_stickers 的返回里', () => {
   assert.match(src, /const entries = \[\.\.\.localStickerEntries\(\), \.\.\.\(synced\?\.entries \?\? stickerEntries\)\];/);
+  // 路由里那三处 list 也要合并，否则她 qq_list_stickers 拿到的是空列表（2026-11-01 实测 items=0）
+  const routeLists = src.split('\n').filter((line) => line.includes('formatStickerList(') && line.includes('localStickerEntries()'));
+  assert.ok(routeLists.length >= 3, `合并本地表情的调用点只有 ${routeLists.length} 处`);
+});
+
+check('自带表情发完，消息记录里带名字而不是「表情包」', () => {
+  assert.match(src, /if \(entry\.source === 'local'\) \{\s*\n\s*return \{ entry, messageId: data\?\.message_id \?\? null \};/);
 });
 
 check('规则里教了她：自带表情可以天天发，尤其晚安鲸鱼', () => {
