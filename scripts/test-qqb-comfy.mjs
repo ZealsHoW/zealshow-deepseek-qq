@@ -51,7 +51,8 @@ console.log('自绘模块：');
 
 console.log('LoRA：');
 {
-  ok('默认 LoRA 是她的那支', DEFAULT_LORA === 'xiaojing_sdxl_lora.safetensors');
+  // 2026-11-01 换到 v4（49 张素材、含 Q 版与小红书风）：v2 出来偏成熟、线条糊。
+  ok('默认 LoRA 是她的那支', DEFAULT_LORA === 'xiaojing_sdxl_lora_v4.safetensors');
   eq('默认触发词与权重', [DEFAULT_TRIGGER, DEFAULT_LORA_WEIGHT], ['xiaojing', 0.8]);
   const probe = createComfyClient({ outDir: os.tmpdir() });
   ok('客户端带 knownLoras 方法（查服务器上挂了哪些 LoRA）', typeof probe.knownLoras === 'function');

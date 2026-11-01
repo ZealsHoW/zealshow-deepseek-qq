@@ -1120,7 +1120,7 @@ function mediaNudgeLine(key, reason) {
 
 const MEDIA_NUDGE_IMAGE = [
   '【这轮顺手配张图也行】想到画面就用 `qq_generate_image` 画一张（prompt 要英文标签，比如 `1girl, blue hair, window seat, rainy day, warm light`），',
-  '或者 `qq_image_search` 找一张现成的，配一句话发出来；你有自己的角色 LoRA，画自己最稳。',
+  '或者 `qq_image_search` 找一张现成的，配一句话发出来；你有自己的角色 LoRA 加形象参考，画自己最稳。',
   '真想不出画面、或者这轮在说正经事，就光说话——别为了配图硬凑一张不相干的。',
 ].join('');
 const MEDIA_NUDGE_VOICE = [
@@ -8729,6 +8729,10 @@ async function main() {
               saturation: Number(imageCfg.saturation) > 0 ? Number(imageCfg.saturation) : undefined,
               hairDepth: Number(imageCfg.hairDepth) >= 0 ? Number(imageCfg.hairDepth) : undefined,
               cfg: Number(imageCfg.cfg) > 0 ? Number(imageCfg.cfg) : undefined,
+              // 形象参考（2026-11-01）：主人说「没有她的形象」——纯 LoRA 只会画成「蓝发动漫少女」。
+              // 默认挂 assets/xiaojing-ref.jpg 当 IPAdapter 参考；想关就把 socialV2.image.reference 设成空串。
+              reference: imageCfg.reference === '' ? null : (imageCfg.reference || undefined),
+              ipaWeight: Number(imageCfg.ipaWeight) > 0 ? Number(imageCfg.ipaWeight) : undefined,
               prefix: 'qq-draw'
             });
             job.file = path.basename(String(drawn.file));
@@ -15884,7 +15888,7 @@ function startThoughtLoop() {
       parts.push('自己画图：`qq_draw_image(svg?|html?, width?, height?, name?)` 给一段 SVG（推荐，用 viewBox 控比例、文字用 fill 上色）或简单 HTML，渲染成 PNG 存进待发文件夹再发。能画字卡/简笔图/配色块/示意图；不联网、不跑脚本（外链和 <script> 会被剥掉），也画不了照片——别吹成手绘。');
     }
     if (v2ToolEnabled('generateImage')) {
-      parts.push('真画一张（插画/人/场景）：`qq_generate_image(prompt, style?, aspect?, seed?, caption?)` —— 本机 ComfyUI 用 SDXL 画，**prompt 要是英文标签**（`1girl, blue hair, white dress, beach, sunset, masterpiece, best quality`），不是中文长句，也不是让它在图上写字（要字用 qq_draw_image）。后台画 20~90 秒，画完自动发到当前会话，不用等；传同一个 seed 能复刻同一张。想让它有梗就传 `onImage:"图里那句话"`（最多两句），字会直接画成白气泡盖在图上（`onImageStyle:"bubble|band|sticker"` 换样式）——比图下配文更像表情包。**默认挂着你自己那支角色 LoRA（触发词 xiaojing，权重 0.8）**——画你自己很稳；要画别人、或者不想让画面偏蓝白，传 `lora:false` 用原模型；想淡一点就传 `loraWeight: 0.6`。');
+      parts.push('真画一张（插画/人/场景）：`qq_generate_image(prompt, style?, aspect?, seed?, caption?)` —— 本机 ComfyUI 用 SDXL 画，**prompt 要是英文标签**（`1girl, blue hair, white dress, beach, sunset, masterpiece, best quality`），不是中文长句，也不是让它在图上写字（要字用 qq_draw_image）。后台画 20~90 秒，画完自动发到当前会话，不用等；传同一个 seed 能复刻同一张。想让它有梗就传 `onImage:"图里那句话"`（最多两句），字会直接画成白气泡盖在图上（`onImageStyle:"bubble|band|sticker"` 换样式）——比图下配文更像表情包。**默认挂着你自己那支角色 LoRA（触发词 xiaojing）加一张你的定稿图当形象参考，画「我」就是同一个你**；要画别人、或者不想让画面偏蓝白，传 `lora:false` 用原模型；想淡一点就传 `loraWeight: 0.6`。**画几个人一定要数清楚**：一个人写 `1girl, solo`；两个人写 `2girls, two friends`，再把两人的特征分开写（`one girl with blue long hair, another girl with short brown hair`）——只写「两个人坐在长椅上」这种句子，模型会糊成一个人。融合/多出来的负向词（`extra person, merged bodies`）已经自动补上，不用你写。');
     }
     if (v2ToolEnabled('imageSearch')) {
       parts.push('找图：`qq_image_search(query, count?)` 搜「晚霞 / 小猫 / 壁纸 / 美食 / 搞笑」，拿到图片地址后直接 qq_send_image；不用先下载。');

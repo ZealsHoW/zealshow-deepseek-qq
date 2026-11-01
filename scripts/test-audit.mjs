@@ -136,6 +136,7 @@ const tests = [
   'test-qqb-comfy.mjs',
   // 颜色口径：鲜艳标签/压发灰/浮点 clamp/提色失败不毁图的接线。
   'test-qqb-color.mjs',
+  'test-qqb-ipa.mjs',
   'test-qqb-vision-notes.mjs',
   'test-qqb-turn-facts.mjs',
   // 图片/语音出场率节奏纸条 + 自带表情（assets/*.png 可天天重复发，晚安鲸鱼）。

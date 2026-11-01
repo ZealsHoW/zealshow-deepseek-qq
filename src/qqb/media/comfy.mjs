@@ -25,7 +25,7 @@ import {
   styleKey,
 } from '../../../dsh/qq-extras-patch/lib/comfy.mjs';
 
-export const VERSION = '0.3.0';
+export const VERSION = '0.4.0';
 
 /** 默认画风：二次元（她的人设就是蓝白鲸鱼娘，动漫风最贴）。 */
 export const DEFAULT_STYLE = 'anime';
@@ -35,8 +35,8 @@ export const DEFAULT_ASPECT = 'square';
 export const ALLOWED_STYLES = Object.freeze(['anime', 'anime-sd15', 'realistic']);
 /** 单张图的时长预算：4060 8 GB 上 SDXL 1024 约 25~45 秒，首图还要加加载模型的时间。 */
 export const DEFAULT_TIMEOUT_MS = DEFAULT_GENERATE_TIMEOUT_MS;
-/** 她自己的 LoRA（17 张定稿图、dim 16、800 步、2026-10-29 训）。挂上它才「像她」。 */
-export const DEFAULT_LORA = 'xiaojing_sdxl_lora.safetensors';
+/** 她自己的 LoRA。2026-11-01 换成 v4（49 张、含 Q 版与小红书风、续训 600 步）——v2 出来偏成熟、线条糊。 */
+export const DEFAULT_LORA = 'xiaojing_sdxl_lora_v4.safetensors';
 /** LoRA 的触发词：训练集每张 caption 的第一个 tag。 */
 export const DEFAULT_TRIGGER = 'xiaojing';
 /** LoRA 权重：0.8 是有她没有训糊的平衡点（1.0 会生硬地往训练图的构图靠）。 */
@@ -62,6 +62,21 @@ export const DEFAULT_CFG_BOOST = 0.8;
  * 1 = 默认力度，0 = 关掉，2 = 很浓。
  */
 export const DEFAULT_HAIR_DEPTH = 1;
+/**
+ * 形象参考（IPAdapter）——2026-11-01 主人：「她现在生的图连几个人都分不清楚，也没有她的形象」。
+ *
+ * 只靠 LoRA（49 张、dim 32）出来的永远是「蓝发动漫少女」，换套衣服就认不出是谁；
+ * 加上 IPAdapter 把一张定稿图当参考，脸型/发型/鲸鱼发饰/配色才锁得住（实测比纯 LoRA 像得多）。
+ * 参考图放 `assets/xiaojing-ref.jpg`，出图时自动拷进 ComfyUI 的 input 目录。
+ */
+export const DEFAULT_REFERENCE = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', '..', 'assets', 'xiaojing-ref.jpg');
+/** 单人时的参考强度：0.7 锁得住长相，又不至于把构图也搬过来。 */
+export const DEFAULT_IPA_WEIGHT = 0.7;
+/**
+ * 多人时的参考强度：IPAdapter 会把**衣服**也一起搬，两个人穿同一套就分不清了。
+ * 所以人多时压低参考、并把权重类型切成「prompt is more important」，让文字里的不同特征说话。
+ */
+export const GROUP_IPA_WEIGHT = 0.45;
 
 /** 提示词去重地补上鲜艳标签（她本来就写了 vivid/saturated 就不重复）。 */
 export function withVivid(prompt, suffix = COLOR_SUFFIX) {
@@ -85,6 +100,36 @@ export function mergeDullNegative(negative, dull = DULL_NEGATIVE) {
     .map((x) => x.trim())
     .filter(Boolean)
     .filter((tag) => !low.includes(tag.toLowerCase()));
+  return add.length ? `${base ? `${base}, ` : ''}${add.join(', ')}` : base;
+}
+
+/**
+ * 数人数：SDXL 不看「两个人在长椅上」这种叙事，它只认 `2girls` 这类**计数标签**。
+ * 主人 2026-11-01 说「连几个人都分不清楚」，根因就是她的 prompt 里从来没有计数标签。
+ * @returns {number} 0 = 没写（当单人处理）
+ */
+export function countPeople(prompt) {
+  const text = String(prompt ?? '');
+  const mixed = text.match(/(\d+)\s*\+?\s*(girls?|boys?|others?|people|women|men)\b/i);
+  if (mixed) return Math.max(0, Number(mixed[1]) || 0);
+  const chinese = text.match(/([两二三四五六七八九十几])\s*(?:个|名|位)?\s*(?:人|女孩|女生|男孩|男生)/);
+  if (chinese) {
+    const table = { 两: 2, 二: 2, 三: 3, 四: 4, 五: 5, 六: 6, 七: 7, 八: 8, 九: 9, 十: 10, 几: 2 };
+    return table[chinese[1]] ?? 2;
+  }
+  const english = text.match(/\b(two|three|four|five|six)\s+(girls?|boys?|people|friends|women|men)\b/i);
+  if (english) return { two: 2, three: 3, four: 4, five: 5, six: 6 }[english[1].toLowerCase()] ?? 2;
+  if (/\b(1girl|solo)\b/i.test(text)) return 1;
+  return 0;
+}
+
+/** 多人时补负向词：不加的话 SDXL 会把两个人糊成一片（融合的脸、连体的身子）。 */
+export function mergeGroupNegative(negative, people = 0) {
+  const base = String(negative ?? '').trim();
+  const low = base.toLowerCase();
+  const want = ['merged bodies', 'fused faces', 'duplicate face', 'cloned face'];
+  if (people === 1 || people === 0) want.push('extra person', 'multiple girls');
+  const add = want.filter((tag) => !low.includes(tag));
   return add.length ? `${base ? `${base}, ` : ''}${add.join(', ')}` : base;
 }
 
@@ -219,6 +264,48 @@ export function createComfyClient({ outDir = null, baseUrl = comfyUrl(), timeout
   // 提色/压缩这类「顺带做的事」失败只该记日志，不该把这张图搞没。
   loggerWarn = (message, detail) => logger?.warn?.(message, detail);
 
+  /**
+   * IPAdapter 装没装：没装就退回纯 LoRA（宁可像一点别人，也别整张图报错）。
+   * 探一次记一辈子（装节点要重启 ComfyUI，重启后进程也跟着重启了）。
+   */
+  let ipaState = null;
+  async function ipaAvailable({ timeoutMs: probeMs = 4000 } = {}) {
+    if (ipaState !== null) return ipaState;
+    try {
+      const res = await fetch(`${url}/object_info/IPAdapterUnifiedLoader`, { signal: AbortSignal.timeout(probeMs) });
+      const body = await res.json();
+      ipaState = !!body?.IPAdapterUnifiedLoader;
+    } catch {
+      ipaState = false;
+    }
+    return ipaState;
+  }
+
+  /**
+   * 参考图要出现在 ComfyUI 的 input 目录里 LoadImage 才认得。
+   * 由桥接负责拷进去（同名同大小就跳过），返回给 LoadImage 用的文件名。
+   */
+  function ensureComfyInput(refPath) {
+    const src = path.resolve(String(refPath));
+    if (!fs.existsSync(src)) return null;
+    const inputDir = process.env.QQB_COMFY_INPUT
+      || path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', '..', '..', '_comfy', 'ComfyUI', 'input');
+    const name = path.basename(src);
+    const dst = path.join(inputDir, name);
+    try {
+      const size = fs.statSync(src).size;
+      const same = fs.existsSync(dst) && fs.statSync(dst).size === size;
+      if (!same) {
+        fs.mkdirSync(inputDir, { recursive: true });
+        fs.copyFileSync(src, dst);
+      }
+      return name;
+    } catch (error) {
+      loggerWarn('画图：参考图拷不进 ComfyUI input，退回纯 LoRA', error?.message ?? String(error));
+      return null;
+    }
+  }
+
   /** ComfyUI 里现有哪些 LoRA（读 LoraLoader 的枚举；服务没起就返回空）。 */
   async function knownLoras({ timeoutMs: probeMs = 5000 } = {}) {
     try {
@@ -258,8 +345,10 @@ export function createComfyClient({ outDir = null, baseUrl = comfyUrl(), timeout
     };
   }
 
-  /** 挂 LoRA 的那条路：自己组图（CheckpointLoader → LoraLoader → 两个 CLIPTextEncode → KSampler → VAE）。 */
-  async function drawWithLora({ prompt, style, aspect, seed, steps, cfg, width, height, negative, prefix, lora, loraWeight, trigger }) {
+  /** 挂 LoRA 的那条路：自己组图（CheckpointLoader → LoraLoader → 两个 CLIPTextEncode → KSampler → VAE）。
+   *  2026-11-01 起可选再串一层 IPAdapter：用 `assets/xiaojing-ref.jpg` 当形象参考，
+   *  否则纯 LoRA 只会画出「蓝发动漫少女」，换个衣服就认不出是她。 */
+  async function drawWithLora({ prompt, style, aspect, seed, steps, cfg, width, height, negative, prefix, lora, loraWeight, trigger, reference, ipaWeight }) {
     const key = normalizeStyle(style);
     const spec = STYLE_TABLE[key];
     const name = String(lora).trim();
@@ -285,6 +374,15 @@ export function createComfyClient({ outDir = null, baseUrl = comfyUrl(), timeout
     // 2026-10-29 前的 bug：这里写死成 spec.cfg，调用方传的 cfg 从来没生效过。
     const realCfg = clampFloat(cfg, 1, 20, spec.cfg);
     const text = withTrigger(prompt, trigger);
+    // 形象参考：装没装 IPAdapter、参考图在不在，都得先探清楚；任何一环缺了就安静退回纯 LoRA。
+    let refName = null;
+    if (reference && lora) {
+      const hasIpa = await ipaAvailable();
+      if (hasIpa) refName = ensureComfyInput(reference);
+      if (!hasIpa) loggerWarn('画图：ComfyUI 里没装 IPAdapter，这次只挂 LoRA');
+    }
+    const people = countPeople(prompt);
+    const realIpaWeight = clampFloat(ipaWeight, 0, 2, people > 1 ? GROUP_IPA_WEIGHT : DEFAULT_IPA_WEIGHT);
     const graph = {
       1: { class_type: 'CheckpointLoaderSimple', inputs: { ckpt_name: spec.preferred } },
       2: {
@@ -298,12 +396,26 @@ export function createComfyClient({ outDir = null, baseUrl = comfyUrl(), timeout
         class_type: 'KSampler',
         inputs: {
           seed: realSeed, steps: realSteps, cfg: realCfg, sampler_name: spec.sampler, scheduler: spec.scheduler, denoise: 1,
-          model: ['2', 0], positive: ['3', 0], negative: ['4', 0], latent_image: ['5', 0],
+          // 挂了 IPAdapter 就从它出来的 MODEL 上采样（节点 11），否则直接吃 LoRA（节点 2）。
+          model: [refName ? '11' : '2', 0], positive: ['3', 0], negative: ['4', 0], latent_image: ['5', 0],
         },
       },
       7: { class_type: 'VAEDecode', inputs: { samples: ['6', 0], vae: ['1', 2] } },
       8: { class_type: 'SaveImage', inputs: { filename_prefix: String(prefix || 'qq-draw'), images: ['7', 0] } },
     };
+    if (refName) {
+      graph[20] = { class_type: 'LoadImage', inputs: { image: refName, upload: 'image' } };
+      graph[10] = { class_type: 'IPAdapterUnifiedLoader', inputs: { model: ['2', 0], preset: 'PLUS (high strength)' } };
+      graph[11] = {
+        class_type: 'IPAdapter',
+        inputs: {
+          model: ['10', 0], ipadapter: ['10', 1], image: ['20', 0],
+          weight: realIpaWeight, start_at: 0, end_at: 1,
+          // 人多时让文字说了算，否则两个人会被参考图带成同一套衣服、同一张脸。
+          weight_type: people > 1 ? 'prompt is more important' : 'standard',
+        },
+      };
+    }
 
     const started = Date.now();
     const res = await fetch(`${url}/prompt`, {
@@ -362,6 +474,7 @@ export function createComfyClient({ outDir = null, baseUrl = comfyUrl(), timeout
     return {
       ok: true, file, bytes: buffer.length, mime, style: key, label: spec.label,
       checkpoint: spec.preferred, lora: name, loraWeight, trigger: withTrigger('', trigger) ? String(trigger ?? DEFAULT_TRIGGER) : '',
+      reference: refName || null, ipaWeight: refName ? realIpaWeight : 0, people,
       seed: realSeed, width: size.width, height: size.height, steps: realSteps, cfg: realCfg,
       promptId, elapsedMs: Date.now() - started, view, prompt: text,
     };
@@ -376,6 +489,7 @@ export function createComfyClient({ outDir = null, baseUrl = comfyUrl(), timeout
     prompt, style = DEFAULT_STYLE, aspect = DEFAULT_ASPECT, seed, steps, width, height, negative,
     prefix = 'qq-draw', lora = DEFAULT_LORA, loraWeight = DEFAULT_LORA_WEIGHT, trigger = DEFAULT_TRIGGER,
     vivid = true, saturation = DEFAULT_SATURATION, cfg, hairDepth = DEFAULT_HAIR_DEPTH,
+    reference = DEFAULT_REFERENCE, ipaWeight,
   } = {}) {
     const text = String(prompt ?? '').trim();
     if (!text) throw new Error('prompt 不能为空（英文 Danbooru 标签或英文描述效果最好）');
@@ -384,11 +498,14 @@ export function createComfyClient({ outDir = null, baseUrl = comfyUrl(), timeout
     // 颜色口径：默认补鲜艳标签 + 压发灰 + 抬 cfg；vivid:false 就原样。
     const wantVivid = vivid !== false;
     const finalPrompt = wantVivid ? withVivid(text) : text;
-    const finalNegative = wantVivid ? mergeDullNegative(negative ?? spec.negative) : negative;
+    const people = countPeople(text);
+    // 负向词三层叠加：风格表底色 → 压发灰 → 人数护栏（多人别糊成一片，单人别有第二个人）。
+    const baseNegative = wantVivid ? mergeDullNegative(negative ?? spec.negative) : (negative ?? spec.negative);
+    const finalNegative = mergeGroupNegative(baseNegative, people);
     const realCfg = clampFloat(cfg, 1, 20, spec.cfg + (wantVivid ? DEFAULT_CFG_BOOST : 0));
     const realSat = clampFloat(saturation, 1, 2, wantVivid ? DEFAULT_SATURATION : 1);
     const result = lora
-      ? await drawWithLora({ prompt: finalPrompt, style: key, aspect, seed, steps, cfg: realCfg, width, height, negative: finalNegative, prefix, lora, loraWeight, trigger })
+      ? await drawWithLora({ prompt: finalPrompt, style: key, aspect, seed, steps, cfg: realCfg, width, height, negative: finalNegative, prefix, lora, loraWeight, trigger, reference, ipaWeight })
       : await generate({
         prompt: finalPrompt,
         style: key,
@@ -425,7 +542,7 @@ export function createComfyClient({ outDir = null, baseUrl = comfyUrl(), timeout
     return { ...result, rel, url };
   }
 
-  return { VERSION, url, budget, status, draw, knownLoras };
+  return { VERSION, url, budget, status, draw, knownLoras, ipaAvailable };
 }
 
 /** 按风格表挑尺寸（和上游 pickSize 同一口径，只是不导出那个函数，这里补一份）。 */

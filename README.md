@@ -1286,6 +1286,43 @@ qq_generate_image(prompt="1girl, chibi, blue hair, holding a big fish, surprised
 
 配置：`socialV2.image = { vivid: false, saturation: 1, hairDepth: 1 }`（`hairDepth` 0 关掉、2 很浓；想整体艳再开 `vivid: true` + `saturation: 1.12`）。脚本靠 `_rvc/env/Scripts/python.exe`（numpy + Pillow）跑，找不到 python 就跳过加深、图照发。
 
+### 「连几个人都分不清楚，也没有她的形象」（2026-11-01）
+
+主人看她的图说得很准：纯 LoRA 出来的永远是「蓝发动漫少女」——换套衣服就认不出是谁，画两个人还会糊成一个人。两件事分开修：
+
+| 问题 | 根因 | 修法 |
+| --- | --- | --- |
+| 没有她的形象 | 49 张素材、dim 32 的 LoRA 只学到「蓝发少女」这个大类，脸型发饰全靠运气 | LoRA 之后串一层 **IPAdapter**，用 `assets/xiaojing-ref.jpg`（她的一张定稿图）当形象参考 |
+| 几个人分不清 | 她的 prompt 里**从来没有计数标签**，SDXL 只认 `2girls` 这种 tag，不认「两个人坐在长椅上」 | `countPeople()` 数人头 → 自动补计数负向词；提示词教她「画几个人一定要数清楚」 |
+
+**IPAdapter 的接线（0.4.0）**
+
+- 图里多三个节点：`LoadImage`（参考图，自动从 `assets/xiaojing-ref.jpg` 拷进 ComfyUI 的 `input/`，同名同大小就跳过）→ `IPAdapterUnifiedLoader`（`preset: 'PLUS (high strength)'`，SDXL 用这个）→ `IPAdapter`；KSampler 的 `model` 改成从 IPAdapter 出（`['11', 0]`），没参考时才吃 LoRA（`['2', 0]`）。
+- 参考强度：单人 `DEFAULT_IPA_WEIGHT = 0.7`，多人压到 `GROUP_IPA_WEIGHT = 0.45`，并把 `weight_type` 切成 `prompt is more important`——IPAdapter 会把**衣服**一起搬过来，权重太高时两个人穿同一套、脸也趋同（实测 `duo-w5-ipa6` 就是这样）。
+- 没装 IPAdapter（`/object_info/IPAdapterUnifiedLoader` 探不到）就静默退回纯 LoRA，只在日志里写一句：宁可少像一点，也不能因为少个节点整张图报错。`ipaState` 只探一次（装节点要重启 ComfyUI，进程也跟着重启了）。
+- 默认 LoRA 从 v2 换到 **v4**（含 Q 版与小红书风那 4 张、续训 600 步）：v2 出来偏成熟、线条糊，这是主人原话「现在有点成熟」的直接结论。
+
+**人数口径**
+
+```text
+countPeople('1girl, solo')            → 1   负向补 extra person, multiple girls
+countPeople('2girls, two friends')    → 2   负向补 merged bodies, fused faces
+countPeople('两个女孩坐在长椅上')      → 2   （中文数字也认）
+countPeople('a girl in a park')       → 0   当单人处理，一样补 extra person
+```
+
+**配置**：`socialV2.image.reference` 换参考图（设成空串 `""` 关掉 IPAdapter）、`ipaWeight` 手动指定强度（不给就按人数取默认）。改了要重启桥接。
+
+**装 IPAdapter 时踩过的坑**（重装照这个来）
+
+1. 节点：GitHub 直连全失败（`Recv failure: Connection was reset` / `Failed to connect to github.com:443 after 21098 ms`），只有 `https://gh-proxy.com/` 前缀能下：`curl -sSL --ssl-no-revoke -o /tmp/ipa.zip "https://gh-proxy.com/https://github.com/cubiq/ComfyUI_IPAdapter_plus/archive/refs/heads/main.zip"`，解压到 `_comfy/ComfyUI/custom_nodes/ComfyUI_IPAdapter_plus`。
+2. 模型（走 hf-mirror，`curl -4 -sSL -C -` 断点续传，第一次会下到一半被截断）：
+   - `_comfy/models/ipadapter/ip-adapter-plus_sdxl_vit-h.safetensors`（847517512 字节）← `https://hf-mirror.com/h94/IP-Adapter/resolve/main/sdxl_models/ip-adapter-plus_sdxl_vit-h.safetensors`（注意在 `sdxl_models/` 下，`models/` 那份是 `Entry not found`）
+   - `_comfy/models/clip_vision/CLIP-ViT-H-14-laion2B-s32B-b79K.safetensors`（2528373448 字节）← `https://hf-mirror.com/h94/IP-Adapter/resolve/main/models/image_encoder/model.safetensors`
+3. `ClipVision model not found.`（`IPAdapterPlus.py:585`）：`_comfy/ComfyUI/extra_model_paths.yaml` 只列了 checkpoints/vae/loras/upscale_models，要补 `clip_vision: models/clip_vision` 与 `ipadapter: models/ipadapter` 再重启。
+
+**回归**：`node scripts/test-qqb-ipa.mjs`（26 项：默认 v4、参考图存在、三节点接线、模型从 IPAdapter 出、多人权重与 `weight_type`、没装就退回、人数口径与负向词、桥接透传、提示词口径）。
+
 ### 登录态（给抖音一个常驻账号）
 
 识别和读网页共用同一个持久化浏览器 profile（`state/browser-profile`），所以**扫码登录一次，之后无头读取一直带着登录态**：

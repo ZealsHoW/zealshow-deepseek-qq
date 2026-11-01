@@ -145,9 +145,9 @@ export const MODULES = {
     note: 'R6 媒体能力：识图走 provider（默认本机 Ollama qwen2.5vl）；图生图 / 视频帧解析接口已预留（未接入时给可识别错误 MEDIA_NOT_SUPPORTED），换模型或接云端不用改调用点',
   },
   'media/comfy': {
-    version: '0.3.0',
+    version: '0.4.0',
     files: ['src/qqb/media/comfy.mjs'],
-    note: '自绘：本机 ComfyUI 文生图（Animagine XL 4.0 / SDXL），复用 dsh/qq-extras-patch/lib/comfy.mjs 的成熟客户端，产物落 state/outbox；风格收窄成 anime/anime-sd15/realistic，连不上时给中文原因而不是英文栈；0.2.0 起默认挂她自己的角色 LoRA（xiaojing_sdxl_lora，触发词 xiaojing，权重 0.8），传 lora="" 画原模型；0.3.0 起默认补鲜艳标签 + 压发灰负向词 + cfg 抬 0.8，出图后用 ffmpeg 提饱和度 1.12（vivid:false 回到原来的淡图）',
+    note: '自绘：本机 ComfyUI 文生图（Animagine XL 4.0 / SDXL），复用 dsh/qq-extras-patch/lib/comfy.mjs 的成熟客户端，产物落 state/outbox；风格收窄成 anime/anime-sd15/realistic，连不上时给中文原因而不是英文栈；0.2.0 起默认挂她自己的角色 LoRA（xiaojing_sdxl_lora，触发词 xiaojing，权重 0.8），传 lora="" 画原模型；0.3.0 起默认补鲜艳标签 + 压发灰负向词 + cfg 抬 0.8，出图后用 ffmpeg 提饱和度 1.12（vivid:false 回到原来的淡图）；0.4.0 起（2026-11-01 主人：连几个人都分不清楚，也没有她的形象）默认 LoRA 换成 v4，并在 LoRA 之后串一层 IPAdapter，用 assets/xiaojing-ref.jpg 当形象参考（单人 0.7 / 多人压到 0.45 且 weight_type=prompt is more important，否则两人被带成同一套衣服）；负向词按 countPeople() 补 extra person 或 merged bodies，没装 IPAdapter 就静默退回纯 LoRA',
   },
   'media/annotate': {
     version: '0.1.0',
