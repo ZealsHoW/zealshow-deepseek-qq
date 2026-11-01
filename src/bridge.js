@@ -836,6 +836,10 @@ const ENGINE_RULES = [
   '【别把问话当差事】别人问「你还记得…吗」「我们说过什么」是在问你，不是让你去传话、也不是给你派活。先 `qq_memory_search` 查一下，再照实答：记得就说什么，记不清就说「我记不太清，是不是…」，别一口否认「我啥时候说过」。只有带「帮我 / 替我 / 你去」这种明确授权，才是让你去办。',
   '【报告别念原文】说过、发过什么，一句话带过就行（「我问过妈了」「歌发出去了」），别复述原文、别说「我跟X说的是：「…」」——那是工单回执，不是人说话。',
   '【别空口答应】别说「好，我记着了」「回头我跟X说一声」这种话：要么这一轮就办，要么直说办不了、不想办。',
+  // 2026-11-01：妈妈连着问三次「你跟爸说了吗」，她答「说了，我跟爸说你想他了」「我发完还盯着手机
+  // 等爸回呢」——爸爸那边一条消息都没有（state/history/private_3482501440.jsonl 那段是空的，
+  // state/tool-calls.jsonl 那一小时 0 条调用）。空口答应的成本很实在：妈妈以为话带到了，白等一晚。
+  '【替人传话只有一条路】答应替谁给谁带话，就在这一轮调 `qq_direct(...)` 真发出去，发完再说「说了」——跨会话传话没有「心里已经说了」这回事。被追问「说了吗」而你其实还没发，就直说「还没，我这就发」，同一轮把 `qq_direct` 调掉；调不动（对方不在白名单、令牌过期）就照实说发不出去。',
   // 的约定被反复注入，她每轮都往这上面拐，像复读。约定可以记着，但**话题要轮换**。
   '【别揪着一件事】同一件事（尤其是催妈妈背单词、抽查单词这种）别每轮都提。答应过的事记着，但一天自然提一次就够；她明显不想聊、在上班/上课/看剧、或者已经岔开话题了，就先别提。关心一个人有很多种方式，换着来：吃没吃饭、上班路上顺不顺、今天累不累、肩膀酸不酸、想不想听我唱一首、要不要一起看个剧、天冷了加衣服、周末想去哪、别熬太晚……同一个话题连着出现两三轮，就换个新角度，别往上叠。',
   // R9（2026-10-28 主人「活人化」重构）：单句、停顿、自主、念头、记忆留感受。
@@ -1098,6 +1102,41 @@ function inboundImageNote(key, messageId) {
 }
 
 /**
+ * 上一轮她到底做了什么：`key` → { at, tools, text, claim, lied }。
+ *
+ * 为什么记这个：「说已经发过」和「真发了」在模型眼里没差别，在她嘴里就变成
+ * 2026-11-01 那句「说了，我跟爸说你想他了」——爸爸那边一条都没有。规则写在
+ * ENGINE_RULES 里不够（她照样犯），所以每轮把「实际调了哪些工具」记下来，
+ * 下一轮把这份笔录摆到她面前，她就没法再把「打算发」讲成「发过了」。
+ */
+const lastTurnFacts = new Map();
+/** 「我已经跟X说了 / 我发给他了 / 说了」这类**完成态**的传话宣告（一致用词都在 2026-11-01 的原话里）。 */
+const CLAIM_SENT_RE = /(我)?(已经|刚刚)?(跟|给|和|向)\s*\S{1,10}?\s*(说|讲|发|转告|提醒|带话|传话|打个招呼)(过|了)|^说了|^(已经)?发了|我发了|发给他了|发给\S{1,8}了|我提醒他了/;
+const DELIVERY_TOOLS = new Set([
+  'qq_direct',
+  'qq_send_message',
+  'qq_send_burst',
+  'qq_send_private_message',
+  'qq_send_group_message',
+  'qq_reply',
+]);
+
+function recordTurnFacts(key, text, toolCalls) {
+  const tools = (Array.isArray(toolCalls) ? toolCalls : [])
+    .map((c) => String(c?.name ?? ''))
+    .filter(Boolean);
+  const claim = CLAIM_SENT_RE.test(String(text ?? ''));
+  const delivered = tools.some((t) => DELIVERY_TOOLS.has(t));
+  const lied = claim && !delivered;
+  lastTurnFacts.set(key, { at: Date.now(), tools, text: String(text ?? '').slice(0, 100), claim, lied });
+  if (lastTurnFacts.size > 40) {
+    const oldest = [...lastTurnFacts.entries()].sort((a, b) => (a[1]?.at ?? 0) - (b[1]?.at ?? 0))[0];
+    if (oldest) lastTurnFacts.delete(oldest[0]);
+  }
+  if (lied) log('直连引擎', `说了做过的事但这一轮没调发送工具（${tools.join(',') || '无'}）：${String(text ?? '').slice(0, 60)}`);
+}
+
+/**
  * 给直连引擎拼一段最近的原始对话（不折叠，折叠交给 loop 里的 foldHistory）。
  *
  * 截到「最后一条对方消息」之前：最后那条就是本轮 prompt.user 里已经写进去的触发消息，
@@ -1188,6 +1227,7 @@ async function runDirectAgentTurn(key, reason) {
   try {
     await sendToSession(key, bubbles);
     if (typeof runtimeHooks.recordSent === 'function') runtimeHooks.recordSent(key, bubbles);
+    recordTurnFacts(key, text, result.toolCalls);
     log('直连引擎', `已发言（${ms}ms，${text.length} 字 / ${bubbles.length} 条，工具：${toolNames}）`);
     // 文字先落地，表情/图片再跟上 —— 顺序才是「说完话配个表情」的样子。
     if (media.size()) await flushEngineMediaIntents(key, media);
@@ -1196,6 +1236,7 @@ async function runDirectAgentTurn(key, reason) {
     // 网关不顺时发送链路会把消息落盘等补发（error.queued）——那算说过了，别当失败重来一遍。
     if (error?.queued) {
       if (typeof runtimeHooks.recordSent === 'function') runtimeHooks.recordSent(key, bubbles);
+      recordTurnFacts(key, text, result.toolCalls);
       if (media.size()) log('直连引擎', `文字已入队补发，这一轮 ${media.size()} 个媒体意向不再补发（避免表情先于文字到达）`);
       log('直连引擎', `已发言但暂存待补发（${ms}ms，${text.length} 字，工具：${toolNames}）`);
       return { handled: true, ok: true, text, fallbackSafe: false, error: '' };
@@ -15020,6 +15061,14 @@ ${memLines ? `\n记忆库里：\n${memLines}\n` : '\n记忆库最近没有新东
       } else {
         bits.push(`【${String(lastMsg.sender || '他')}发来一张图，你还没看清】要看就调 qq_describe_image(${[mid, `key="${key}"`].filter(Boolean).join(', ')})；真看不清就直说看不清，别猜图里是什么。`);
       }
+    }
+    // 「说过 = 做过」的笔录：上一轮她宣告过「我跟X说了」，那一轮的工具记录里却没有任何发送动作，
+    // 就把这件事摆到她面前。她照着自己上一句往下编的倾向很强——2026-11-01 19:39 说「说了，
+    // 我跟爸说你想他了」，19:40 再说一遍，19:46 还补细节「我发完还盯着手机等爸回呢」，
+    // 而爸爸那边一条都没有。规则不够，旁证才够。
+    const turnFacts = lastTurnFacts.get(key);
+    if (turnFacts?.lied) {
+      bits.push(`【上一轮你说过「${turnFacts.text}」，可那一轮你一个发送工具都没调（工具：${turnFacts.tools.join(',') || '无'}）】那件事其实还没办成。这一轮要么现在就办（跨会话传话用 qq_direct），要么照实说「我还没发」；别再重复说已经发过了，也别编对方回你什么。`);
     }
     // 定时唤醒（主动机会 / 自己刷一会儿 / 写日记）在 DSH 路径有专门的行为口径，直连路径也得有：
     // 她一睁眼只看到「唤醒原因：proactiveCheck」，不知道这是一次可以主动开口、可以自己去刷的机会；

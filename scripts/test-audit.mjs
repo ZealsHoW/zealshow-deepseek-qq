@@ -137,6 +137,7 @@ const tests = [
   // 颜色口径：鲜艳标签/压发灰/浮点 clamp/提色失败不毁图的接线。
   'test-qqb-color.mjs',
   'test-qqb-vision-notes.mjs',
+  'test-qqb-turn-facts.mjs',
   // 图配文：样式归一、HTML 转义、底图压缩口径、画完先叠字再发的接线。
   'test-qqb-annotate.mjs',
   // P1 潘多拉记忆核心：L2–L6 分层、关系硬过滤（群/朋友/主人）、归档清扫与复职、
