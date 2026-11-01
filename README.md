@@ -1597,6 +1597,36 @@ L1–L6 里最容易做错的一层是 **L2（原文）**：如果每句话都�
 
 回归：`scripts/test-qqb-vision-notes.mjs`（6 项静态断言），audit 75/75。
 
+### 她从不自己发图、发语音：给「媒体出场率」一点节奏（2026-11-01）
+
+主人另一句：「她现在也不会自己主动发图片」「提高发送图片、语音的概率」，随后补了一条：「有的表情包也可以重复发，比如感觉要睡觉时就发一张 `assets/goodnight-whale.png`」。
+
+数据先摆出来（`state/tool-calls.jsonl` 按天分）：
+
+| 日期 | `qq_send_image` | 当天工具调用总数 |
+| --- | --- | --- |
+| 10-26 | 1 | 37 |
+| 10-29 | 2 | 59 |
+| 10-30 | 2 | 12 |
+| 10-31 | 0 | 6 |
+| 11-01 | 0 | 1 |
+
+`qq_send_voice` 一次都没自己调过。工具全在 prompt 里（`qq_send_image` @5596、`qq_generate_image` @6170、`qq_image_search` @6646、`qq_send_sticker` @7141、`qq_describe_image` @6741），工具箱 68 件正常——**不是能力缺失，是她一轮轮只顾着打字**。所以不用改工具，改「什么时候想起来用」：
+
+- `mediaRhythm`（`state/media-rhythm.json`，进程内缓存）：记 `lastImageAt` / `lastVoiceAt` / `lastNudgeAt`；
+- `mediaNudgeConfig()`：`imageChance` 0.22、`voiceChance` 0.14、`imageCooldownMin` 45、`voiceCooldownMin` 60、`staleHours` 3、`staleBoost` 0.35；可在 `config.json` 的 `socialV2.media.nudge` 里覆盖，`enabled:false` 直接关掉；
+- `mediaNudgeLine(key, reason)`：按概率 + 冷却决定这一轮要不要递给她的 prompt 塞一张纸条（`MEDIA_NUDGE_IMAGE` / `MEDIA_NUDGE_VOICE`）；`diaryRitual` / `nightGreet` / `directiveFollowUp` 这类仪式轮不递，免得她在该说正事的时候突然发表情；
+- `recordTurnFacts` 里按 `IMAGE_TURN_TOOLS`（send_image / send_sticker / generate_image）和 `VOICE_TURN_TOOLS`（send_voice / sing / sing_send）更新节奏表，冷却才算得准。
+
+自带表情是另一件事：`qq_send_sticker` 原来只认 QQ 收藏表情库（每条都带 `url`），本地 `assets/*.png` 既不在库里也没有 url ⇒ 她**永远发不出去**。现在：
+
+- `LOCAL_STICKERS` 两张：`local-goodnight-whale`（别名 `goodnight-whale`，`assets/goodnight-whale.png`，用「困了/要睡/道晚安」）、`local-deepseek-girl`（别名 `deepseek娘`）；
+- `localStickerEntries()` 把它们拼进 `qq_list_stickers` 的返回（`source: "local"`），`findLocalSticker()` 支持 id / 别名 / 名字模糊匹配；
+- `sendStickerV2` 找不到收藏表情时回落本地文件（`fs.readFileSync`，不走网络，也就没有 CDN 失效）；
+- `ENGINE_RULES` 加【自带表情可以天天发】：`qq_send_sticker("goodnight-whale")` 单独发一条，睡前天天重复也不奇怪。
+
+回归：`scripts/test-qqb-media-rhythm.mjs`（10 项），audit 77/77。想加一张常驻表情就丢进 `assets/` 并往 `LOCAL_STICKERS` 里加一条（`id` / `alias` / `filePath` / `usage`）。
+
 ### 「机制太僵硬」：一句问话被当成派单（2026-10-30）
 
 主人复现两个症状，其实是**两处写死的机制**，不是她「不想好好说」：

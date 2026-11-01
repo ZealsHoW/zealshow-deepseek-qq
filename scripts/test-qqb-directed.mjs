@@ -207,8 +207,12 @@ test('追办：控制台下托付也挂追办，待办带「已经等了N分钟�
   // 只列待办会被当成背景板：每一条都得带上等了多久（2026-10-30 起措辞改成「还挂着」，
   // 原来的「⏰已经等了 N 分钟还没动手」像催工单）
   assert.ok(src.includes('（还挂着，等了 ${Math.round(waitedMs / 60000)} 分钟）'));
-  // 追办提示词原来只写在 DSH 路径（buildWakePromptV2），直连引擎的 buildEnginePrompts 没有
-  assert.equal(src.split("reason.startsWith('directiveFollowUp')").length - 1, 2);
+  // 追办提示词原来只写在 DSH 路径（buildWakePromptV2），直连引擎的 buildEnginePrompts 没有。
+  // 数「用它拼提示词」的地方必须正好两处；2026-11-01 起媒体节奏纸条也用同一个 reason 判断
+  // 来跳过追办（`diaryRitual / nightGreet / directiveFollowUp` 都不递图片语音纸条），那行不算。
+  const followUpUses = src.split('\n').filter((line) => line.includes("reason.startsWith('directiveFollowUp')")
+    && !line.includes('diaryRitual'));
+  assert.equal(followUpUses.length, 2);
   assert.ok(src.includes('const followUpLine = reason.startsWith'));
 });
 

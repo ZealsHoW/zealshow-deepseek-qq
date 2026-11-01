@@ -840,6 +840,9 @@ const ENGINE_RULES = [
   // 等爸回呢」——爸爸那边一条消息都没有（state/history/private_3482501440.jsonl 那段是空的，
   // state/tool-calls.jsonl 那一小时 0 条调用）。空口答应的成本很实在：妈妈以为话带到了，白等一晚。
   '【替人传话只有一条路】答应替谁给谁带话，就在这一轮调 `qq_direct(...)` 真发出去，发完再说「说了」——跨会话传话没有「心里已经说了」这回事。被追问「说了吗」而你其实还没发，就直说「还没，我这就发」，同一轮把 `qq_direct` 调掉；调不动（对方不在白名单、令牌过期）就照实说发不出去。',
+  // 2026-11-01 主人：「有的表情包也可以重复发，比如感觉要睡觉时就发一张 goodnight-whale.png」。
+  // 表情不是「一次性素材」，是可以天天用的口头禅——尤其道别、犯困这种固定场景。
+  '【自带表情可以天天发】`qq_list_stickers` 里 `source: "local"` 的那几张是桥接自带的：`local-goodnight-whale`（晚安鲸鱼，困了/要睡/道晚安时发，天天重复也不奇怪）、`local-deepseek-girl`（被问起 DeepSeek 时）。用 `qq_send_sticker("goodnight-whale")` 单独发一条，别塞进文字气泡里。',
   // 的约定被反复注入，她每轮都往这上面拐，像复读。约定可以记着，但**话题要轮换**。
   '【别揪着一件事】同一件事（尤其是催妈妈背单词、抽查单词这种）别每轮都提。答应过的事记着，但一天自然提一次就够；她明显不想聊、在上班/上课/看剧、或者已经岔开话题了，就先别提。关心一个人有很多种方式，换着来：吃没吃饭、上班路上顺不顺、今天累不累、肩膀酸不酸、想不想听我唱一首、要不要一起看个剧、天冷了加衣服、周末想去哪、别熬太晚……同一个话题连着出现两三轮，就换个新角度，别往上叠。',
   // R9（2026-10-28 主人「活人化」重构）：单句、停顿、自主、念头、记忆留感受。
@@ -1055,6 +1058,140 @@ let readHistoryForEngine = null;
 let lastInboundAt = 0;
 
 /**
+ * 图片/语音的节奏（`key` → { lastImageAt, lastVoiceAt }）。
+ *
+ * 为什么要有它：2026-11-01 主人说「她现在也不会自己主动发图片」「提高发送图片、语音的概率」。
+ * 翻 `state/tool-calls.jsonl`：10-26 起 `qq_send_image` 每天 0~2 次，10-31 之后是 0；
+ * `qq_send_voice` 更是从没自己调过——工具都在（prompt 里写着），只是她一轮轮都在专心打字。
+ * 所以每轮按概率递一张「这轮可以配张图 / 用声音说」的纸条，配上冷却时间，别变成刷屏。
+ */
+const mediaRhythm = new Map();
+/** 真算「发了图」的工具（搜图/画图只是准备，不算）。 */
+const IMAGE_TURN_TOOLS = new Set(['qq_send_image', 'qq_send_sticker', 'qq_generate_image']);
+/** 真算「发了语音」的工具。 */
+const VOICE_TURN_TOOLS = new Set(['qq_send_voice', 'qq_sing', 'qq_sing_send']);
+
+function mediaRhythmOf(key) {
+  let hit = mediaRhythm.get(key);
+  if (!hit) {
+    hit = { lastImageAt: 0, lastVoiceAt: 0 };
+    mediaRhythm.set(key, hit);
+  }
+  return hit;
+}
+
+/** 媒体节奏配置（config.json 的 socialV2.media.nudge 可覆盖；默认值见下）。 */
+function mediaNudgeConfig() {
+  const raw = cfg?.socialV2?.media?.nudge;
+  const n = raw && typeof raw === 'object' ? raw : {};
+  const num = (v, d) => (Number.isFinite(Number(v)) ? Number(v) : d);
+  return {
+    enabled: n.enabled !== false,
+    imageChance: Math.min(1, Math.max(0, num(n.imageChance, 0.22))),
+    voiceChance: Math.min(1, Math.max(0, num(n.voiceChance, 0.14))),
+    imageCooldownMin: Math.max(0, num(n.imageCooldownMin, 45)),
+    voiceCooldownMin: Math.max(0, num(n.voiceCooldownMin, 60)),
+    // 太久没发过就抬概率：正常聊天一天也该有一两张图、一两条语音。
+    staleHours: Math.max(0, num(n.staleHours, 3)),
+    staleBoost: Math.min(1, Math.max(0, num(n.staleBoost, 0.35))),
+  };
+}
+
+/** 这一轮要不要递纸条；递哪张。返回提示词片段或 ''。 */
+function mediaNudgeLine(key, reason) {
+  const n = mediaNudgeConfig();
+  if (!n.enabled) return '';
+  // 仪式类/后台类唤醒别塞：「写日记」那种轮次里递图会跑偏。
+  if (reason === 'diaryRitual' || reason === 'nightGreet' || reason.startsWith('directiveFollowUp')) return '';
+  const rh = mediaRhythmOf(key);
+  const now = Date.now();
+  const imageFresh = now - rh.lastImageAt < n.imageCooldownMin * 60000;
+  const voiceFresh = now - rh.lastVoiceAt < n.voiceCooldownMin * 60000;
+  const staleMs = n.staleHours * 3600000;
+  const imageChance = imageFresh ? 0 : (now - rh.lastImageAt > staleMs ? Math.min(1, n.imageChance + n.staleBoost) : n.imageChance);
+  const voiceChance = voiceFresh ? 0 : (now - rh.lastVoiceAt > staleMs ? Math.min(1, n.voiceChance + n.staleBoost) : n.voiceChance);
+  const wantImage = imageChance > 0 && Math.random() < imageChance;
+  const wantVoice = voiceChance > 0 && Math.random() < voiceChance;
+  if (!wantImage && !wantVoice) return '';
+  // 两个都中时只递一个，别一轮又图又语音（像在交作业）。
+  const pickImage = wantImage && (!wantVoice || Math.random() < 0.55);
+  return pickImage ? MEDIA_NUDGE_IMAGE : MEDIA_NUDGE_VOICE;
+}
+
+const MEDIA_NUDGE_IMAGE = [
+  '【这轮顺手配张图也行】想到画面就用 `qq_generate_image` 画一张（prompt 要英文标签，比如 `1girl, blue hair, window seat, rainy day, warm light`），',
+  '或者 `qq_image_search` 找一张现成的，配一句话发出来；你有自己的角色 LoRA，画自己最稳。',
+  '真想不出画面、或者这轮在说正经事，就光说话——别为了配图硬凑一张不相干的。',
+].join('');
+const MEDIA_NUDGE_VOICE = [
+  '【这轮用声音说也挺好】如果这句话更适合用声音（撒娇、叹气、困了、想他、念一句、哼两句），',
+  '就 `qq_send_voice(text="…")` 真发一条语音，比打字更有温度；不想用就正常打字，别有负担。',
+].join('');
+
+/**
+ * 常驻本地表情（`assets/*.png`）：跟 QQ 收藏表情不一样，这些是桥接自带的「道具」。
+ *
+ * 主人 2026-11-01 点名要的：「有的表情包也可以重复发，比如感觉要睡觉时就发一张
+ * assets/goodnight-whale.png」。qq_send_sticker 原来只认 QQ 收藏表情库（要 url），
+ * 本地文件既不在库里、也没有 url ⇒ 她永远发不出来。现在本地资产也算表情的一种，
+ * 按 id / 别名都能调，且**允许天天重复**（不占 outbox、不走 QQ 表情额度）。
+ */
+const LOCAL_STICKERS = [
+  {
+    id: 'local-goodnight-whale',
+    alias: 'goodnight-whale',
+    name: '晚安鲸鱼',
+    filePath: path.join(ROOT, 'assets', 'goodnight-whale.png'),
+    desc: '晚安鲸鱼：抱着被子睡着的小鲸鱼',
+    usage: '困了、要睡了、道晚安、说完晚安之后',
+    tags: ['晚安', '困', '睡觉', 'goodnight', '睡吧'],
+  },
+  {
+    id: 'local-deepseek-girl',
+    alias: 'deepseek娘',
+    name: 'deepseek娘',
+    filePath: path.join(ROOT, 'assets', 'deepseek娘.png'),
+    desc: 'deepseek娘：蓝白配色的 DeepSeek 拟人形象',
+    usage: '提到 DeepSeek / 被问是不是 DeepSeek 的时候',
+    tags: ['deepseek', '自画像', 'logo'],
+  },
+];
+
+/** 本地表情转成和收藏表情同形状的条目（`source:'local'` 表示 image 走本地文件）。 */
+function localStickerEntries() {
+  const list = [];
+  for (const s of LOCAL_STICKERS) {
+    try {
+      if (!fs.statSync(s.filePath).isFile()) continue;
+    } catch { continue; }
+    list.push({
+      id: s.id,
+      resId: s.id,
+      md5: '',
+      url: '',
+      desc: s.desc,
+      localNote: `${s.name}（自带表情，可以天天重复发）`,
+      tags: s.tags,
+      usage: s.usage,
+      useCount: 0,
+      lastUsedAt: 0,
+      source: 'local',
+      filePath: s.filePath,
+      alias: s.alias,
+    });
+  }
+  return list;
+}
+
+/** 按 id / 别名 / 名字模糊找一张本地表情。 */
+function findLocalSticker(ref) {
+  const raw = String(ref ?? '').trim().toLowerCase();
+  if (!raw) return null;
+  const list = localStickerEntries();
+  return list.find((e) => e.id === raw || String(e.alias).toLowerCase() === raw || String(e.localNote).toLowerCase().includes(raw)) || null;
+}
+
+/**
  * 收图后后台拉到的「图里是什么」：`${key}|${messageId}` → { text, at, pending }。
  *
  * 为什么要这一步：别人发来的消息在 prompt 里只有「[图片]」两个字，也没有 messageId，
@@ -1128,7 +1265,11 @@ function recordTurnFacts(key, text, toolCalls) {
   const claim = CLAIM_SENT_RE.test(String(text ?? ''));
   const delivered = tools.some((t) => DELIVERY_TOOLS.has(t));
   const lied = claim && !delivered;
-  lastTurnFacts.set(key, { at: Date.now(), tools, text: String(text ?? '').slice(0, 100), claim, lied });
+  const rh = mediaRhythmOf(key);
+  const now = Date.now();
+  if (tools.some((t) => IMAGE_TURN_TOOLS.has(t))) rh.lastImageAt = now;
+  if (tools.some((t) => VOICE_TURN_TOOLS.has(t))) rh.lastVoiceAt = now;
+  lastTurnFacts.set(key, { at: now, tools, text: String(text ?? '').slice(0, 100), claim, lied });
   if (lastTurnFacts.size > 40) {
     const oldest = [...lastTurnFacts.entries()].sort((a, b) => (a[1]?.at ?? 0) - (b[1]?.at ?? 0))[0];
     if (oldest) lastTurnFacts.delete(oldest[0]);
@@ -2977,12 +3118,14 @@ async function main() {
   // 返回给 AI 的表情列表（带本地认知）。
   async function listStickersForV2(query = '', count = 48, force = false) {
     const synced = await syncStickerLibrary(force);
-    const entries = synced?.entries ?? stickerEntries;
+    const entries = [...localStickerEntries(), ...(synced?.entries ?? stickerEntries)];
     return formatStickerList(entries, query, count);
   }
 
   // 取单个表情的图片字节（多模态用）。
   async function getStickerImageData(stickerId) {
+    const local = findLocalSticker(stickerId);
+    if (local) return local;
     const synced = await syncStickerLibrary(false);
     const entry = findSticker(synced?.entries ?? stickerEntries, stickerId);
     if (!entry) {
@@ -3622,10 +3765,11 @@ async function main() {
     const assertSendAllowed = captureSendGuard(key);
     // 发送前强制同步一次，确保“刚新增的表情能立即用、刚删除的表情不会继续发”。
     const synced = await syncStickerLibrary(true);
-    const entry = findSticker(synced?.entries ?? stickerEntries, stickerRef);
+    const entry = findSticker([...localStickerEntries(), ...(synced?.entries ?? stickerEntries)], stickerRef)
+      || findLocalSticker(stickerRef);
     if (!entry) throw new Error(`找不到表情 ${stickerRef}，请先用 qq_list_stickers 获取有效 id`);
     const url = entry.url;
-    if (!url) throw new Error(`表情 ${entry.id} 没有可发送的图片地址`);
+    if (!url && entry.source !== 'local') throw new Error(`表情 ${entry.id} 没有可发送的图片地址`);
     const [kind, id] = key.split(':');
     const segments = [];
     const replyToMessageId = options.replyToMessageId;
@@ -3643,9 +3787,16 @@ async function main() {
       segments.push({ type: 'at', data: { qq: at } });
     }
     // 在桥接内完成带 DNS 固定、逐跳校验和大小限制的下载；不能把 URL 交给网关重新抓取。
+    // 本地自带表情（assets/*.png）没有 url，直接读文件——它不走网络，也就没有 CDN 失效这回事。
     let image;
     try {
-      image = await safeFetchBuffer(url, MAX_MEDIA_BYTES);
+      if (entry.source === 'local') {
+        const buf = fs.readFileSync(entry.filePath);
+        if (buf.length > MAX_MEDIA_BYTES) throw new Error(`本地表情太大（${buf.length} 字节）`);
+        image = { buffer: buf };
+      } else {
+        image = await safeFetchBuffer(url, MAX_MEDIA_BYTES);
+      }
     } catch (error) {
       throw new Error(`表情 ${entry.id} 的图片下载失败（QQ CDN 网络异常或地址已失效）：${error?.message ?? error}`);
     }
@@ -8059,7 +8210,9 @@ async function main() {
           if (req.headers['x-agent-token'] && !v2ToolEnabled('getStickerImage')) { sendJson({ ok: false, error: '工具未启用：qq_get_sticker_image' }, 403); return; }
           try {
             const entry = await getStickerImageData(stickerId);
-            const fetched = await safeFetchBuffer(entry.url, MAX_MEDIA_BYTES);
+            const fetched = entry.source === 'local'
+              ? { buffer: fs.readFileSync(entry.filePath) }
+              : await safeFetchBuffer(entry.url, MAX_MEDIA_BYTES);
             const dims = getImageDimensions(fetched.buffer);
             if (dims && dims.width * dims.height > MAX_MEDIA_PIXELS) {
               sendJson({ ok: false, error: `表情图片像素超限（${dims.width}x${dims.height}），已拒绝` }, 400);
@@ -15070,6 +15223,10 @@ ${memLines ? `\n记忆库里：\n${memLines}\n` : '\n记忆库最近没有新东
     if (turnFacts?.lied) {
       bits.push(`【上一轮你说过「${turnFacts.text}」，可那一轮你一个发送工具都没调（工具：${turnFacts.tools.join(',') || '无'}）】那件事其实还没办成。这一轮要么现在就办（跨会话传话用 qq_direct），要么照实说「我还没发」；别再重复说已经发过了，也别编对方回你什么。`);
     }
+    // 图片/语音的「节奏纸条」：她专注打字时会把这两样忘干净（11-01 一整天 0 张 0 条）。
+    // 概率 + 冷却都在 mediaNudgeConfig() 里；不想要就把 socialV2.media.nudge.enabled 设成 false。
+    const mediaHint = mediaNudgeLine(key, reason);
+    if (mediaHint) bits.push(mediaHint);
     // 定时唤醒（主动机会 / 自己刷一会儿 / 写日记）在 DSH 路径有专门的行为口径，直连路径也得有：
     // 她一睁眼只看到「唤醒原因：proactiveCheck」，不知道这是一次可以主动开口、可以自己去刷的机会；
     // diaryRitual 更糟 —— 落到空分支时她把「日记时间」当成一次普通聊天，回了三句话、一个工具没调。
@@ -15738,7 +15895,7 @@ function startThoughtLoop() {
       parts.push('读网页：`qq_read_page(url, maxChars?, waitMs?)` 直接把网页正文读成文字——别人甩抖音链接/口令（「复制打开抖音…」那种）、公众号文章、新闻链接，用这个读内容再聊，比截图清晰；整段口令可以直接粘进 url。');
     }
     if (v2ToolEnabled('sendSticker')) {
-      parts.push('表情包：`qq_list_stickers` 挑一个，用 `qq_send_sticker` 单独发一条（表情不能和文字同气泡）。');
+      parts.push('表情包：`qq_list_stickers` 挑一个，用 `qq_send_sticker` 单独发一条（表情不能和文字同气泡）。列表里 `source:"local"` 的是自带表情，**可以天天重复发**：`goodnight-whale`（晚安鲸鱼）在困了/要睡/道晚安时发，`deepseek娘` 在被问起 DeepSeek 时发。');
     }
     if (v2ToolEnabled('diary')) {
       parts.push('日记：`qq_diary_write(text="...")` 记一笔，`qq_diary_read(days=2)` 翻旧事；值得记住的事、答应过谁什么，都写进去。');
