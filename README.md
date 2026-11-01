@@ -1060,6 +1060,14 @@ pwsh -File _rvc\acapella.ps1 -Song '杨丞琳 - (1749534772)雨爱' -Start 30 -S
 - **一律用 e400（主人 2026-10-28 定：「记得把她唱的所有歌按 e400 来」）**：`assets/weights/xiaojing_e400_s85200.pth`，是通宵训到底的那一版（e40–e400 共 41 个 checkpoint / 2.1 GB）。e160/e260/e400 的客观指标几乎量不出差（质心 1343/1346/1340 Hz、4 kHz 以上能量 0.38/0.35/0.35%），差的只是听感上的稳定度，所以**所有歌统一 e400**，三首（雨爱 / 最后一页 / 如果可以）都已按 e400 重出整首 + 45 秒版。`make-cover.ps1`、`quick45.ps1`、`acapella.ps1` 的默认值都是它。
 - 早先的取舍留档，别回退：`e60_s4560`（只有 290 条 TTS 语料）节奏更稳，`e100_s12500`（加了 11 条真实素材 ×3）更像真人但后半程容易发沙；这两版都已被 e400 取代。
 - **换模型必须清切片**：`vc\` 里是上一版模型换出来的 40 秒切片，脚本按「输出文件存在就跳过」，换模型会静默混着两代音色（2026-10-28 差点又踩）。现在 `make-cover.ps1` 在 `vc\.model` 里记模型名，不一致就清空重转；`infer/cli.py` 本身对「已存在的输出文件」也是静默失败，所以 `acapella.ps1` 是显式先 `Remove-Item` 再转。
+- **进训练前必须过强制预处理（2026-11-01 主人下的规定）**：去混响 → 统一 −16 LUFS → 切 1.5~6 秒 → 掺真实呼吸。脚本 `_rvc/prep-voice.py`，说明见 `_rvc/PREP-VOICE.md`：
+  ```powershell
+  # 抠呼吸库（从真人干声/清唱里挑谱质心 1.5~7 kHz 的噪声段）
+  _rvc\env\Scripts\python.exe -P _rvc\prep-voice.py --mode breaths --in _rvc\sep --in sound --out _rvc\data\breaths
+  # 预处理 + 直接训练（-Prep 会自动串起来；也可先跑 prep 再用 -DataDir 指过去）
+  pwsh -File _rvc\train-more.ps1 -Prep -PrepDereverb auto -Epochs 460
+  ```
+  实测（477 个输入 → **770 条切片 / 54.9 分钟 / 1.32~6.00 秒 / RMS −16.4 dB / 15% 掺了呼吸**）。去混响走 UVR5 的 `UVR-DeEcho-DeReverb.pth`（`audio-separator` 的 VR 架构，60 秒音频约 5.5 秒）；模型不在时退 WPE。四个坑写进 `_rvc/PREP-VOICE.md`：①`nara_wpe.wpe.wpe()` 慢到不能用（1 秒音频 84 秒），要用时间域向量化的 `wpe_v8`，且它的入参是 STFT 不是波形；②`audio-separator` 构造时要 `ffmpeg -version`，PATH 里没 ffmpeg 就 `WinError 2`；③GitHub release 资产被墙，模型得靠 `https://gh-proxy.com/` 前缀下载（还要预放 `download_checks.json`）；④`--resume` 用于中断续跑，`[WinError 8]` 内存不足时单条退 WPE 不拖垮整批。
 - **训练数据怎么攒的**：真实素材先 `adeclip,alimiter=limit=0.5:level=false` 去削波（模拟平台导出的峰值普遍顶 0 dBFS，实测被压平样点 0.038%–1.82%，去完归零且质心不变），再按 `-Copies` 复制进混音集；分离出的真人干声用 `_rvc/screen-sing.py` 挑能唱的段（判据是「相邻帧 f0 跳变 >1.5 半音的比例 ≤ 0.08」，**不能用整句 f0 标准差**——歌本来就有旋律走向，会被全筛掉），筛出 103 段 / 35.1 MB，用 `-SingCopies 1` 并进数据集（477 文件 / 255.5 MB，每轮 126 秒）。
 
 ## 待发文件夹（qq_list_outbox / qq_save_message_image / qq_draw_image）
