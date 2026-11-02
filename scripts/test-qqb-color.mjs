@@ -44,8 +44,9 @@ console.log('颜色口径：');
     src.includes('function deepenHair(') && src.includes('hair-depth.py'));
   ok('头发加深失败只记日志，不毁图', src.includes('画图：头发加深失败，发原图'));
   ok('桥接把 hairDepth 从 config 传下去', bridge.includes('hairDepth: Number(imageCfg.hairDepth) >= 0'));
-  ok('配置默认：vivid 关、饱和 1、头发 1',
-    (() => { const c = JSON.parse(fs.readFileSync(new URL('../config.json', import.meta.url), 'utf8')); const i = c.socialV2?.image ?? {}; return i.vivid === false && Number(i.saturation) === 1 && Number(i.hairDepth) === 1; })());
+  // 2026-11-01 起挂了 IPAdapter（参考图偏淡），config 里的 hairDepth 调到 2 才不发灰。
+  ok('配置默认：vivid 关、饱和 1、头发 ≥1',
+    (() => { const c = JSON.parse(fs.readFileSync(new URL('../config.json', import.meta.url), 'utf8')); const i = c.socialV2?.image ?? {}; return i.vivid === false && Number(i.saturation) === 1 && Number(i.hairDepth) >= 1; })());
   ok('加深脚本在仓库里（scripts/hair-depth.py）', fs.existsSync(new URL('./hair-depth.py', import.meta.url)));
 }
 

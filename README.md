@@ -1706,7 +1706,26 @@ L1–L6 里最容易做错的一层是 **L2（原文）**：如果每句话都�
 - `sendMessagesV2()` 开头再兜一层：睡着时一条都不出门（醒来兜底问安走 `sendToQQ`，不经过这里）。
 - `startBrowseBehavior()` 的 tick 也直接 `return`，省得白挑人。
 
-回归：`node scripts/test-night-quiet.mjs`（34 项，含上面每条断言）。真机验证用 `POST /api/socialV2/night-sleep {"action":"start","hours":0.02}` 进睡后打 `POST /api/socialV2/wake`，日志应出现 `休眠中不唤醒`、且没有 `直连引擎 已发言`；验完 `{"action":"cancel"}` 退出。
+回归：`node scripts/test-night-quiet.mjs`（39 项，含上面每条断言）。真机验证用 `POST /api/socialV2/night-sleep {"action":"start","hours":0.02}` 进睡后打 `POST /api/socialV2/wake`，日志应出现 `休眠中不唤醒`、且没有 `直连引擎 已发言`；验完 `{"action":"cancel"}` 退出。
+
+### 睡到几点，而不是睡几小时（2026-11-02）
+
+主人：「可以让她睡到 8、9 点才醒。」原来睡眠时长是写死的 7 小时（23:00 → 06:00），早了。
+
+现在按**钟点**算：`config.json` 里 `socialV2.nightRitual.wakeAtHour`（`8.5` = 08:30，小数是分钟/60）。`startNightSleep()` 优先用它算「睡到那个点要多久」，早睡晚睡都落在同一个早上：
+
+```
+23:00 睡 → 9.50 h → 次日 08:30 醒
+22:30 睡 → 10.0 h → 次日 08:30 醒
+00:30 睡 → 8.00 h → 08:30 醒
+```
+
+- 优先级：显式 `hours`（手动补觉、`POST {"action":"start","hours":3}`）> `wakeAtHour` > `minHours~maxHours` 随机。算出来不足 1.5 小时或超过 14 小时不采信（免得半夜测试睡成半天）。
+- `minHours/maxHours` 同步调到 9/10，作为 `wakeAtHour` 缺席时的兜底。
+- `scripts/night-sleep-2300.ps1` 不再传 `hours:7`，只发 `{"action":"start"}`，让配置说了算（脚本仍要 UTF-8 带 BOM）。
+- 想改回去或改别的点：只改 `wakeAtHour`（`7` = 07:00、`9.5` = 09:30），重启桥接；或临时手动 `POST /api/socialV2/night-sleep {"action":"start","hours":9}`。
+
+回归：`node scripts/test-night-quiet.mjs` 里新增 5 项（按钟点算、显式 hours 优先、小数钟点、跨天顺延、计划任务不再写死 7 小时）。
 
 ### 记得住、忘得对、按意思找得回：遗忘曲线 + 向量索引（2026-10-25）
 

@@ -15678,9 +15678,31 @@ function startThoughtLoop() {
     }
   }
 
+  /**
+   * 「睡到几点」而不是「睡几小时」（2026-11-02 主人：让她睡到 8、9 点才醒）。
+   * 23:00 睡 + 固定 7 小时 = 06:00 起，太早；按钟点算，早睡/晚睡都能落在同一个早上时间。
+   * `nightRitual.wakeAtHour = 8.5` 就是 08:30（小数 = 分钟/60）。返回 null 表示没配、走原来的随机时长。
+   * 算出来不足 1.5 小时（比如上午补测）或超过 14 小时就不采信，免得睡成半天或只眯 20 分钟。
+   */
+  function hoursUntilWakeAtHour(startMs, c = nightRitualCfg()) {
+    const target = Number(c?.wakeAtHour);
+    if (!(target > 0 && target < 24)) return null;
+    const t = new Date(startMs);
+    t.setHours(Math.floor(target), Math.round((target % 1) * 60), 0, 0);
+    if (t.getTime() <= startMs) t.setDate(t.getDate() + 1);
+    return (t.getTime() - startMs) / 3600000;
+  }
+
   function startNightSleep({ hours, source = 'tool' } = {}) {
     const c = nightRitualCfg();
-    const h = Number(hours) > 0 ? Number(hours) : (Number(c.minHours) + Math.random() * Math.max(0, Number(c.maxHours) - Number(c.minHours)));
+    // 显式给了小时数就照办（手动补觉 / 测试）；没给就看有没有配「睡到几点」；都没有才随机 min~max。
+    const untilWake = hours > 0 ? null : hoursUntilWakeAtHour(Date.now(), c);
+    const minHours = Number(c.minHours) || 0;
+    const h = Number(hours) > 0
+      ? Number(hours)
+      : (untilWake !== null && untilWake >= 1.5 && untilWake <= 14
+        ? untilWake
+        : (minHours + Math.random() * Math.max(0, Number(c.maxHours) - minHours)));
     nightSleep.active = true;
     nightSleep.startAt = Date.now();
     nightSleep.wakeAt = nightSleep.startAt + Math.round(h * 3600000);

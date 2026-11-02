@@ -22,6 +22,8 @@ const root = path.dirname(here);
 const bridgeSrc = fs.readFileSync(path.join(root, 'src', 'bridge.js'), 'utf8');
 const keepaliveSrc = fs.readFileSync(path.join(root, '..', 'qq-bridge-keepalive.ps1'), 'utf8');
 const wakeScriptPath = path.join(root, 'scripts', 'night-wake.ps1');
+// 23:00 那个计划任务调的脚本：以前写死 hours:7（06:00 起），2026-11-02 改成让 config 决定。
+const sleepScriptSrc = fs.readFileSync(path.join(root, 'scripts', 'night-sleep-2300.ps1'), 'utf8');
 
 const results = [];
 function ok(cond, name) {
@@ -99,6 +101,17 @@ ok(keepaliveSrc.includes("'state\\night-sleep.json'"), '看门狗读得到睡眠
 ok(/\$nowMs = \[DateTimeOffset\]::UtcNow\.ToUnixTimeMilliseconds\(\)/.test(keepaliveSrc), '用 Unix 时间戳比较（别拿 DateTime 相减）');
 ok(keepaliveSrc.includes('$night.active -and $wakeAt -gt $nowMs'), '只在 wakeAt 之前才歇着');
 ok(keepaliveSrc.includes('Start-Sleep -Seconds 300') && keepaliveSrc.includes('continue'), '睡着时 5 分钟一轮空转，不往下查服务');
+
+// ── 「睡到几点」而不是「睡几小时」（2026-11-02 主人：可以让她睡到 8、9 点才醒）──
+ok(bridgeSrc.includes('function hoursUntilWakeAtHour('), '休眠时长能按钟点算，不是写死的 7 小时');
+ok(bridgeSrc.includes('const untilWake = hours > 0 ? null : hoursUntilWakeAtHour(Date.now(), c);'),
+  '显式给 hours 就照办（手动补觉/测试），没给才看 wakeAtHour');
+ok(bridgeSrc.includes("t.setHours(Math.floor(target), Math.round((target % 1) * 60), 0, 0);"),
+  'wakeAtHour 支持小数（8.5 = 08:30）');
+ok(bridgeSrc.includes('if (t.getTime() <= startMs) t.setDate(t.getDate() + 1);'),
+  '超过钟点就顺延到明天，不会算出负数时长');
+ok(!/const body = '\{"action":"start","hours":7\}'/.test(sleepScriptSrc),
+  '23:00 的计划任务不再写死 7 小时（改为让 config 的 wakeAtHour 决定）');
 
 const bad = results.filter((r) => !r.cond);
 console.log(`\n${results.length - bad.length}/${results.length} 通过${bad.length ? `，失败 ${bad.length}` : ''}`);
