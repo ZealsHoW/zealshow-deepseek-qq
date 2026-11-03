@@ -84,8 +84,8 @@ console.log('\n接线：');
 {
   ok('bridge 有 whenLabel', /function whenLabel\(ts, \{ withTime = true, now = Date\.now\(\) \} = \{\}\)/.test(bridge));
   ok('聊天记录每行带〔时间〕', /〔\$\{when\}〕\$\{who\}：/.test(bridge));
-  ok('记忆块每行带日期（live.mjs）', /memoryWhenLabel\(row\.created_at/.test(live));
-  ok('检索结果带 when', /when: whenLabel\(item\.created_at/.test(bridge));
+  ok('记忆块每行带日期（live.mjs）', /memoryWhenLabel\(memoryOccurredAt\(row\)\)/.test(live));
+  ok('检索结果带 when', /when: whenLabel\(memoryOccurredAt\(item\)/.test(bridge));
   ok('MCP 渲染带〔日期〕', /const when = it\.when \? `〔\$\{it\.when\}〕`/.test(mcp));
   ok('bridge 引入称呼拆批器', /import \{ routeByAddressee as routeAddressee \} from '\.\/qqb\/directed\/addressee\.mjs'/.test(bridge));
   ok('回复走 sendReplyV2（两处入口）', (bridge.match(/sendReplyV2\(/g) ?? []).length >= 3, String((bridge.match(/sendReplyV2\(/g) ?? []).length));

@@ -29,7 +29,7 @@ import { discoverSnowLumaConnection, persistSnowLumaEndpoint, persistToken } fro
 import { hardenDir, manualDirCommand } from './state-acl.mjs';
 import { extractForwardIds, forwardIdFromData, sanitizeForwardId, formatForwardResponse } from './forward.js';
 import { resolvePriceTable } from './model-prices.js';
-import { createLiveMemory } from './qqb/memory/live.mjs';
+import { createLiveMemory, memoryOccurredAt } from './qqb/memory/live.mjs';
 import { emotionFromText } from './qqb/memory/ebbinghaus.mjs';
 import { createPeopleDirectory } from './qqb/memory/people.mjs';
 // R10「曲库」：ACE-Step 现场唱要 1~5 分钟、吃 7~10 GB，等人点歌再生成只能干等。
@@ -10206,7 +10206,7 @@ async function main() {
               where: people.label(item.scope),
               // 这条是哪天的事：检索结果必须带日期，否则她讲起来会当成刚发生的
               // （2026-11-03 主人报「总把前几天的事记成今天」）。
-              when: whenLabel(item.created_at ?? item.createdAt ?? item.updatedAt ?? item.updated_at, { withTime: false })
+              when: whenLabel(memoryOccurredAt(item), { withTime: false })
             }));
             sendJson({
               ok: true, key, query, scope: crossScope ? 'all' : scopeOf, crossScope,

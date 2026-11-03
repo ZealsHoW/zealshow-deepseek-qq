@@ -51,6 +51,21 @@ const DEFAULT_LINE_CHARS = 90;
  * 只有正文没有时间戳，于是 11-01 19:34 妈妈那句「想你爸了」到 11-03 还像刚说的。
  * 注入（block）、检索（search）、面板/MCP 渲染都走这个函数，口径保持一致。
  */
+/**
+ * 「这件事发生的日子」优先用巩固时记下的 `meta.occurredAt`，没有再退回 `created_at`。
+ * 原因：巩固是事后批量跑的，`created_at` 只是入库时间 —— 11-02 白天的事可能 11-03
+ * 凌晨才被巩固进库，直接拿 created_at 当发生时间就会把日期说错一天。
+ */
+export function memoryOccurredAt(row = {}) {
+  try {
+    const meta = typeof row?.meta === 'string' ? JSON.parse(row.meta) : row?.meta;
+    const t = Number(meta?.occurredAt);
+    if (Number.isFinite(t) && t > 0) return t;
+  } catch { /* meta 坏掉就退回 created_at */ }
+  const fallback = Number(row?.created_at ?? row?.createdAt ?? row?.updated_at ?? row?.updatedAt);
+  return Number.isFinite(fallback) && fallback > 0 ? fallback : 0;
+}
+
 export function memoryWhenLabel(ts, now = Date.now()) {
   const t = Number(ts);
   if (!Number.isFinite(t) || t <= 0) return '';
@@ -416,7 +431,7 @@ export function createLiveMemory({
           const from = row.scope && row.scope !== here && row.scope !== 'global' ? `（来源：${scopeLabel(row.scope)}）` : '';
           // 每条记忆都带日期：没日期的话「上周的事」和「刚才的事」在提示词里长得一模一样，
           // 她就会把前天的话当成今天刚说的（2026-11-03 主人报「总把前几天的事记成今天」）。
-          const when = memoryWhenLabel(row.created_at ?? row.createdAt ?? row.updated_at ?? row.updatedAt);
+          const when = memoryWhenLabel(memoryOccurredAt(row));
           return `- （${label}${cold ? '·索引' : ''}${when ? `·${when}` : ''}）${subject}${body}${from}`;
         });
         return clipMultiline([head, ...lines].join('\n'), maxChars);

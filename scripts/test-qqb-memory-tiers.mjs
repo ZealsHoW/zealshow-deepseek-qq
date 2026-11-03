@@ -116,3 +116,42 @@ test('retier 不动已归档、也不动深情绪的老记忆', () => {
   assert.equal(store.get(plain.id).tier, 'cold', '普通老记忆会被推到冷区');
   assert.equal(store.get(archived.id).archived, true, '归档标记在');
 });
+// 「发生时间」不等于「入库时间」（2026-11-03）：巩固是事后批量跑的，同一天白天的对话
+// 可能凌晨才入库；evidence 里带着 `[YYYY-MM-DD]`，要提升成 meta.occurredAt 给注入/检索用。
+test('occurredAt：优先用「发生那天」，没有才退回 created_at', async () => {
+  const { memoryOccurredAt } = await import('../src/qqb/memory/live.mjs');
+  const { occurredFromEvidence } = await import('./memory-backfill-occurred.mjs');
+  const day = Date.UTC(2026, 10, 2); // 2026-11-02
+  const noon = new Date(2026, 10, 2, 12, 0, 0, 0).getTime();
+
+  assert.equal(occurredFromEvidence('[2026-11-02] 妈妈说她想去北边'), noon, '证据里的日期 → 那天中午');
+  assert.equal(occurredFromEvidence('2026-11-02 没有方括号'), 0, '没有方括号就不猜');
+  assert.equal(occurredFromEvidence(''), 0, '空证据给 0');
+
+  const withMeta = { meta: { occurredAt: noon }, created_at: day + 26 * 3600_000 };
+  assert.equal(memoryOccurredAt(withMeta), noon, 'meta 里有就用 meta');
+
+  const metaAsString = { meta: JSON.stringify({ occurredAt: noon }), created_at: day };
+  assert.equal(memoryOccurredAt(metaAsString), noon, '原始行的 meta 是 JSON 字符串，也要认');
+
+  const noMeta = { meta: null, created_at: day };
+  assert.equal(memoryOccurredAt(noMeta), day, '没有 meta 退回 created_at');
+
+  const brokenMeta = { meta: '{坏掉的', created_at: day };
+  assert.equal(memoryOccurredAt(brokenMeta), day, 'meta 坏掉也退回 created_at，不抛错');
+
+  assert.equal(memoryOccurredAt({}), 0, '什么都没有给 0（调用方不会渲染日期）');
+});
+
+test('接线：巩固写 occurredAt，注入/检索/演化都读它', () => {
+  const read = (p) => fs.readFileSync(path.join(path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1')), '..', p), 'utf8');
+  const consolidate = read('src/qqb/memory/consolidate.mjs');
+  assert.ok(/function occurredAtOf\(date/.test(consolidate), '巩固里有 occurredAtOf');
+  assert.equal((consolidate.match(/occurredAt: occurredAtOf\(date, now\(\)\)/g) ?? []).length >= 3, true, '事件/事实/卡片三类都写');
+  const live = read('src/qqb/memory/live.mjs');
+  assert.ok(/memoryWhenLabel\(memoryOccurredAt\(row\)\)/.test(live), '注入用发生时间');
+  const bridge = read('src/bridge.js');
+  assert.ok(/when: whenLabel\(memoryOccurredAt\(item\)/.test(bridge), '检索结果带发生时间');
+  const evolve = read('src/qqb/persona/evolve.mjs');
+  assert.ok(/export function occurredOf/.test(evolve) && /const born = occurredOf\(row\)/.test(evolve), '人设特征也按发生时间');
+});

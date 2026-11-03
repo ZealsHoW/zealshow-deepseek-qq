@@ -30,6 +30,21 @@ function dayKey(ts) {
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
 }
 
+/**
+ * 「这件事发生的日子」= 被巩固的那一天（`date`，YYYY-MM-DD），落成本地中午的时间戳。
+ * 为什么不用 created_at：巩固是事后批量跑的，created_at 只是「什么时候写进库」，
+ * 同一天白天发生的事可能到第二天凌晨才入库，直接拿它当发生时间会把日期说错
+ * （2026-11-03 主人：「之前的在记忆库也没有时间维度吗」）。
+ */
+function occurredAtOf(date, nowTs = Date.now()) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(date ?? '').trim());
+  if (!m) return null;
+  const ts = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]), 12, 0, 0, 0).getTime();
+  if (!Number.isFinite(ts)) return null;
+  // 未来日期不采信（时钟错乱或手滑传错）
+  return ts > nowTs + 24 * 60 * 60 * 1000 ? null : ts;
+}
+
 /** 从模型输出里捞出第一个 JSON 对象（容忍 ```json 包裹和前后废话）。 */
 /** 给被截断的 JSON 补齐括号：扫一遍，把没闭合的 { [ 按栈补上（字符串里的括号不算）。 */
 function closeBrackets(text) {
@@ -262,7 +277,7 @@ export function createConsolidator({
         confidence: 0.7,
         source: 'consolidate',
         evidence: `[${date}] ${ep.evidence}`,
-        meta: { consolidate: PROMPT_VERSION, emotionWord: ep.emotion },
+        meta: { consolidate: PROMPT_VERSION, occurredAt: occurredAtOf(date, now()), emotionWord: ep.emotion },
       });
       if (r?.action === 'inserted' || r?.action === 'merged') out.episodes += 1;
     }
@@ -279,7 +294,7 @@ export function createConsolidator({
         confidence: 0.75,
         source: 'consolidate',
         evidence: `[${date}]`,
-        meta: { consolidate: PROMPT_VERSION },
+        meta: { consolidate: PROMPT_VERSION, occurredAt: occurredAtOf(date, now()) },
       });
       if (r?.action === 'inserted' || r?.action === 'merged') out.facts += 1;
     }
@@ -294,7 +309,7 @@ export function createConsolidator({
         confidence: 0.7,
         source: 'consolidate',
         evidence: `[${date}]`,
-        meta: { consolidate: PROMPT_VERSION, for: card.for },
+        meta: { consolidate: PROMPT_VERSION, occurredAt: occurredAtOf(date, now()), for: card.for },
       });
       if (r?.action === 'inserted') out.cards += 1;
     }

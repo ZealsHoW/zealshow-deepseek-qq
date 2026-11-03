@@ -103,6 +103,21 @@ export function jaccard(a, b) {
  */
 export const KIND_MAX_AGE_DAYS = { promise: 10 };
 
+/**
+ * 一条记忆「这件事发生的时间」：优先 `meta.occurredAt`（巩固时按被巩固的那一天记的），
+ * 没有再退回 created_at/updated_at。exportAll() 给的是原始行，meta 还是 JSON 字符串。
+ */
+export function occurredOf(row = {}) {
+  let meta = row?.meta;
+  if (typeof meta === 'string') {
+    try { meta = JSON.parse(meta); } catch { meta = null; }
+  }
+  const t = Number(meta?.occurredAt);
+  if (Number.isFinite(t) && t > 0) return t;
+  const fallback = Number(row?.created_at ?? row?.updated_at ?? 0);
+  return Number.isFinite(fallback) && fallback > 0 ? fallback : 0;
+}
+
 export function staleByKind(kind, at, nowTs = Date.now()) {
   const maxDays = KIND_MAX_AGE_DAYS[kind];
   if (!maxDays) return false;
@@ -242,7 +257,8 @@ export function createEvolve({
         if (!worthKeeping(text, mapped)) continue;
         // 承诺会过期：「明天给你发图」这种话说出口那天有效，十来天后还当特征注入，
         // 她就一直照着一句旧承诺往下演（2026-11-03 主人报「机制太僵硬」的同源问题）。
-        if (staleByKind(mapped, row?.created_at, nowTs)) continue;
+        const born = occurredOf(row);
+        if (staleByKind(mapped, born, nowTs)) continue;
         out.push({
           kind: mapped,
           text,
@@ -250,7 +266,7 @@ export function createEvolve({
           source: 'memory',
           // at 用记忆自己的发生时间：特征里那条「（承诺·10-27）」才是真的 10-27，
           // 而不是被演化当场刷成今天（2026-11-03 主人报「总把前几天的事记成今天」）。
-          at: Number(row?.created_at ?? row?.updated_at ?? 0) || undefined,
+          at: born || undefined,
           evidence: `记忆 #${row?.id ?? '?'}（${row?.layer ?? '?'}）`
         });
       }

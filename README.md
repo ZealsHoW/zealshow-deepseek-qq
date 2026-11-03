@@ -1806,6 +1806,36 @@ L1–L6 里最容易做错的一层是 **L2（原文）**：如果每句话都�
 
 回归：`node scripts/test-qqb-dedupe.mjs`（11 项）+ `node scripts/test-qqb-persona-evolve.mjs`（12 项）；全量 `node scripts/test-audit.mjs` → 80/80。
 
+### 「这件事发生在哪天」和「哪天才写进库」不是一回事（2026-11-03）
+
+主人问：记忆库有没有时间维度，潘多拉魔盒里的任务档案都有大致时间。答案是**有，但用错了那一列**。
+
+`memories` 表一直有 `created_at` / `updated_at`，可巩固是**事后批量**跑的：11-02 白天的对话，可能 11-03 凌晨才被 `consolidate` 沉成 L3/L4，`created_at` 记的是入库那一刻。拿它当发生时间，前天的事就会显示成「今天」。
+
+`evidence` 里其实一直带着那天的日期（`consolidate.mjs` 写的是 `evidence: \`[${date}] …\``），只是从来没被当成时间用。
+
+改法：新增 **`meta.occurredAt`**（这件事的发生时间），一条链路上四个读点：
+
+| 位置 | 代码 | 作用 |
+| --- | --- | --- |
+| 巩固写入 | `consolidate.mjs` 的 `occurredAtOf(date, now())` | `[YYYY-MM-DD]` → 那天**本地中午 12:00**（中午不跨时区跑偏）；未来超过 1 天不采信 |
+| 注入 | `live.mjs` 的 `memoryOccurredAt(row)` + `block()` | 每条记忆前的〔日期〕用发生时间，没有再退回 `created_at` |
+| 主动检索 | `bridge.js` 的 `/api/socialV2/memory-search` | 每项 `when: whenLabel(memoryOccurredAt(item), { withTime: false })` |
+| 人设演化 | `evolve.mjs` 的 `occurredOf(row)` | 特征日期与承诺过期判断都按发生时间（原始行的 `meta` 是 JSON 字符串，要 parse） |
+
+存量回填：`scripts/memory-backfill-occurred.mjs`（导出 `occurredFromEvidence()`，扫 `evidence LIKE '[%'` 的行补 `meta.occurredAt`）。
+
+```
+node scripts/memory-backfill-occurred.mjs            # 预演
+node scripts/memory-backfill-occurred.mjs --apply    # 真写
+```
+
+实测：扫到 190 条带 `[日期]` 证据的记忆，全部补上；典型 `#3007 L3 入库 2026-10-29 → 发生 2026-10-28`。抽查 `live.search('嵛山岛')` 返回 `meta:{"occurredAt":1793592000000}` 而 `created_at` 晚一天。
+
+> 为什么不删掉 `created_at`：入库时间还有用（排障、算「多久没被提起」的衰减）。两个时间各司其职，渲染时只用 `occurredAt`。
+
+回归：`node scripts/test-qqb-memory-tiers.mjs`（8 项，含 `occurredFromEvidence` 各式输入与本条链路的静态接线断言）+ `node scripts/test-qqb-addressee.mjs`（37 项）；全量 `node scripts/test-audit.mjs` → 80/80。
+
 ### 记得住、忘得对、按意思找得回：遗忘曲线 + 向量索引（2026-10-25）
 
 主人的要求是两条合起来的效果：**记忆要像人一样会淡**（艾宾浩斯 + 情绪挂钩权重，淡的沉到底、重的摆最前），**又要按意思找得回来**（RAG 向量检索）。拆成三层，各管一件事：
