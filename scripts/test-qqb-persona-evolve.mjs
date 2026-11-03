@@ -82,8 +82,8 @@ test('evolve: 规矩归「底线」不归「近况」，聊天碎片不进人设
   evo.apply({ reason: '规矩归位' });
 
   const raw = fs.readFileSync(card, 'utf8');
-  assert.ok(raw.includes('（底线）我拒绝登录别人的抖音账号'), '规矩要标成底线，并转成第一人称');
-  assert.ok(!/（近况）[^\n]*拒绝登录/.test(raw), '规矩不许被塞进近况');
+  assert.ok(/（底线(·\d{2}-\d{2})?）我拒绝登录别人的抖音账号/.test(raw), '规矩要标成底线，并转成第一人称');
+  assert.ok(!/（近况(·\d{2}-\d{2})?）[^\n]*拒绝登录/.test(raw), '规矩不许被塞进近况');
   assert.ok(!raw.includes('那我也没办法'), '反问式的聊天碎片不进人设');
   assert.ok(raw.includes('【她自己的长期特征'), '区块标题说的是长期特征，不是近况');
 });
@@ -144,7 +144,7 @@ test('evolve: 老表里错标成「喜欢/近况」的规矩，读回来时自�
   assert.equal(dupes.length, 1, `同一条内容只能留一份，实际 ${dupes.length} 份`);
   assert.ok(dupes[0].text.includes('取自我'), '留下的应是第一人称那份');
   assert.equal(b.render().split('\n').filter((l) => /大肥鱼之家/.test(l)).length, 1, '渲染不能出现两行一样的话');
-  assert.ok(b.render().includes('（底线）'), '渲染出来应标成底线');
+  assert.ok(/（底线(·\d{2}-\d{2})?）/.test(b.render()), '渲染出来应标成底线（渲染带「·MM-DD」）');
 });
 
 test('evolve: 同一批候选重复演化不堆条目，也不重复写卡片备份', (t) => {

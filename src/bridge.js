@@ -653,9 +653,12 @@ function personaEnabled() {
     return true;
   }
 }
-/** 已演化出来的「她自己的近况」注入块；不可用时给空串（不占 token）。 */
-function personaBlock() {
+/** 已演化出来的「她自己的近况」注入块；不可用时给空串（不占 token）。
+ *  roleText 传当前角色卡：卡里已经写了受管区块（qqb-persona:begin…）时返回空串，
+ *  否则同一段「（承诺）…」会在提示词里出现两遍（2026-11-03 实测 5 条变成 10 条）。 */
+function personaBlock(roleText = '') {
   if (!personaEnabled()) return '';
+  if (String(roleText ?? '').includes('qqb-persona:begin')) return '';
   try {
     return personaEvolve.render();
   } catch {
@@ -15230,8 +15233,9 @@ ${memLines ? `\n记忆库里：\n${memLines}\n` : '\n记忆库最近没有新东
     const stickerLine = stickerCfg.enabled !== false && stickerCfg.includeInPrompt !== false
       ? `${buildStickerStrategyHint()}\n${buildStickerContext(stickerEntries, stickerCfg.promptMaxStickers ?? 8)}`
       : '';
+    const roleHint = currentRoleHintV2();
     const system = withSlangContext([
-      currentRoleHintV2(),
+      roleHint,
       selfIdentityTextV2(),
       familyIdentityTextV2(),
       tierPromptText(cfg),
@@ -15243,7 +15247,7 @@ ${memLines ? `\n记忆库里：\n${memLines}\n` : '\n记忆库最近没有新东
       spiritSummary(),
       thoughtsText(),
       formatInitialPromptV2(key),
-      personaBlock(),
+      personaBlock(roleHint),
       personaPendingLine(),
       directedBlock(),
       memoryText,
@@ -16134,7 +16138,7 @@ function startThoughtLoop() {
     const spiritLine = spiritSummary() ? `${spiritSummary()}\n\n` : '';
     const thoughtsLine = thoughtsText() ? `${thoughtsText()}\n\n` : '';
     // R1b/R5：她自己长出来的近况 + 还没处理的主人建议（都只有一两行，没内容时是空串）。
-    const personaLine = personaBlock() ? `${personaBlock()}\n\n` : '';
+    const personaLine = personaBlock(roleLine) ? `${personaBlock(roleLine)}\n\n` : '';
     const adviceLine = personaPendingLine();
     const directedLine = directedBlock();
     const base = roleLine + identityLine + tokenLine + initialPromptLine + antiAiLine + capabilityLine + proactiveLine + historyLine + stickerLine + replyLine + statusLine + moodLine + spiritLine + thoughtsLine + personaLine + adviceLine + directedLine + wakeLine + memoryLine + innerIndexLine + peopleLine + participationLine + familyLine + memoryHintLine + preSleepLine;

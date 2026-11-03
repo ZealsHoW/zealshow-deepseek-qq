@@ -15,7 +15,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 
-export const VERSION = '0.1.3';
+export const VERSION = '0.1.4';
 
 /** 受管区块的标记。渲染/替换只在这两行之间发生。 */
 export const CARD_BEGIN = '<!-- qqb-persona:begin（自动维护，可回滚；请勿手工编辑这一块） -->';
@@ -71,6 +71,45 @@ export function traitKindOf(kind, text) {
 
 const clampText = (s, n) => String(s ?? '').replace(/\s+/g, ' ').trim().slice(0, n);
 const normKey = (s) => String(s ?? '').toLowerCase().replace(/[\s，。！？、,.!?；;：:（）()「」“”"'’‘~～-]/g, '');
+
+/**
+ * 近重复阈值：同一件事被巩固两次时，措辞通常只差几个字
+ * （「我这边开了权限马上补」vs「我这边权限的事刚有个头绪，等弄好了马上补上，说好的」）。
+ * 归一化只能抓住一模一样的，同义改写要靠二字组 Jaccard —— 0.6 左右是实测的甜点：
+ * 再低会把「明天抽查」和「今晚抽查」并成一条，再高又抓不住改写。
+ */
+export const TRAIT_SIMILAR = 0.6;
+
+export function bagOf(text) {
+  const s = String(text ?? '').normalize('NFKC').toLowerCase();
+  const bag = new Set();
+  for (const w of s.match(/[a-z0-9]{2,}/g) ?? []) bag.add(w);
+  for (const run of s.match(/[\u4e00-\u9fff]{2,}/g) ?? []) {
+    for (let i = 0; i + 2 <= run.length; i += 1) bag.add(run.slice(i, i + 2));
+  }
+  return bag;
+}
+
+export function jaccard(a, b) {
+  if (!a.size || !b.size) return 0;
+  let inter = 0;
+  for (const x of a) if (b.has(x)) inter += 1;
+  return inter / (a.size + b.size - inter);
+}
+
+/**
+ * 各类特征能活多久（天）：0/缺省 = 不过期。
+ * 承诺最该短命 —— 它是「当时答应过的一件事」，不像喜好、底线能长期成立。
+ */
+export const KIND_MAX_AGE_DAYS = { promise: 10 };
+
+export function staleByKind(kind, at, nowTs = Date.now()) {
+  const maxDays = KIND_MAX_AGE_DAYS[kind];
+  if (!maxDays) return false;
+  const ts = Number(at);
+  if (!Number.isFinite(ts) || ts <= 0) return false;
+  return nowTs - ts > maxDays * 24 * 60 * 60 * 1000;
+}
 
 export function createEvolve({
   root = null,
@@ -188,7 +227,7 @@ export function createEvolve({
       // 退役（过期）的记忆不再拿来塑造人设：2026-10-27 主人说「别总揪着妈妈背单词」，
       // 根子就是那批「七点五十四抽查单词」的约定被记忆注入、又被这里写成一直生效的
       // promise trait。过期只是让它不再自动冒头，行还在库里可以查。
-      const nowTs = Date.now();
+      const nowTs = Number(now?.()) || Date.now();
       const alive = (row) => !row?.deleted_at && !row?.archived_at
         && !(row?.expires_at && Number(row.expires_at) <= nowTs);
       const mine = rows
@@ -201,11 +240,17 @@ export function createEvolve({
         if (!text) continue;
         const mapped = traitKindOf(row?.kind, text);
         if (!worthKeeping(text, mapped)) continue;
+        // 承诺会过期：「明天给你发图」这种话说出口那天有效，十来天后还当特征注入，
+        // 她就一直照着一句旧承诺往下演（2026-11-03 主人报「机制太僵硬」的同源问题）。
+        if (staleByKind(mapped, row?.created_at, nowTs)) continue;
         out.push({
           kind: mapped,
           text,
           weight: Math.min(1, Math.max(0.3, Number(row?.importance ?? 0.5))),
           source: 'memory',
+          // at 用记忆自己的发生时间：特征里那条「（承诺·10-27）」才是真的 10-27，
+          // 而不是被演化当场刷成今天（2026-11-03 主人报「总把前几天的事记成今天」）。
+          at: Number(row?.created_at ?? row?.updated_at ?? 0) || undefined,
           evidence: `记忆 #${row?.id ?? '?'}（${row?.layer ?? '?'}）`
         });
       }
@@ -267,39 +312,97 @@ export function createEvolve({
       const kind = traitKindOf(cand?.kind, text);
       const bucket = state.traits[kind] ?? (state.traits[kind] = []);
       const key = normKey(text);
-      const hit = bucket.find((t) => normKey(t.text) === key);
+      const bag = bagOf(text);
+      // 先找一模一样的；再找「说的是同一件事、只是换了说法」的（TRAIT_SIMILAR）。
+      const hit = bucket.find((t) => normKey(t.text) === key)
+        ?? bucket.find((t) => jaccard(bagOf(t.text), bag) >= TRAIT_SIMILAR);
       if (hit) {
         hit.weight = Math.min(1, Number(hit.weight) + 0.05);
-        hit.at = now();
+        // at 留着不动 = 「这条最早是什么时候出现的」。以前每次重新演化都把它刷成现在，
+        // 于是十天前的旧承诺在提示词里永远显示「今天」—— 2026-11-03 主人报的
+        // 「她总把前几天的事记成今天」有一半来自这里。最近一次被印证的时间单独记 lastAt。
+        hit.lastAt = now();
         if (cand.evidence) hit.evidence = clampText(cand.evidence, 160);
         updated += 1;
       } else {
+        // 候选若带着「这件事原始发生时间」（derive 从记忆推来的会带 created_at），
+        // 就用它当 at —— 否则新长出来的特征全显示成「今天」。
+        const born = Number(cand?.at ?? cand?.created_at ?? 0);
         bucket.push({
           text,
           weight: Math.min(1, Math.max(0.2, Number(cand.weight) || 0.5)),
           source: clampText(source ?? cand.source ?? actor, 40),
           evidence: clampText(cand.evidence ?? '', 160),
-          at: now()
+          at: Number.isFinite(born) && born > 0 ? born : now()
         });
         added += 1;
       }
     }
-    // 上限：按权重留最好的，旧的低权重条目自然被挤掉
+    // 上限：按权重留最好的，旧的低权重条目自然被挤掉；顺带让过期的承诺退场
+    // （主人拍过板的建议不动 —— 那类条目 source 是 owner-advice）。
     for (const kind of TRAIT_KINDS) {
-      const bucket = state.traits[kind] ?? [];
+      let bucket = (state.traits[kind] ?? [])
+        .filter((t) => t?.source === 'owner-advice' || !staleByKind(kind, t?.at, Number(now?.()) || Date.now()));
       if (bucket.length > maxTraits) {
-        bucket.sort((a, b) => Number(b.weight) - Number(a.weight));
-        state.traits[kind] = bucket.slice(0, maxTraits);
+        bucket = bucket.sort((a, b) => Number(b.weight) - Number(a.weight)).slice(0, maxTraits);
       }
+      // 无论超没超上限都要写回：以前只有超过 maxTraits 才赋值，
+      // 于是「过期的承诺被过滤掉」这件事在条数不多时根本没生效（2026-11-03 实测踩到）。
+      state.traits[kind] = bucket;
     }
     return { added, updated, skipped, total: all().length };
   }
 
   /** 渲染给模型看的短区块（没人设特征时给空串，不占 token）。 */
   function render({ lines = maxLines, chars = maxChars } = {}) {
-    const items = all().sort((a, b) => Number(b.weight) - Number(a.weight)).slice(0, Math.max(1, lines));
+    // 先按权重排，再「各类轮流取」：以前直接取前 5 条，权重最高的往往是一串
+    // 「（承诺·10-25）…」旧承诺，把喜好/习惯全挤掉了，看着像复读机（2026-11-03 主人报的去重）。
+    const sorted = all().sort((a, b) => Number(b.weight) - Number(a.weight));
+    const pools = new Map();
+    for (const t of sorted) {
+      if (!pools.has(t.kind)) pools.set(t.kind, []);
+      pools.get(t.kind).push(t);
+    }
+    const items = [];
+    const limit = Math.max(1, lines);
+    // 同一件事换个说法就会长成两条（「我下午刷了下抖音…九寨沟水獭」与「跟你说个事…九寨沟水獭」）。
+    // 渲染时只留最先出来的那条，免得五行里两行在讲同一件事（2026-11-03 主人报的「记忆混乱」）。
+    const RENDER_SIMILAR = 0.35;
+    const bags = [];
+    const tooClose = (text) => {
+      const bag = bagOf(text);
+      return bags.some((b) => jaccard(b, bag) >= RENDER_SIMILAR);
+    };
+    let round = 0;
+    while (items.length < limit && round < 40) {
+      let pickedAny = false;
+      for (const pool of pools.values()) {
+        if (items.length >= limit) break;
+        let next = pool.shift();
+        while (next && tooClose(next.text)) next = pool.shift();
+        if (next) {
+          items.push(next);
+          bags.push(bagOf(next.text));
+          pickedAny = true;
+        }
+      }
+      if (!pickedAny) break;
+      round += 1;
+    }
+    items.sort((a, b) => Number(b.weight) - Number(a.weight));
     if (!items.length) return '';
-    const body = items.map((t) => `- （${KIND_LABEL[t.kind] ?? t.kind}）${t.text}`).join('\n');
+    // 带上「这条是什么时候长出来的」：没有日期时，三天前答应的「明天给你发图」和今天答应的
+    // 长得一模一样，她会照着旧条一直往下拖（2026-11-03 主人：「她总把前几天的事记成今天」）。
+    const dayOf = (ts) => {
+      const n = Number(ts);
+      if (!Number.isFinite(n) || n <= 0) return '';
+      const d = new Date(n);
+      return `${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+    };
+    const body = items.map((t) => {
+      const when = dayOf(t.at);
+      return `- （${KIND_LABEL[t.kind] ?? t.kind}${when ? `·${when}` : ''}）${t.text}`;
+    }).join('\n');
     const block = `【她自己的长期特征（演化出来的，不是刚听说的）】\n${body}`;
     return block.length > chars ? `${block.slice(0, chars - 1)}…` : block;
   }

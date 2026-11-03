@@ -1771,6 +1771,41 @@ L1–L6 里最容易做错的一层是 **L2（原文）**：如果每句话都�
 
 回归：`node scripts/test-qqb-addressee.mjs`（37 项：称呼识别、叙述不误判、群聊不动、peer 排除、日期分档、跨年、以及两处接线断言）。改完 `node scripts/test-audit.mjs` 79/79。
 
+### 同一句「我这边开了权限马上补」在提示词里出现两次（2026-11-03）
+
+主人看见人设块里有两条几乎一样的话，批了「可以哦」让我顺手做去重。查下来是三个独立的小毛病叠在一起：
+
+**① 区块被插了两遍（不是记忆库重复）**
+
+`state/memory.db` 4053 行里真正的重复只有十几组。多出来的那遍来自人设：`state/persona-traits.json` 演化出的特征已经被 `evolve` 写进 `roles/小鲸鱼.md` 的受管区块，`buildEnginePrompts` 又调 `personaBlock()` 把它再插一次 —— 5 条变 10 条。
+
+改法：`personaBlock(roleText)` 发现人格卡原文里已经有 `<!-- qqb-persona:begin` 就返回空串，两条提示词路线（直连引擎 `buildEnginePrompts`、DSH 的 `buildWakePromptV2`）都按这个口径来。
+
+**② 特征里的日期是「最后一次被写」的时间，不是「这件事发生」的时间**
+
+`merge()` 以前每命中一条老特征就 `hit.at = now()`，于是十天前的旧承诺在渲染里永远显示「今天」—— 主人报的「总把前几天的事记成今天」有一半来自这里。
+
+改法：`at` 只记**第一次出现**（`hit.lastAt = now()` 记最近一次被印证）；新条目优先用候选自带的 `at/created_at`（`derive()` 从记忆推候选时会带上记忆自己的 `created_at`），没有才用当前时间。
+
+**③ 承诺没有寿命**
+
+`KIND_MAX_AGE_DAYS = { promise: 10 }` + `staleByKind(kind, at, nowTs)`：超过 10 天的承诺在 `derive()` 里不再被推出、在 `apply()` 末尾也会被剪掉（`source === 'owner-advice'` 的条目不动 —— 那是主人拍过板的）。另外 `render()` 改成**按类轮流取**（承诺/喜好/近况/底线各取一条），不再被一串高权重旧承诺霸屏；同一个意思的两种说法在渲染时只留先出现的那条（二字组 Jaccard ≥ 0.35 视为重复）。
+
+> 踩到的坑：`apply()` 里原来只有「超过 `maxTraits` 才写回」，于是条数不多时过滤根本不生效；而且剪枝用的是 `Date.now()` 而不是注入的 `now()`，测试里固定时间就全被剪光。两处都改成用 `now()` 并总是写回。
+
+**两个一次性脚本**
+
+| 脚本 | 干什么 |
+| --- | --- |
+| `scripts/memory-dedupe.mjs [--similar 0.5] [--apply]` | 记忆库里同 kind + 同 scope 的近重复（默认跳过 `message`），`--apply` 只把多余的设 `expires_at`，不删行 |
+| `scripts/persona-dedupe.mjs [--similar 0.42] [--apply]` | 人设特征表里去重，保留权重高的，被并的给留存者 +0.02，写前自动备份 `.bak-<时间>` |
+
+实测这一轮：`memory-dedupe --similar 0.5 --apply` 过期 17 条；`persona-dedupe --similar 0.42 --apply` 并掉 3 条。改完提示词里人设块从 10 行变 5 行（承诺/喜欢/近况/底线各一），`sysLen` 15456。
+
+> 注意：桥接进程启动时会把 `persona-traits.json` 读进内存，跑外部脚本前要**先停桥接**，否则下一次 `apply()` 会用内存里的旧值把文件覆盖回去。
+
+回归：`node scripts/test-qqb-dedupe.mjs`（11 项）+ `node scripts/test-qqb-persona-evolve.mjs`（12 项）；全量 `node scripts/test-audit.mjs` → 80/80。
+
 ### 记得住、忘得对、按意思找得回：遗忘曲线 + 向量索引（2026-10-25）
 
 主人的要求是两条合起来的效果：**记忆要像人一样会淡**（艾宾浩斯 + 情绪挂钩权重，淡的沉到底、重的摆最前），**又要按意思找得回来**（RAG 向量检索）。拆成三层，各管一件事：
