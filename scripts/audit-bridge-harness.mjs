@@ -328,6 +328,16 @@ function createDirected() {
 }
 
 /**
+ * 称呼 → 会话的拆批器（2026-11-03「写给爸爸的话发进妈妈窗口」）。
+ * 纯函数，夹具里直接用真实现太依赖 config/人名簿，这里给个「原样放行」的桩：
+ * 夹具关心的是发送链路本身，改投规则由 scripts/test-qqb-addressee.mjs 单测。
+ */
+function routeAddressee({ key, texts, table = [] } = {}) {
+  const list = Array.isArray(texts) ? texts : [texts];
+  return { keep: list, moves: [] };
+}
+
+/**
  * F 直连引擎的惰性桩：夹具里不打真模型、不连常驻 MCP 服务。
  * 真行为（工具箱、回路、fallbackSafe）由 scripts/test-qqb-engine.mjs 覆盖。
  */
@@ -569,6 +579,8 @@ export async function bridgeHarness({ config = {}, savedState, files = {}, globa
     createEvolve, createIntervene,
     // R8：定向投递队列用桩（夹具不读真队列、不发任何消息）。
     createDirected,
+    // 称呼拆批器：桩 = 原样放行（见上面 routeAddressee 的注释）。
+    routeAddressee,
     // OneBot 客户端桩：形状按 R4 之后的新契约（queued 显式标记），但**仍然经过 fakeFetch**，
     // 这样「到底发出去没有、发了哪些段」还能被 calls.http 断言（R1/R15 依赖这条）。
     // 需要模拟网关永久失败时，用 globals 覆盖这个工厂即可。

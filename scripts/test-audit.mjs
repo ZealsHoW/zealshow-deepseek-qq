@@ -141,6 +141,8 @@ const tests = [
   'test-qqb-turn-facts.mjs',
   // 图片/语音出场率节奏纸条 + 自带表情（assets/*.png 可天天重复发，晚安鲸鱼）。
   'test-qqb-media-rhythm.mjs',
+  // 日期标签 + 称呼改投（2026-11-03：总把前几天的事记成今天；写给爸爸的话发进妈妈窗口）。
+  'test-qqb-addressee.mjs',
   // 图配文：样式归一、HTML 转义、底图压缩口径、画完先叠字再发的接线。
   'test-qqb-annotate.mjs',
   // P1 潘多拉记忆核心：L2–L6 分层、关系硬过滤（群/朋友/主人）、归档清扫与复职、

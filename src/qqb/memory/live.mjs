@@ -44,6 +44,27 @@ const KIND_LABEL = Object.freeze({
 const DEFAULT_MAX_CHARS = 600;
 const DEFAULT_LINE_CHARS = 90;
 
+/**
+ * 记忆条目该挂什么日期：今天 / 昨天 / 前天 / MM-DD / YYYY-MM-DD。
+ *
+ * 2026-11-03 主人报「她会记不清日期，总是将前几天的事记成今天」——查下来提示词里的记忆
+ * 只有正文没有时间戳，于是 11-01 19:34 妈妈那句「想你爸了」到 11-03 还像刚说的。
+ * 注入（block）、检索（search）、面板/MCP 渲染都走这个函数，口径保持一致。
+ */
+export function memoryWhenLabel(ts, now = Date.now()) {
+  const t = Number(ts);
+  if (!Number.isFinite(t) || t <= 0) return '';
+  const d = new Date(t);
+  const n = new Date(now);
+  const dayStart = (x) => new Date(x.getFullYear(), x.getMonth(), x.getDate()).getTime();
+  const diffDays = Math.round((dayStart(n) - dayStart(d)) / 86400000);
+  const md = `${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  if (diffDays === 0) return '今天';
+  if (diffDays === 1) return '昨天';
+  if (diffDays === 2) return '前天';
+  return d.getFullYear() === n.getFullYear() ? md : `${d.getFullYear()}-${md}`;
+}
+
 /** 会话 key 规范化：与桥接内部的 canonicalV2Key 保持一致（去前导零）。 */
 export function canonicalScope(key) {
   const raw = String(key ?? '').trim();
@@ -92,6 +113,16 @@ export function audienceOf(key, ownerQQ, { rel = null } = {}) {
 function clip(text, max) {
   const s = String(text ?? '').replace(/\s+/g, ' ').trim();
   return s.length > max ? `${s.slice(0, max - 1)}…` : s;
+}
+
+/**
+ * 保留换行的截断：提示词里的记忆块是一行一条，用 `clip()` 会把整块压成一整段
+ * （`\s+` 连换行一起吃），既难读、也让「一条一条」的结构没了（2026-11-03 顺手修的）。
+ */
+function clipMultiline(text, max) {
+  const s = String(text ?? '').trim();
+  if (s.length <= max) return s;
+  return `${s.slice(0, Math.max(0, max - 1)).replace(/\n+$/, '')}…`;
 }
 
 /**
@@ -383,9 +414,12 @@ export function createLiveMemory({
           const cold = row.tier === 'cold';
           const body = cold ? (row.card || clip(row.text, 60)) : clip(row.text, lineChars);
           const from = row.scope && row.scope !== here && row.scope !== 'global' ? `（来源：${scopeLabel(row.scope)}）` : '';
-          return `- （${label}${cold ? '·索引' : ''}）${subject}${body}${from}`;
+          // 每条记忆都带日期：没日期的话「上周的事」和「刚才的事」在提示词里长得一模一样，
+          // 她就会把前天的话当成今天刚说的（2026-11-03 主人报「总把前几天的事记成今天」）。
+          const when = memoryWhenLabel(row.created_at ?? row.createdAt ?? row.updated_at ?? row.updatedAt);
+          return `- （${label}${cold ? '·索引' : ''}${when ? `·${when}` : ''}）${subject}${body}${from}`;
         });
-        return clip([head, ...lines].join('\n'), maxChars);
+        return clipMultiline([head, ...lines].join('\n'), maxChars);
       }, '');
     },
 

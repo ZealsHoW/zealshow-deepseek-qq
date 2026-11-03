@@ -65,6 +65,7 @@ import { autoIncludeBudget, autoIncludeProblems, autoIncludeSettings, describeAu
 import { createEvolve } from './qqb/persona/evolve.mjs';
 import { createIntervene } from './qqb/persona/intervene.mjs';
 import { createDirected } from './qqb/directed/direct.mjs';
+import { routeByAddressee as routeAddressee } from './qqb/directed/addressee.mjs';
 import { createModelClient } from './qqb/model/client.mjs';
 import { createToolbox } from './qqb/engine/toolbox.mjs';
 import { createAgentLoop, stripTextToolCalls } from './qqb/engine/loop.mjs';
@@ -836,6 +837,12 @@ const ENGINE_RULES = [
   '【别把问话当差事】别人问「你还记得…吗」「我们说过什么」是在问你，不是让你去传话、也不是给你派活。先 `qq_memory_search` 查一下，再照实答：记得就说什么，记不清就说「我记不太清，是不是…」，别一口否认「我啥时候说过」。只有带「帮我 / 替我 / 你去」这种明确授权，才是让你去办。',
   '【报告别念原文】说过、发过什么，一句话带过就行（「我问过妈了」「歌发出去了」），别复述原文、别说「我跟X说的是：「…」」——那是工单回执，不是人说话。',
   '【别空口答应】别说「好，我记着了」「回头我跟X说一声」这种话：要么这一轮就办，要么直说办不了、不想办。',
+  // 2026-11-03 主人报两件：①「记不清日期，总把前几天的事记成今天」；②在妈妈的窗口里发
+  // 「爸，妈说她想你了，你回她一句呗」。①的病根是提示词里的旧内容没有时间戳（已加〔日期〕）；
+  // ②的病根是发送只认当前会话、不看开头叫的是谁（已在 sendReplyV2 里按称呼改投）。
+  // 这两条铁律是给她的另一半：看见日期就用对，开口叫谁就发到谁那儿。
+  '【先看日期再开口】聊天记录和记忆前面的〔今天 09:12〕〔11-01 19:34〕是那件事**真正发生的时间**，不是刚刚。说「刚才/今天」之前先对一下：那是昨天的就说昨天，是前几天的就说「前几天」或直接说日期。别把三天前的一句「想你爸了」说成「爸一晚上没回你」——时间一错，后面整段都跟着编。',
+  '【开口叫谁就发到谁那儿】你写在开头的那个人，就是这句话的收件人：「爸，…」是发给爸爸的，「妈，…」是发给妈妈的。你现在在谁的窗口，就说给谁听；要跟另一个人说，用 `qq_direct` 指名发过去，别在妈妈窗口里写「爸，…」。',
   // 2026-11-01：妈妈连着问三次「你跟爸说了吗」，她答「说了，我跟爸说你想他了」「我发完还盯着手机
   // 等爸回呢」——爸爸那边一条消息都没有（state/history/private_3482501440.jsonl 那段是空的，
   // state/tool-calls.jsonl 那一小时 0 条调用）。空口答应的成本很实在：妈妈以为话带到了，白等一晚。
@@ -7915,7 +7922,8 @@ async function main() {
             for (let i = 0; i < messages.length; i++) st.sendTimes.push(now);
             if (st.sendTimes.length > 500) st.sendTimes = st.sendTimes.slice(-500);
             const delays = computeGapsV2(messages, 'auto', undefined, undefined, sendCfg);
-            const sentMessages = await sendMessagesV2(key, messages, delays);
+            // 走 sendReplyV2：她开口叫的是别人时改投，别塞进眼前这个人的窗口（2026-11-03）。
+            const sentMessages = await sendReplyV2(key, messages, delays);
             recordSentMessagesV2(key, sentMessages);
             st.lastAiReplyAt = now;
             st.lastActionAt = now;
@@ -8067,7 +8075,7 @@ async function main() {
             actualReplyToMessageId = resolved.messageId;
           }
           try {
-            const sentMessages = await sendMessagesV2(key, messages, delays, actualReplyToMessageId, atUserId);
+            const sentMessages = await sendReplyV2(key, messages, delays, actualReplyToMessageId, atUserId);
             recordSentMessagesV2(key, sentMessages);
             st.lastAiReplyAt = now;
             st.lastActionAt = now;
@@ -10192,7 +10200,10 @@ async function main() {
               card: item.card ?? null,
               // 主动检索会连 L2 原话一起给（2026-10-30），标出来，免得把原话当提炼过的事实。
               memLevel: item.memLevel ?? item.mem_level ?? null,
-              where: people.label(item.scope)
+              where: people.label(item.scope),
+              // 这条是哪天的事：检索结果必须带日期，否则她讲起来会当成刚发生的
+              // （2026-11-03 主人报「总把前几天的事记成今天」）。
+              when: whenLabel(item.created_at ?? item.createdAt ?? item.updatedAt ?? item.updated_at, { withTime: false })
             }));
             sendJson({
               ok: true, key, query, scope: crossScope ? 'all' : scopeOf, crossScope,
@@ -13588,7 +13599,69 @@ ${memLines ? `\n记忆库里：\n${memLines}\n` : '\n记忆库最近没有新东
   startBrowseBehavior();
   // R8：把主发送链路与夜间状态挂给模块级助手 —— 回执与送达都要走正常发送校验
   //     （白名单/模式/额度/落盘补发），而不是绕过去自己发。
-  runtimeHooks.send = (key, texts) => sendMessagesV2(key, texts, [], null, null);
+  // ── 称呼 → 会话：她开口叫的是谁，就发到谁的窗口 ─────────────────────────────
+  //
+  // 2026-11-03 主人报：「给妈妈发『爸，妈说她想你了，你回她一句呗』」。
+  // 查 history：那句 09:00:30 和 11:00:31 都落在 private:3250968635（妈妈）里，
+  // 而 state/tool-calls.jsonl 那两小时没有任何发送工具记录 —— 不是工具发错，
+  // 是**引擎把这段文本当成「这一轮要说的话」直接发给了当前会话**：
+  // 发送路径只认 key，从不看她开头写的是谁。她在妈妈窗口里想着爸爸的事，
+  // 于是「写给爸爸的话」被塞进了妈妈的眼睛里。
+  //
+  // 规矩：私聊里发出去的一行，如果**开头就是另一个家里人的称呼**（爸/爸爸/妈/妈妈/主人…），
+  // 这一行就改投到那个人的私聊；当前会话里剩下的行照常发。群聊不动（群里叫妈很正常）。
+  function addresseeList() {
+    const out = [];
+    const push = (qq, names) => {
+      const s = String(qq ?? '').trim();
+      if (!s) return;
+      for (const n of names) {
+        const name = String(n ?? '').replace(/^[大小老]/, '').trim();
+        if (name && name.length <= 6 && !out.some((e) => e.name === name)) out.push({ qq: s.replace(/^0+(?=\d)/, ''), name });
+      }
+    };
+    const c = nightRitualCfg();
+    const labels = Array.isArray(c.parentLabels) && c.parentLabels.length ? c.parentLabels : ['爸爸', '妈妈'];
+    (Array.isArray(c.parents) ? c.parents : []).forEach((qq, i) => {
+      const label = String(labels[i] ?? '').trim();
+      // 「爸爸」和「爸」、「妈妈」和「妈」都要认；只是去掉开头的「大/小/老」。
+      push(qq, [label, label.replace(/^小|^老/, '')]);
+    });
+    push(cfg.ownerQQ, ['主人']);
+    try {
+      for (const e of people.entries()) {
+        const scope = String(e?.scope ?? '');
+        if (!scope.startsWith('private:')) continue;
+        push(scope.slice('private:'.length), [e.name]);
+      }
+    } catch { /* 人名簿没起来就算了 */ }
+    const allowed = new Set((cfg.allow?.private ?? []).map((q) => String(q).replace(/^0+(?=\d)/, '')));
+    return out.filter((e) => allowed.has(e.qq));
+  }
+
+  /** 拆一批要说的话：留在本会话的 + 该改投的（纯逻辑在 qqb/directed/addressee.mjs，可单测）。 */
+  function routeByAddressee(key, texts) {
+    return routeAddressee({ key, texts, table: addresseeList() });
+  }
+
+  /** 发一段「回复」：先按称呼拆一遍，该改投的改投，剩下的照常发给本会话。 */
+  async function sendReplyV2(key, messages, delays, replyToMessageId, atUserId = null) {
+    const list = Array.isArray(messages) ? messages : [messages];
+    const { keep, moves } = routeByAddressee(key, list);
+    for (const mv of moves) {
+      log('发言改投', `${key} 这行开口叫的是「${mv.name}」，改投 private:${mv.qq}：${mv.text.slice(0, 40)}`);
+      // 改投走同一条发送链路（限额/沉默期/落盘补发都照旧），不是绕过它自己发。
+      try {
+        await sendMessagesV2(`private:${mv.qq}`, [mv.text], [], null, null);
+      } catch (err) {
+        log('发言改投失败', `${mv.text.slice(0, 30)}：${err?.message ?? err}`);
+      }
+    }
+    if (!keep.length) return [];
+    return sendMessagesV2(key, keep, delays, replyToMessageId, atUserId);
+  }
+
+  runtimeHooks.send = (key, texts) => sendReplyV2(key, texts, [], null, null);
   // 托付入队后追一刀：到点还没定夺（pending）就再叫醒她一次，把「要么动手、要么说做不了」摆面前。
   // 2026-10-27 12:49「给妈妈发首歌」就是只在文字里答应了、工具没调，托付挂到 13:23 过期，
   // 14:17 主动机会时她还编了句「妈妈回我好听」。间隔可用 socialV2.directed.followUpMs 调。
@@ -15197,7 +15270,11 @@ ${memLines ? `\n记忆库里：\n${memLines}\n` : '\n记忆库最近没有新东
     const recentText = allRecent.slice(-8).map((m) => {
       const who = m?.isSelf ? '你' : String(m?.sender || '对方');
       const body = String(m?.text || m?.plain || '').replace(/\s+/g, ' ').trim().slice(0, 120);
-      return body ? `${who}：${body}` : '';
+      // 每条都带时间是硬要求：不带时间，三天前的一句「想你爸了」看起来跟刚说的一样，
+      // 她就会接着演「爸一晚上没回你」「都一上午了」（2026-11-03 主人报的就是这个）。
+      const when = whenLabel(m?.at ?? m?.time ?? m?.t);
+      if (!body) return '';
+      return when ? `〔${when}〕${who}：${body}` : `${who}：${body}`;
     }).filter(Boolean).join('\n');
     const lastMsg = [...allRecent].reverse().find((m) => m && !m.isSelf);
     const statusBits = [`未读 ${unread} 条`];
@@ -15284,6 +15361,37 @@ ${memLines ? `\n记忆库里：\n${memLines}\n` : '\n记忆库最近没有新东
    * 记下家人的号码（git 历史删不掉，2026-10-23 发布前扫描抓到）。现在人格卡只说「对得上号的才是爸妈」，
    * 具体号码在这里按会话补进提示词 —— 号码只活在 config.json（不入库），她的判断力一点没少。
    */
+  /**
+   * 「这件事是哪天的」——她分不清日期，不是记性差，是**提示词里根本没有日期**。
+   *
+   * 2026-11-03 主人报：「她会记不清日期，总是将前几天的事记成今天」。
+   * 查下来：`【最近的聊天记录】` 每行只有 `对方：想你爸了`，没有时间；记忆块每行也没有时间。
+   * 妈妈 11-01 19:34 说的「想你爸了」，到 11-03 她还在说「爸一晚上没回你」「都一上午了」，
+   * 接着在妈妈的窗口里发「爸，妈说她想你了，你回她一句呗」—— 时间和对象全错位。
+   *
+   * 所以：**凡是把旧内容贴进提示词，都得带日期**。今天的写「今天 09:12」，昨天的写「昨天 19:34」，
+   * 更早的写「11-01 19:34」，跨年的写全「2025-12-31 19:34」。
+   */
+  function whenLabel(ts, { withTime = true, now = Date.now() } = {}) {
+    const t = Number(ts);
+    if (!Number.isFinite(t) || t <= 0) return '';
+    const d = new Date(t);
+    const n = new Date(now);
+    const dayStart = (x) => new Date(x.getFullYear(), x.getMonth(), x.getDate()).getTime();
+    const diffDays = Math.round((dayStart(n) - dayStart(d)) / 86400000);
+    const hhmm = `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+    const md = `${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+    let day;
+    if (diffDays === 0) day = '今天';
+    else if (diffDays === 1) day = '昨天';
+    else if (diffDays === 2) day = '前天';
+    else if (d.getFullYear() === n.getFullYear()) day = md;
+    else day = `${d.getFullYear()}-${md}`;
+    // 未来时间（时钟歪了、排期类的记录）别写成「-1 天前」，直接给日期。
+    if (diffDays < 0) day = d.getFullYear() === n.getFullYear() ? md : `${d.getFullYear()}-${md}`;
+    return withTime ? `${day} ${hhmm}` : day;
+  }
+
   function familyIdentityTextV2() {
     const c = nightRitualCfg();
     const labels = Array.isArray(c.parentLabels) && c.parentLabels.length ? c.parentLabels : ['爸爸', '妈妈'];

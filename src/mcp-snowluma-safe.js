@@ -1121,7 +1121,9 @@ server.tool(
         // 冷记忆只有一句话索引，细节要再调 qq_memory_detail 拉原文。
         const body = it.tier === 'cold' && it.card ? `${it.card}（索引）` : it.text;
         const orig = it.memLevel === 'L2' ? '（原话）' : '';
-        return `${i + 1}. [${it.kind}] ${how}${body}${orig}${it.subject ? `（${it.subject}）` : ''}${it.where ? `（来自：${it.where}）` : ''}${it.id ? `〔id:${it.id}〕` : ''}`;
+        // 日期必须出现在每一条上：没有日期，上周的事会被她当成刚发生的（2026-11-03）。
+        const when = it.when ? `〔${it.when}〕` : '';
+        return `${i + 1}. [${it.kind}] ${how}${when}${body}${orig}${it.subject ? `（${it.subject}）` : ''}${it.where ? `（来自：${it.where}）` : ''}${it.id ? `〔id:${it.id}〕` : ''}`;
       });
       const scopeHint = data?.crossScope ? '（跨会话查的，带来源）' : '';
       return { content: [{ type: 'text', text: `记忆库里关于「${query}」的有 ${items.length} 条${scopeHint}：\n${lines.join('\n')}` }] };

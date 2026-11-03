@@ -139,6 +139,11 @@ export const MODULES = {
     files: ['src/qqb/directed/direct.mjs'],
     note: 'R8 定向投递：主人托付进独立队列、她定夺（可拒绝/改口）、发送后回执原窗口、主人可撤回、全程留档',
   },
+  'directed/addressee': {
+    version: '0.1.0',
+    files: ['src/qqb/directed/addressee.mjs'],
+    note: '称呼 → 收件人：私聊里「爸，…」就发给爸爸（当前窗口是妈妈时改投），群聊不动。2026-11-03 主人报「写给爸爸的话发进了妈妈窗口」',
+  },
   'media/providers': {
     version: '0.1.0',
     files: ['src/qqb/media/providers.mjs'],
