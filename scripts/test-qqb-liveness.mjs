@@ -14,7 +14,7 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 const bridge = fs.readFileSync(path.join(here, '..', 'src', 'bridge.js'), 'utf8');
 
 test('接线：引擎行为规则里有「只说一句 / 说完停一下 / 不用问可不可以 / 念头 / 记忆留感受」', () => {
-  for (const rule of ['【只说一句】', '【说完停一下】', '【不用问可不可以】', '【念头是你自己的】', '【记忆要留感受】']) {
+  for (const rule of ['【一次只说一句】', '【说完停一下】', '【不用问可不可以】', '【念头是你自己的】', '【记忆要留感受】']) {
     assert.ok(bridge.includes(rule), `ENGINE_RULES 里缺少 ${rule}`);
   }
 });

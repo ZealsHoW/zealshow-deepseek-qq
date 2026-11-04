@@ -1858,6 +1858,17 @@ node scripts/memory-backfill-occurred.mjs --apply    # 真写
 
 回归：`node scripts/test-qqb-reply-style.mjs`（4 组：分句/截句/预算/接线，含「0.3 是边界不算累」「字符串 0.95 也认」）；全量 `node scripts/test-audit.mjs` → 81/81。
 
+**上线时又发现两件事（同一天补的）**
+
+1. **旧规则要删干净**：`ENGINE_RULES` 里原来已有【只说一句】和「先在心里停大约一秒」。同一件事两份说法会打架——旧那份让她自己想象停顿（于是她写「嗯……那个……」），新那份说停顿由桥接做。删掉旧的，`scripts/test-qqb-reply-style.mjs` 加断言：`bridge.includes('【只说一句】')` 必须为假、`先在心里停大约一秒` 必须不存在。
+2. **`state/bridge.lock` 里的 PID 不一定是真的监听者**。本次踩到：锁里写 87652，`Stop-Process` 也成功了，但 3100 端口仍被 **PID 52912（前一天 22:15 启动）** 占着 —— 新实例绑不上端口、旧实例继续写锁，表现就是「提示词里怎么没有新加的规则」。排查三步：
+   ```powershell
+   netstat -ano | Select-String ':3100\s+.*LISTENING'       # 看真正在听的是谁
+   pwsh -NoProfile -Command "Get-Process -Id <pid> | Select StartTime"   # 核对启动时间对不对
+   Get-Content qq-bridge\state\bridge.lock                   # 和上面比，不一致就说明锁是旧的
+   ```
+   杀真正监听者 → `schtasks /run /tn "\qq-bridge-watchdog"`（**单跑一次只检查不重启**，要等 60~70 秒再跑一次）→ 复查 3100 的 PID 与 `engine-prompt` 里的规则。本次最终 PID 68076（12:54:42），回读 `sysLen=15864`、【一次只说一句】×1、【说完停一下】×1、【只说一句】×0。
+
 ### 记得住、忘得对、按意思找得回：遗忘曲线 + 向量索引（2026-10-25）
 
 主人的要求是两条合起来的效果：**记忆要像人一样会淡**（艾宾浩斯 + 情绪挂钩权重，淡的沉到底、重的摆最前），**又要按意思找得回来**（RAG 向量检索）。拆成三层，各管一件事：
