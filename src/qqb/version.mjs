@@ -124,6 +124,11 @@ export const MODULES = {
     files: ['src/qqb/persona/thoughts.mjs'],
     note: 'R9 念头系统（活人化）：她自己的小想法（没回的话/兴趣/记忆/身体感觉/随机），每条带 urge；攒够 due() 才主动开口，有冷却、超 6 小时作废，做过就标记不再重复；状态落 state/thoughts.json',
   },
+  'persona/reply-style': {
+    version: '0.1.0',
+    files: ['src/qqb/persona/reply-style.mjs'],
+    note: 'R9 说话节奏（活人化，2026-11-04 主人要求）：一次只说一句（发之前截成第一句，多余句子丢弃并记日志）、说完停一秒（thinkMs 基础 1000ms，精神值低于 tiredBelow 时随机多停）、精神值联动 maxTokens（<20% 128 / <35% 192 / <55% 320 / <75% 448，否则 512）与字数上限（复用 spirit.replyBudget）；纯函数 + 注入 rand 可测，配置在 socialV2.replyStyle',
+  },
   'persona/evolve': {
     version: '0.1.4',
     files: ['src/qqb/persona/evolve.mjs'],

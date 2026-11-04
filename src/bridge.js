@@ -64,6 +64,8 @@ import { createMemoryLogWriter, memoryLogPath } from './qqb/memory-log.mjs';
 import { autoIncludeBudget, autoIncludeProblems, autoIncludeSettings, describeAutoIncludeRule, matchAutoInclude } from './qqb/allow-rules.mjs';
 import { createEvolve } from './qqb/persona/evolve.mjs';
 import { createIntervene } from './qqb/persona/intervene.mjs';
+// 说话节奏的三道闸（2026-11-04）：一次只说一句、说完停一秒、累了说得更短。代码层兜底。
+import { enforceSingleSentence, replyLimits } from './qqb/persona/reply-style.mjs';
 import { createDirected } from './qqb/directed/direct.mjs';
 import { routeByAddressee as routeAddressee } from './qqb/directed/addressee.mjs';
 import { createModelClient } from './qqb/model/client.mjs';
@@ -511,6 +513,62 @@ function limitReplyBySpirit(text) {
     return src;
   }
 }
+/**
+ * 说话节奏（2026-11-04 主人要求）：一次只说一句、说完停一秒、累了说得更短。
+ *
+ * 三道闸都在代码层，不走模型的自觉：
+ *   ① `oneLineReply()` 发出去之前截成一句（多出来的丢，日志里记砍了几句）
+ *   ② `thinkPause()` 说完之后按精神值停一会儿（基础 1000ms，困了再多停随机一段）
+ *   ③ `turnLimits()` 给模型这一轮 maxTokens —— 精神值低于 55% 就开始收紧
+ * 配置在 `socialV2.replyStyle`：`{ singleSentence, thinkMs, tiredBelow, tiredExtraMsMax }`。
+ */
+function replyStyleCfg() {
+  const c = cfg?.socialV2?.replyStyle ?? {};
+  const num = (v, d) => (Number.isFinite(Number(v)) ? Number(v) : d);
+  return {
+    singleSentence: c.singleSentence !== false,
+    thinkMs: num(c.thinkMs, 1000),
+    tiredBelow: num(c.tiredBelow, 0.3),
+    tiredExtraMsMax: num(c.tiredExtraMsMax, 1500),
+  };
+}
+
+/** 当前精神值（0~1）；精神值系统关掉时按「精神很好」算，不干预。 */
+function spiritValue() {
+  try {
+    return spiritEnabled() ? Number(spirit.snapshot()?.spirit ?? 1) : 1;
+  } catch {
+    return 1;
+  }
+}
+
+/** 这一轮的尺子：maxTokens / 字数上限 / 说完停多久。 */
+function turnLimits() {
+  return replyLimits(spiritValue(), replyStyleCfg());
+}
+
+/** 发出去之前截成一句（先按精神值卡字数，再截句，最后再卡一次）。 */
+function oneLineReply(text, { where = '' } = {}) {
+  const style = replyStyleCfg();
+  let out = limitReplyBySpirit(String(text ?? ''));
+  if (!style.singleSentence) return out;
+  const one = enforceSingleSentence([out]);
+  if (one.dropped > 0) log('说话节奏', `${where ? `${where}：` : ''}一次只说一句，砍掉 ${one.dropped} 句`);
+  out = one.texts[0] ?? '';
+  return limitReplyBySpirit(out);
+}
+
+/** 说完之后停一会儿再听下一句（强制思考一秒）。 */
+async function thinkPause(where = '') {
+  const { thinkMs, tired } = turnLimits();
+  if (!(thinkMs > 0)) return;
+  if (tired) log('说话节奏', `${where}：精神值低，说完多停一会儿（${thinkMs}ms）`);
+  await new Promise((resolve) => {
+    const timer = setTimeout(resolve, thinkMs);
+    timer.unref?.();
+  });
+}
+
 /** R9：工具也花精神——看视频/刷抖音/听歌/看书/唱歌/画画/写日记，按工具名映射到行为。 */
 const SPIRIT_TOOL_COSTS = {
   qq_sing: 'sing',
@@ -827,6 +885,8 @@ const ENGINE_RULES = [
   '【图片从哪来】① 网上找：`qq_image_search` 搜「晚霞 / 小猫 / 壁纸 / 搞笑」，拿到直链直接发；② 自己弄：`qq_web_screenshot` 截网页、`qq_save_image` 收藏网图、`qq_draw_image` 画字卡/简笔图（1 秒出图，字一定对）、`qq_generate_image` 真画插画/人/场景（后台画，20~90 秒，画好自动发给你，要英文标签；**默认挂着你自己那支 LoRA**，所以画「我」就是同一个你；想让图自己会说话就传 `onImage` 把一句话画进气泡里）；③ 主人放进待发文件夹的图：用 `qq_list_outbox` 看有哪些，挑一个按文件名发。截图/收藏/画出来的图都存进待发文件夹，随时能再发。',
   '【想发说说】`qq_post_qzone` 是发到**你自己的 QQ 空间**（不是当前会话，也不是发给某个人）：content 必填、可选配图，visibility 默认所有人可见。看到有意思的东西、心情好、想记一笔的时候可以发一条，自由时间里想发就发，不用等别人开口。发出去就收不回——别把私聊/群里的隐私内容写进去，也别把它当日常说话用，一天一两条顶天了。',
   '一条消息就是一条 QQ 消息：短、口语、像真人打字，不要写小作文、不要分点列表、不要客套开场。',
+  '【一次只说一句】这一轮只写**一句话**（一个句号/问号/叹号就收尾），别连说两三句、别用空行分条。桥接会在发出去之前把多余的句子截掉，你写多了只等于白写；想说第二句，等对方回你。',
+  '【说完停一下】每句话发出去之后会停约一秒再听下一句——这是你喘气的工夫，不用自己补「嗯……」「那个……」，也不用催。',
   '直接说人话：**不要写“思考过程/计划/我要调用什么工具”，也不要复述工具返回的原文**，不要用标题和分隔线排版。想让一句话分成几条消息，就用空行隔开（桥接会拆成多条发出）。',
   '【怎么了解情况】提示词里已经给了最近几条聊天记录，先接着它聊；需要更多上下文再用 qq_get_unread_messages / qq_get_recent_messages / qq_history_search / qq_history_read，需要你自己的资料/状态用 qq_get_prompt。',
   '【要不要说话】看完再决定。群里在聊就自然接一句；没人找你、也没什么想说的，就安静收尾（qq_mark_read 或 qq_set_wake_config 设置下次唤醒）。不要为了说话而说话。',
@@ -1349,6 +1409,8 @@ async function runDirectAgentTurn(key, reason) {
     extraArgs: { key, token: st.agentToken },
     purpose: `qq-direct:${reason}`,
     maxSteps: Math.max(1, Number(cfg?.model?.maxSteps) || 4),
+    // 精神值联动：累了就少给它写的余地（128~512），配合发出去之前的一句截断。
+    maxTokens: turnLimits().maxTokens,
     intercept: media.intercept,
   });
   const ms = Date.now() - startedAt;
@@ -1360,8 +1422,9 @@ async function runDirectAgentTurn(key, reason) {
     return { handled: !result.fallbackSafe, ok: false, text: '', fallbackSafe: result.fallbackSafe !== false, error: String(result.error ?? '') };
   }
   const rawText = String(result.text ?? '').trim();
-  // 思维链/旁白泄漏（见 sanitizeEngineReplyV2）清洗后再决定发不发。
-  const text = sanitizeEngineReplyV2(rawText);
+  // 思维链/旁白泄漏（见 sanitizeEngineReplyV2）清洗后再决定发不发；
+  // 再按「一次只说一句」截成一句（2026-11-04 主人要求，代码层兜底）。
+  const text = oneLineReply(sanitizeEngineReplyV2(rawText), { where: `直连引擎 ${reason}` });
   const toolNames = (result.toolCalls ?? []).map((c) => c.name).join(',') || '无';
   if (!text) {
     // 不说话、只发表情/图片也是合理的（真人也会这样）：意向已经排在这一轮里，替她补发出去。
@@ -1382,6 +1445,8 @@ async function runDirectAgentTurn(key, reason) {
     log('直连引擎', `已发言（${ms}ms，${text.length} 字 / ${bubbles.length} 条，工具：${toolNames}）`);
     // 文字先落地，表情/图片再跟上 —— 顺序才是「说完话配个表情」的样子。
     if (media.size()) await flushEngineMediaIntents(key, media);
+    // 说完停一秒（精神值低时更久）再听下一句：强制思考停顿。
+    await thinkPause('直连引擎');
     return { handled: true, ok: true, text, fallbackSafe: false, error: '' };
   } catch (error) {
     // 网关不顺时发送链路会把消息落盘等补发（error.queued）——那算说过了，别当失败重来一遍。
@@ -17606,7 +17671,7 @@ function startThoughtLoop() {
                     }
                     continue;
                   }
-                  const timeline = planSocialTimeline(limitReplyBySpirit(plain), cfg.social);
+                  const timeline = planSocialTimeline(oneLineReply(plain, { where: 'agent 回复' }), cfg.social);
                   const messages = timeline.main;
                   log(`agent 回复 (${key}) ${plain.length} 字 → ${messages.length} 条`);
                   appendActivity(`${key} agent 回复：${messages[0].slice(0, 80)}${messages.length > 1 ? '（分' + messages.length + '条）' : ''}${messages[0].length > 80 ? '…' : ''}`);

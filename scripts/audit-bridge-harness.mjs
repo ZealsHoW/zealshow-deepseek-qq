@@ -338,6 +338,20 @@ function routeAddressee({ key, texts, table = [] } = {}) {
 }
 
 /**
+ * 说话节奏的桩（2026-11-04「一次只说一句 / 说完停一秒」）：
+ * 截句按真规则的一半（只留第一条），但 `thinkMs` 给 0 —— 夹具不该为等一秒变慢；
+ * 分句/预算的细节由 scripts/test-qqb-reply-style.mjs 单测。
+ */
+function enforceSingleSentence(texts) {
+  const list = (Array.isArray(texts) ? texts : [texts]).map((t) => String(t ?? '')).filter(Boolean);
+  return { texts: list.length ? [list[0]] : [], dropped: Math.max(0, list.length - 1) };
+}
+
+function replyLimits() {
+  return { spirit: 1, maxTokens: 512, maxChars: 120, thinkMs: 0, tired: false };
+}
+
+/**
  * F 直连引擎的惰性桩：夹具里不打真模型、不连常驻 MCP 服务。
  * 真行为（工具箱、回路、fallbackSafe）由 scripts/test-qqb-engine.mjs 覆盖。
  */
@@ -581,6 +595,8 @@ export async function bridgeHarness({ config = {}, savedState, files = {}, globa
     createDirected,
     // 称呼拆批器：桩 = 原样放行（见上面 routeAddressee 的注释）。
     routeAddressee,
+    // 说话节奏：桩 = 只留第一条 + 不停顿（见上面 enforceSingleSentence / replyLimits）。
+    enforceSingleSentence, replyLimits,
     // OneBot 客户端桩：形状按 R4 之后的新契约（queued 显式标记），但**仍然经过 fakeFetch**，
     // 这样「到底发出去没有、发了哪些段」还能被 calls.http 断言（R1/R15 依赖这条）。
     // 需要模拟网关永久失败时，用 globals 覆盖这个工厂即可。

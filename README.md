@@ -1836,6 +1836,28 @@ node scripts/memory-backfill-occurred.mjs --apply    # 真写
 
 回归：`node scripts/test-qqb-memory-tiers.mjs`（8 项，含 `occurredFromEvidence` 各式输入与本条链路的静态接线断言）+ `node scripts/test-qqb-addressee.mjs`（37 项）；全量 `node scripts/test-audit.mjs` → 80/80。
 
+### 一句一句说、说完停一秒、累了更短（2026-11-04）
+
+主人提的三条要求都是「不许模型自己商量」的硬约束，所以都做在代码层，提示词只负责让模型配合、别白写。
+
+| 闸 | 在哪 | 行为 |
+| --- | --- | --- |
+| 一次只说一句 | `src/qqb/persona/reply-style.mjs` 的 `enforceSingleSentence()`，在 `oneLineReply()` 里被直连引擎与旧 agent 路径调用 | 发出去之前把整段切成句子，**只留第一句**，多出来的丢并记日志（`说话节奏：直连引擎 replyCheck：一次只说一句，砍掉 2 句`） |
+| 说完停一秒 | `thinkPause()`，`runDirectAgentTurn` 在文字/媒体都发完后调用 | `await` 停顿后再听下一句；基础 1000ms，精神值低于 30% 时随机再多停 0~1500ms |
+| 精神值联动 | `replyLimits(spirit)`，`runDirectAgentTurn` 把它算出的 `maxTokens` 传给引擎 | 精神 <20% → 128 tokens，<35% → 192，<55% → 320，<75% → 448，否则 512；字数上限直接复用 `spirit.replyBudget()`（<20% 24 字…满精神 120 字），两处口径不打架 |
+
+配置 `socialV2.replyStyle`（`config.json`，热改要重启桥接）：
+
+```json
+{ "singleSentence": true, "thinkMs": 1000, "tiredBelow": 0.3, "tiredExtraMsMax": 1500 }
+```
+
+`thinkMs: 0` 是「整条停顿关掉」，连困了要多停的那段也不加（测试锁了这个语义）。提示词里加了【一次只说一句】【说完停一下】两条，让她别把「嗯……那个……」当停顿写出来。
+
+> 为什么先卡字数再截句、截完再卡一次：`limitReplyBySpirit()` 只按字数硬切，切开的地方可能正好在第二句中间；先截句能保证扔的是**完整的多余句子**，而不是半句。
+
+回归：`node scripts/test-qqb-reply-style.mjs`（4 组：分句/截句/预算/接线，含「0.3 是边界不算累」「字符串 0.95 也认」）；全量 `node scripts/test-audit.mjs` → 81/81。
+
 ### 记得住、忘得对、按意思找得回：遗忘曲线 + 向量索引（2026-10-25）
 
 主人的要求是两条合起来的效果：**记忆要像人一样会淡**（艾宾浩斯 + 情绪挂钩权重，淡的沉到底、重的摆最前），**又要按意思找得回来**（RAG 向量检索）。拆成三层，各管一件事：

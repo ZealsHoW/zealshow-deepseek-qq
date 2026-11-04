@@ -143,6 +143,8 @@ const tests = [
   'test-qqb-media-rhythm.mjs',
   // 日期标签 + 称呼改投（2026-11-03：总把前几天的事记成今天；写给爸爸的话发进妈妈窗口）。
   'test-qqb-addressee.mjs',
+  // 说话节奏：一次只说一句 / 说完停一秒 / 精神值联动（2026-11-04）
+  'test-qqb-reply-style.mjs',
   // 去重脚本：记忆库与人设特征的近重复合并（2026-11-03）
   'test-qqb-dedupe.mjs',
   // 图配文：样式归一、HTML 转义、底图压缩口径、画完先叠字再发的接线。

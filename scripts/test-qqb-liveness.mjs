@@ -42,7 +42,9 @@ test('接线：精神值进了提示词，并且会硬锁回复字数', () => {
   assert.ok(bridge.includes('function spiritSummary('), '缺少 spiritSummary');
   assert.ok(bridge.includes('spiritSummary(),'), '提示词里没有精神值那一段');
   assert.ok(bridge.includes('thoughtsText(),'), '提示词里没有念头那一段');
-  assert.ok(bridge.includes('limitReplyBySpirit(plain)'), '回复没有按精神值截断');
+  // 2026-11-04 起这条闸由 oneLineReply 统一盖（它内部先调 limitReplyBySpirit，再截成一句）
+  assert.ok(bridge.includes('oneLineReply(plain'), '回复没有按精神值截断');
+  assert.ok(bridge.includes('limitReplyBySpirit(String(text'), 'oneLineReply 里仍要按精神值卡字数');
   assert.ok(bridge.includes('function limitReplyBySpirit('), '缺少 limitReplyBySpirit');
   // 正常/DSH 两条提示词路线都要有（以前踩过「只改一边」）
   const spiritUses = bridge.match(/spiritSummary\(\),/g) || [];

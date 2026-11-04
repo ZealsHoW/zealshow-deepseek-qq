@@ -142,6 +142,7 @@
     "test:qqb-color": "node scripts/test-qqb-color.mjs",
     "test:qqb-ipa": "node scripts/test-qqb-ipa.mjs",
     "test:qqb-addressee": "node scripts/test-qqb-addressee.mjs",
+    "test:qqb-reply-style": "node scripts/test-qqb-reply-style.mjs",
     "test:qqb-dedupe": "node scripts/test-qqb-dedupe.mjs"
   },
   "dependencies": {
